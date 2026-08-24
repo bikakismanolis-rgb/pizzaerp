@@ -686,5 +686,7 @@ revoke execute on function public.post_document(uuid) from public, anon;
 revoke execute on function public.unpost_document(uuid) from public, anon;
 revoke execute on function public.explode_bom(uuid) from public, anon;
 revoke execute on function public.item_on_hand(uuid,date) from public, anon;
+revoke execute on function public.item_price_for(uuid,uuid) from public, anon;
+grant execute on function public.item_price_for(uuid,uuid) to authenticated;
 grant execute on function public.create_company(text,text), public.post_document(uuid), public.unpost_document(uuid),
   public.explode_bom(uuid), public.item_on_hand(uuid,date), public.is_member(uuid), public.is_owner(uuid) to authenticated;

@@ -116,6 +116,35 @@ create trigger partner_updated_at before update on public.partner
   for each row execute function public.set_updated_at();
 
 -- ---------------------------------------------------------------------
+-- Τιμοκατάλογος ανά πελάτη (κάθε ξενοδοχείο έχει τις δικές του τιμές).
+-- Αν δεν υπάρχει γραμμή, ισχύει το item.sale_price.
+-- ---------------------------------------------------------------------
+create table public.partner_price (
+  id          uuid primary key default gen_random_uuid(),
+  company_id  uuid not null references public.company(id) on delete cascade,
+  partner_id  uuid not null references public.partner(id) on delete cascade,
+  item_id     uuid not null references public.item(id) on delete cascade,
+  price       numeric(12,4) not null check (price >= 0),
+  updated_at  timestamptz not null default now(),
+  unique (partner_id, item_id)
+);
+create index on public.partner_price (company_id, partner_id);
+create trigger partner_price_updated_at before update on public.partner_price
+  for each row execute function public.set_updated_at();
+
+-- Τιμή είδους για συγκεκριμένο πελάτη (ή γενική τιμή)
+create or replace function public.item_price_for(p_item uuid, p_partner uuid default null)
+returns numeric
+language sql stable
+set search_path = public
+as $$
+  select coalesce(
+    (select pp.price from public.partner_price pp where pp.item_id = p_item and pp.partner_id = p_partner),
+    (select i.sale_price from public.item i where i.id = p_item)
+  );
+$$;
+
+-- ---------------------------------------------------------------------
 -- Συνταγές (BOM)
 -- ---------------------------------------------------------------------
 create table public.bom (
@@ -355,6 +384,7 @@ alter table public.company        enable row level security;
 alter table public.company_member enable row level security;
 alter table public.item           enable row level security;
 alter table public.partner        enable row level security;
+alter table public.partner_price  enable row level security;
 alter table public.bom            enable row level security;
 alter table public.bom_line       enable row level security;
 alter table public.doc_counter    enable row level security;
@@ -375,6 +405,7 @@ create policy member_delete on public.company_member for delete to authenticated
 -- βασικά αρχεία: πλήρης πρόσβαση στα μέλη
 create policy item_all     on public.item     for all to authenticated using (public.is_member(company_id)) with check (public.is_member(company_id));
 create policy partner_all  on public.partner  for all to authenticated using (public.is_member(company_id)) with check (public.is_member(company_id));
+create policy partner_price_all on public.partner_price for all to authenticated using (public.is_member(company_id)) with check (public.is_member(company_id));
 create policy bom_all      on public.bom      for all to authenticated using (public.is_member(company_id)) with check (public.is_member(company_id));
 create policy bom_line_all on public.bom_line for all to authenticated using (public.is_member(company_id)) with check (public.is_member(company_id));
 

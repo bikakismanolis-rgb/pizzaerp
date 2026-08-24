@@ -70,6 +70,13 @@ begin
   insert into public.partner (company_id, code, name, is_customer) values (c, 'C-001', 'Ξενοδοχείο Χ', true) returning id into hotel;
   insert into public.partner (company_id, code, name, is_customer) values (c, 'C-002', 'efood', true) returning id into efood;
 
+  -- τιμοκατάλογος ανά πελάτη
+  insert into public.partner_price (company_id, partner_id, item_id, price) values (c, hotel, special, 4.20);
+  if public.item_price_for(special, hotel) <> 4.20 then raise exception 'ΑΠΟΤΥΧΙΑ τιμή πελάτη'; end if;
+  if public.item_price_for(special, efood) <> 4.50 then raise exception 'ΑΠΟΤΥΧΙΑ γενική τιμή'; end if;
+  if public.item_price_for(special) <> 4.50 then raise exception 'ΑΠΟΤΥΧΙΑ γενική τιμή χωρίς πελάτη'; end if;
+  raise notice 'OK τιμοκατάλογος πελάτη: ξενοδοχείο %, γενική %', public.item_price_for(special, hotel), public.item_price_for(special);
+
   -- Αγορά 1 (μύλος), 1/8
   insert into public.doc (company_id, doc_type, doc_date, partner_id, ref_no) values (c, 'purchase', '2026-08-01', mill, 'ΤΙΜ-1001') returning id into d;
   insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values
