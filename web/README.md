@@ -13,6 +13,10 @@ VITE_SUPABASE_ANON_KEY=sb_publishable_...
 
 Το publishable/anon key είναι σχεδιασμένο να είναι δημόσιο (η ασφάλεια γίνεται με RLS στη βάση).
 
+## Απαιτήσεις
+
+Node 18 ή νεότερο (δοκιμασμένο σε 20.15 και 22). Το toolchain είναι Vite 5 + Tailwind 3 + React 18.
+
 ## Τοπική εκτέλεση
 
 ```
@@ -20,6 +24,8 @@ cd web
 npm install
 npm run dev
 ```
+
+Αν είχες τρέξει προηγούμενη έκδοση, σβήσε πρώτα `node_modules` και `package-lock.json` και ξανακάνε `npm install`.
 
 Άνοιξε http://localhost:5173. Πρώτη φορά: κάνε εγγραφή με email/κωδικό, μετά δημιούργησε την επιχείρηση.
 
