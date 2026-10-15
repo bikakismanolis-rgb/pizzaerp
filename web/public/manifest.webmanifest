@@ -1,0 +1,24 @@
+{
+  "name": "Pizza ERP",
+  "short_name": "Πιτσαρία",
+  "description": "Αποθήκη, πωλήσεις και κοστολόγηση πιτσαρίας. «Πες το»: καταχώρηση με φωνή.",
+  "lang": "el",
+  "dir": "ltr",
+  "id": "/voice",
+  "start_url": "/voice",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f5f5f4",
+  "theme_color": "#b91c1c",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Πες το", "url": "/voice", "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }] },
+    { "name": "Πωλήσεις ημέρας", "url": "/daily-sales", "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }] }
+  ]
+}

@@ -58,7 +58,7 @@ export function Items() {
                   <td>{i.unit}</td>
                   <td className="num">{i.item_type === 'finished' ? fmtMoney(i.sale_price) : ''}</td>
                   <td className="num">{fmtCost(i.avg_cost)}</td>
-                  <td>{i.make_to_order ? 'Ναι' : ''}</td>
+                  <td>{i.make_to_order ? (i.item_type === 'semi' ? 'Αυτόματα' : 'Ναι') : ''}</td>
                 </tr>
               ))}
             </tbody>

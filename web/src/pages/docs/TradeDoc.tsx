@@ -102,6 +102,11 @@ export function TradeDoc({ docType }: { docType: DocType }) {
       onDelete={ed.remove}
     >
       <ErrorBox text={ed.error} />
+      {doc?.is_running && !posted && (
+        <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
+          Πωλήσεις ημέρας σε εξέλιξη: γεμίζουν από τις «Πωλήσεις ημέρας» και το «Πες το». Κλείνουν με «Κλείσιμο ημέρας» ή αυτόματα την επόμενη μέρα.
+        </div>
+      )}
       <div className="card p-4 mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Field label="Ημερομηνία"><input type="date" className="input" value={date} disabled={posted} onChange={(e) => setDate(e.target.value)} /></Field>
         <Field label={isSale ? 'Πελάτης' : 'Προμηθευτής'} className={isSale ? '' : 'lg:col-span-2'}>
@@ -111,7 +116,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
         {isSale && (
           <Field label="Κανάλι">
             <select className="input" value={channel ?? ''} disabled={posted} onChange={(e) => setChannel(e.target.value as Doc['channel'])}>
-              {(['wholesale', 'phone', 'efood', 'store'] as const).map((c) => <option key={c} value={c}>{CHANNEL_LABEL[c]}</option>)}
+              {(['wholesale', 'efood', 'wolt', 'box', 'phone', 'store'] as const).map((c) => <option key={c} value={c}>{CHANNEL_LABEL[c]}</option>)}
             </select>
           </Field>
         )}

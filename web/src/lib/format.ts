@@ -42,3 +42,15 @@ export function round(v: number, dec = 2): number {
   const f = Math.pow(10, dec)
   return Math.round((v + Number.EPSILON) * f) / f
 }
+
+/** "μαργαρίτα σκέτη, μαργαρ" → ['μαργαρίτα σκέτη', 'μαργαρ'] (χωρίς διπλά) */
+export function parseAliases(text: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of text.split(/[,;\n]/)) {
+    const a = raw.trim().replace(/\s+/g, ' ')
+    const k = a.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    if (a && !seen.has(k)) { seen.add(k); out.push(a) }
+  }
+  return out
+}

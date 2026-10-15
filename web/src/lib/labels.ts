@@ -1,4 +1,5 @@
 import type { Channel, DocType, ItemType } from './types'
+import type { TallyChannel } from './voice/types'
 
 export const ITEM_TYPE_LABEL: Record<ItemType, string> = {
   raw: 'Πρώτη ύλη',
@@ -47,8 +48,11 @@ export const CHANNEL_LABEL: Record<Channel, string> = {
   wolt: 'Wolt',
   box: 'box',
   phone: 'Τηλέφωνο',
-  store: 'Κατάστημα',
+  store: 'Μαγαζί',
 }
+
+/** Κανάλια λιανικής (μετρητής ημέρας), με τη σειρά που εμφανίζονται */
+export const TALLY_CHANNELS: TallyChannel[] = ['efood', 'wolt', 'box', 'phone', 'store']
 
 export const MOVE_TYPE_LABEL: Record<string, string> = {
   purchase_in: 'Αγορά',

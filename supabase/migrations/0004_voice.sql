@@ -1,0 +1,529 @@
+-- =====================================================================
+-- Pizza ERP - 0004 voice ("Πες το")
+-- Άλλα ονόματα (aliases), κανάλια wolt/box, ανοιχτά πρόχειρα (μετρητής
+-- ημέρας, απογραφή σε εξέλιξη), αυτόματο ζυμάρι (backflush δύο επιπέδων).
+-- Ξανατρέχει χωρίς σφάλμα (if not exists / create or replace).
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- Άλλα ονόματα: πώς λένε το είδος / τον συναλλασσόμενο στην πράξη
+-- ---------------------------------------------------------------------
+alter table public.item    add column if not exists aliases text[] not null default '{}';
+alter table public.partner add column if not exists aliases text[] not null default '{}';
+
+-- ---------------------------------------------------------------------
+-- Ανοιχτό πρόχειρο που γεμίζει σταδιακά: πωλήσεις ημέρας ανά κανάλι,
+-- απογραφή σε εξέλιξη ανά ημέρα. Η καταχώρηση το "κλείνει".
+-- ---------------------------------------------------------------------
+alter table public.doc add column if not exists is_running boolean not null default false;
+
+alter table public.doc drop constraint if exists doc_running_check;
+alter table public.doc add constraint doc_running_check
+  check (not is_running or (status = 'draft' and doc_type in ('sale','stocktake')));
+
+-- ένα ανοιχτό πρόχειρο ανά εταιρεία / τύπο / ημέρα / κανάλι
+create unique index if not exists doc_one_running_draft
+  on public.doc (company_id, doc_type, doc_date, (coalesce(channel, '')))
+  where is_running and status = 'draft';
+
+-- ---------------------------------------------------------------------
+-- Κανάλια: + wolt, box. Ο αρχικός περιορισμός έχει αυτόματο όνομα, οπότε
+-- σβήνουμε κάθε check που αφορά μόνο τη στήλη channel και τον ξαναφτιάχνουμε.
+-- ---------------------------------------------------------------------
+do $$
+declare r record;
+begin
+  for r in
+    select c.conname
+      from pg_constraint c
+     where c.conrelid = 'public.doc'::regclass
+       and c.contype = 'c'
+       and c.conkey = array[(select a.attnum from pg_attribute a
+                              where a.attrelid = 'public.doc'::regclass and a.attname = 'channel')]::int2[]
+  loop
+    execute format('alter table public.doc drop constraint %I', r.conname);
+  end loop;
+end $$;
+alter table public.doc add constraint doc_channel_check
+  check (channel in ('wholesale','efood','wolt','box','phone','store'));
+
+-- ---------------------------------------------------------------------
+-- Παραγωγή: ημιέτοιμο "κατά παραγγελία" (π.χ. ζυμάρι) στις αναλώσεις
+-- -> πρώτα αυτόματη παραγωγή του, μετά ανάλωση. Πώληση λιανικής ->
+-- αυτόματη παραγωγή πίτσας -> αυτόματη παραγωγή ζυμαριού. Το ημιέτοιμο
+-- περιέχει μόνο πρώτες ύλες, άρα η αναδρομή σταματά εκεί.
+-- ---------------------------------------------------------------------
+create or replace function public._post_production(d public.doc)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  o        public.doc_line%rowtype;
+  l        record;
+  v_otype  text;
+  v_total  numeric := 0;
+  v_cost   numeric;
+  v_unit   numeric;
+  v_bom    uuid;
+  v_prod   uuid;
+begin
+  if (select count(*) from public.doc_line where doc_id = d.id and role = 'output') <> 1 then
+    raise exception 'Η παραγωγή χρειάζεται ακριβώς μία γραμμή προϊόντος';
+  end if;
+  select * into o from public.doc_line where doc_id = d.id and role = 'output';
+  if o.qty <= 0 then
+    raise exception 'Μη έγκυρη ποσότητα παραγωγής';
+  end if;
+  select item_type into v_otype from public.item where id = o.item_id;
+  if v_otype = 'raw' then
+    raise exception 'Δεν παράγονται πρώτες ύλες';
+  end if;
+
+  if not exists (select 1 from public.doc_line where doc_id = d.id and role = 'input') then
+    perform public._explode_bom(d.id);
+  end if;
+  perform public._assert_open(d.id);
+
+  -- έλεγχος όλων των αναλώσεων πριν από κάθε κίνηση / αυτόματη παραγωγή
+  for l in
+    select dl.qty, i.item_type as ctype, i.name as cname
+      from public.doc_line dl join public.item i on i.id = dl.item_id
+     where dl.doc_id = d.id and dl.role = 'input'
+     order by dl.line_no
+  loop
+    if l.qty <= 0 then
+      raise exception 'Μη έγκυρη ποσότητα ανάλωσης για "%"', l.cname;
+    end if;
+    if l.ctype = 'finished' or (v_otype = 'semi' and l.ctype <> 'raw') then
+      raise exception 'Μη επιτρεπτό συστατικό "%" για αυτό το προϊόν', l.cname;
+    end if;
+  end loop;
+
+  for l in
+    select dl.*, i.item_type as ctype, i.name as cname, i.make_to_order as cmto
+      from public.doc_line dl join public.item i on i.id = dl.item_id
+     where dl.doc_id = d.id and dl.role = 'input'
+     order by dl.line_no
+  loop
+    -- αυτόματο ημιέτοιμο: παράγεται ακριβώς όσο αναλώνεται
+    if l.ctype = 'semi' and l.cmto then
+      select id into v_bom from public.bom where item_id = l.item_id and is_default and is_active limit 1;
+      if v_bom is null then
+        raise exception 'Το ημιέτοιμο "%" φτιάχνεται αυτόματα αλλά δεν έχει ενεργή συνταγή', l.cname;
+      end if;
+      insert into public.doc (company_id, doc_type, doc_date, status, bom_id, source_doc_id, is_auto, notes, created_by)
+      values (d.company_id, 'production', d.doc_date, 'draft', v_bom, d.id, true,
+              'Αυτόματη παραγωγή από ΠΑ-' || d.doc_no, d.created_by)
+      returning id into v_prod;
+      insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (v_prod, 1, 'output', l.item_id, l.qty);
+      perform public._explode_bom(v_prod);
+      perform public._post_internal(v_prod);
+    end if;
+
+    v_cost := public._stock_out(d.company_id, d.id, l.id, l.item_id, d.doc_date, 'prod_consume', l.qty);
+    update public.doc_line set unit_cost = v_cost / l.qty, total_cost = v_cost where id = l.id;
+    v_total := v_total + v_cost;
+  end loop;
+
+  v_unit := v_total / o.qty;
+  perform public._stock_in(d.company_id, d.id, o.id, o.item_id, d.doc_date, 'prod_output', o.qty, v_unit);
+  update public.doc_line set unit_cost = v_unit, total_cost = v_total where id = o.id;
+  update public.doc set total_net = round(v_total, 2), total_vat = 0, total_gross = round(v_total, 2) where id = d.id;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Καταχώρηση: κλείνει και το ανοιχτό πρόχειρο (is_running = false)
+-- ---------------------------------------------------------------------
+create or replace function public._post_internal(p_doc uuid)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare d public.doc%rowtype;
+begin
+  select * into d from public.doc where id = p_doc for update;
+  if not found then
+    raise exception 'Δεν βρέθηκε το παραστατικό';
+  end if;
+  if d.status <> 'draft' then
+    raise exception 'Το παραστατικό είναι ήδη καταχωρημένο';
+  end if;
+  -- ακεραιότητα εταιρείας
+  if exists (select 1 from public.doc_line dl join public.item i on i.id = dl.item_id
+              where dl.doc_id = d.id and i.company_id <> d.company_id) then
+    raise exception 'Γραμμή με είδος άλλης εταιρείας';
+  end if;
+  if d.partner_id is not null and not exists (select 1 from public.partner p where p.id = d.partner_id and p.company_id = d.company_id) then
+    raise exception 'Συναλλασσόμενος άλλης εταιρείας';
+  end if;
+
+  case d.doc_type
+    when 'purchase'   then perform public._post_purchase(d);
+    when 'sale'       then perform public._post_sale(d);
+    when 'production' then perform public._post_production(d);
+    when 'stocktake'  then perform public._post_stocktake(d);
+    when 'receipt'    then perform public._post_receipt_payment(d);
+    when 'payment'    then perform public._post_receipt_payment(d);
+  end case;
+
+  update public.doc set status = 'posted', posted_at = now(), is_running = false where id = p_doc;
+end $$;
+
+create or replace function public.post_document(p_doc uuid)
+returns void
+language plpgsql security definer
+set search_path = public
+as $$
+declare d public.doc%rowtype;
+begin
+  select * into d from public.doc where id = p_doc;
+  if not found or not public.is_member(d.company_id) then
+    raise exception 'Δεν βρέθηκε το παραστατικό';
+  end if;
+  if d.is_auto then
+    raise exception 'Η αυτόματη παραγωγή καταχωρείται μαζί με το παραστατικό που τη δημιουργεί';
+  end if;
+  perform public._post_internal(p_doc);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Ακύρωση: οι αυτόματες παραγωγές (πώλησης ή παραγωγής) ακυρώνονται
+-- αναδρομικά και διαγράφονται. Παραγωγή που έχει επιμερισμούς από
+-- καταχωρημένη απογραφή δεν ακυρώνεται (θα χάνονταν οι επιμερισμοί).
+-- ---------------------------------------------------------------------
+create or replace function public._unpost_internal(p_doc uuid)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  d       public.doc%rowtype;
+  v_items uuid[];
+  v_it    uuid;
+  v_auto  record;
+  v_st    int;
+begin
+  select * into d from public.doc where id = p_doc for update;
+  if not found or d.status <> 'posted' then
+    raise exception 'Το παραστατικό δεν είναι καταχωρημένο';
+  end if;
+
+  if d.doc_type = 'stocktake' then
+    if exists (
+      select 1 from public.doc s join public.doc_line sl on sl.doc_id = s.id
+       where s.company_id = d.company_id and s.doc_type = 'stocktake' and s.status = 'posted'
+         and s.id <> d.id and s.doc_date > d.doc_date
+         and sl.item_id in (select item_id from public.doc_line where doc_id = d.id)
+    ) then
+      raise exception 'Υπάρχει μεταγενέστερη απογραφή για είδη αυτής της απογραφής. Ακυρώστε πρώτα εκείνη.';
+    end if;
+    delete from public.cost_alloc where stocktake_doc_id = d.id;
+    update public.doc_line set expected_qty = null, diff_qty = null, diff_value = null where doc_id = d.id;
+  else
+    perform public._assert_open(d.id);
+  end if;
+
+  if d.doc_type = 'production' then
+    select s.doc_no into v_st
+      from public.cost_alloc ca join public.doc s on s.id = ca.stocktake_doc_id
+     where ca.production_doc_id = d.id
+     order by s.doc_date desc
+     limit 1;
+    if found then
+      raise exception 'Η παραγωγή ΠΑ-% έχει επιμερισμούς κόστους από την απογραφή ΑΠ-%. Ακυρώστε πρώτα την απογραφή.',
+        d.doc_no, v_st;
+    end if;
+  end if;
+
+  -- αυτόματες παραγωγές αυτού του παραστατικού (και οι δικές τους, αναδρομικά)
+  for v_auto in
+    select a.id, a.status from public.doc a
+     where a.source_doc_id = d.id and a.is_auto and a.company_id = d.company_id
+     order by a.doc_no desc
+  loop
+    if v_auto.status = 'posted' then
+      perform public._unpost_internal(v_auto.id);
+    end if;
+    delete from public.doc where id = v_auto.id;
+  end loop;
+
+  select array_agg(distinct item_id) into v_items from public.stock_move where doc_id = d.id;
+  delete from public.stock_move   where doc_id = d.id;
+  delete from public.partner_move where doc_id = d.id;
+
+  -- μέσο κόστος ξανά από τις κινήσεις (τα παιδιά έχουν ήδη κάνει το δικό τους)
+  if v_items is not null then
+    foreach v_it in array v_items loop
+      perform public._recalc_avg_cost(v_it);
+    end loop;
+  end if;
+
+  update public.doc_line set unit_cost = null, total_cost = null where doc_id = d.id;
+  update public.doc set status = 'draft', posted_at = null, total_net = 0, total_vat = 0, total_gross = 0 where id = d.id;
+end $$;
+
+create or replace function public.unpost_document(p_doc uuid)
+returns void
+language plpgsql security definer
+set search_path = public
+as $$
+declare d public.doc%rowtype;
+begin
+  select * into d from public.doc where id = p_doc;
+  if not found or not public.is_member(d.company_id) then
+    raise exception 'Δεν βρέθηκε το παραστατικό';
+  end if;
+  if d.is_auto then
+    raise exception 'Η αυτόματη παραγωγή ακυρώνεται μαζί με το παραστατικό που τη δημιούργησε';
+  end if;
+  perform public._unpost_internal(p_doc);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Μετρητής ημέρας: +/- ποσότητα ενός ετοίμου στην ανοιχτή πώληση της
+-- ημέρας για ένα κανάλι λιανικής. Επιστρέφει το id της πώλησης ή null αν
+-- άδειασε (και διαγράφηκε).
+-- ---------------------------------------------------------------------
+create or replace function public.tally_add(
+  p_company uuid, p_date date, p_channel text, p_item uuid, p_delta numeric)
+returns uuid
+language plpgsql security definer
+set search_path = public
+as $$
+declare
+  v_item  public.item%rowtype;
+  v_doc   uuid;
+  v_line  uuid;
+  v_old   numeric;
+  v_qty   numeric;
+begin
+  if p_company is null or not public.is_member(p_company) then
+    raise exception 'Δεν έχετε πρόσβαση στην εταιρεία';
+  end if;
+  if p_date is null then
+    raise exception 'Χρειάζεται ημερομηνία';
+  end if;
+  if p_channel is null or p_channel not in ('efood','wolt','box','phone','store') then
+    raise exception 'Μη έγκυρο κανάλι λιανικής: %', coalesce(p_channel, '(κενό)');
+  end if;
+  if p_delta is null or p_delta in ('NaN', 'Infinity', '-Infinity')
+     or round(p_delta, 4) = 0 or abs(p_delta) >= 100000000 then
+    raise exception 'Μη έγκυρη ποσότητα';
+  end if;
+  select * into v_item from public.item where id = p_item and company_id = p_company;
+  if not found then
+    raise exception 'Δεν βρέθηκε το είδος';
+  end if;
+  if v_item.item_type <> 'finished' then
+    raise exception 'Στις πωλήσεις ημέρας μπαίνουν μόνο έτοιμα προϊόντα ("%")', v_item.name;
+  end if;
+
+  -- σειριοποίηση ανά εταιρεία / ημέρα / κανάλι (πολλές συσκευές ταυτόχρονα)
+  perform pg_advisory_xact_lock(hashtextextended(format('tally|%s|%s|%s', p_company, p_date, p_channel), 0));
+
+  select x.id into v_doc
+    from public.doc x
+   where x.company_id = p_company and x.doc_type = 'sale' and x.doc_date = p_date
+     and x.channel = p_channel and x.is_running and x.status = 'draft'
+   limit 1
+     for update;
+
+  select coalesce(sum(dl.qty), 0), (array_agg(dl.id order by dl.line_no, dl.id))[1]
+    into v_old, v_line
+    from public.doc_line dl
+   where dl.doc_id = v_doc and dl.item_id = p_item and dl.role = 'item';
+  v_qty := round(v_old + p_delta, 4);
+
+  if v_qty > 0 then
+    if v_qty >= 100000000 then
+      raise exception 'Μη έγκυρη ποσότητα';
+    end if;
+    if v_doc is null then
+      insert into public.doc (company_id, doc_type, doc_date, status, channel, is_running, notes)
+      values (p_company, 'sale', p_date, 'draft', p_channel, true, 'Πωλήσεις ημέρας')
+      returning id into v_doc;
+    end if;
+    if v_line is null then
+      insert into public.doc_line (doc_id, line_no, role, item_id, qty, unit_price, vat_rate)
+      select v_doc, coalesce(max(dl.line_no), 0) + 1, 'item', p_item, v_qty, v_item.sale_price, v_item.vat_rate
+        from public.doc_line dl where dl.doc_id = v_doc;
+    else
+      update public.doc_line set qty = v_qty where id = v_line;
+      -- διπλές γραμμές του ίδιου είδους (από χειροκίνητη επεξεργασία) ενώνονται
+      delete from public.doc_line
+       where doc_id = v_doc and item_id = p_item and role = 'item' and id <> v_line;
+    end if;
+  elsif v_doc is not null then
+    delete from public.doc_line where doc_id = v_doc and item_id = p_item and role = 'item';
+  end if;
+
+  if v_doc is null then
+    return null;
+  end if;
+  if not exists (select 1 from public.doc_line where doc_id = v_doc) then
+    delete from public.doc where id = v_doc;
+    return null;
+  end if;
+  return v_doc;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Απογραφή σε εξέλιξη: μέτρηση ενός είδους στην ανοιχτή απογραφή της
+-- ημέρας (p_add: πρόσθεση στη μέτρηση, p_qty null: αφαίρεση γραμμής).
+-- Επιστρέφει το id της απογραφής ή null αν άδειασε (και διαγράφηκε).
+-- ---------------------------------------------------------------------
+create or replace function public.stocktake_count(
+  p_company uuid, p_date date, p_item uuid, p_qty numeric, p_add boolean default false)
+returns uuid
+language plpgsql security definer
+set search_path = public
+as $$
+declare
+  v_item  public.item%rowtype;
+  v_doc   uuid;
+  v_line  uuid;
+  v_old   numeric;
+  v_qty   numeric;
+begin
+  if p_company is null or not public.is_member(p_company) then
+    raise exception 'Δεν έχετε πρόσβαση στην εταιρεία';
+  end if;
+  if p_date is null then
+    raise exception 'Χρειάζεται ημερομηνία';
+  end if;
+  if p_qty in ('NaN', 'Infinity', '-Infinity') or abs(p_qty) >= 100000000 then
+    raise exception 'Μη έγκυρη ποσότητα';
+  end if;
+  select * into v_item from public.item where id = p_item and company_id = p_company;
+  if not found then
+    raise exception 'Δεν βρέθηκε το είδος';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(format('stocktake|%s|%s', p_company, p_date), 0));
+
+  select x.id into v_doc
+    from public.doc x
+   where x.company_id = p_company and x.doc_type = 'stocktake' and x.doc_date = p_date
+     and x.is_running and x.status = 'draft'
+   order by x.created_at, x.id
+   limit 1
+     for update;
+
+  if p_qty is null then
+    if v_doc is null then
+      return null;
+    end if;
+    delete from public.doc_line where doc_id = v_doc and item_id = p_item;
+  else
+    select coalesce(sum(dl.qty), 0), (array_agg(dl.id order by dl.line_no, dl.id))[1]
+      into v_old, v_line
+      from public.doc_line dl
+     where dl.doc_id = v_doc and dl.item_id = p_item;
+    v_qty := round(case when coalesce(p_add, false) then v_old + p_qty else p_qty end, 4);
+    if v_qty < 0 then
+      raise exception 'Αρνητική μέτρηση για "%"', v_item.name;
+    end if;
+    if v_qty >= 100000000 then
+      raise exception 'Μη έγκυρη ποσότητα';
+    end if;
+    if v_doc is null then
+      insert into public.doc (company_id, doc_type, doc_date, status, is_running, notes)
+      values (p_company, 'stocktake', p_date, 'draft', true, 'Απογραφή σε εξέλιξη')
+      returning id into v_doc;
+    end if;
+    if v_line is null then
+      insert into public.doc_line (doc_id, line_no, role, item_id, qty)
+      select v_doc, coalesce(max(dl.line_no), 0) + 1, 'item', p_item, v_qty
+        from public.doc_line dl where dl.doc_id = v_doc;
+    else
+      update public.doc_line set qty = v_qty where id = v_line;
+      -- η απογραφή δέχεται μία γραμμή ανά είδος
+      delete from public.doc_line where doc_id = v_doc and item_id = p_item and id <> v_line;
+    end if;
+  end if;
+
+  if not exists (select 1 from public.doc_line where doc_id = v_doc) then
+    delete from public.doc where id = v_doc;
+    return null;
+  end if;
+  return v_doc;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Αυτόματο κλείσιμο: καταχωρεί κάθε ανοιχτή πώληση ημέρας πριν από
+-- p_before. Κάθε πώληση χωριστά: μια αποτυχία δεν σταματά ούτε αναιρεί
+-- τις άλλες. Οι απογραφές δεν κλείνουν ποτέ αυτόματα. Κενά ανοιχτά
+-- πρόχειρα διαγράφονται σιωπηλά.
+-- ---------------------------------------------------------------------
+create or replace function public.close_running(p_company uuid, p_before date)
+returns table(doc_id uuid, doc_no int, doc_date date, channel text, ok boolean, message text)
+language plpgsql security definer
+set search_path = public
+as $$
+declare r record;
+begin
+  if p_company is null or not public.is_member(p_company) then
+    raise exception 'Δεν έχετε πρόσβαση στην εταιρεία';
+  end if;
+  if p_before is null then
+    raise exception 'Χρειάζεται ημερομηνία';
+  end if;
+
+  -- skip locked: όποια επεξεργάζεται αυτή τη στιγμή άλλη συσκευή, μένει για την επόμενη φορά
+  for r in
+    select x.id, x.doc_no, x.doc_date, x.channel
+      from public.doc x
+     where x.company_id = p_company and x.doc_type = 'sale' and x.is_running
+       and x.status = 'draft' and not x.is_auto and x.doc_date < p_before
+     order by x.doc_date, x.channel, x.doc_no
+       for update skip locked
+  loop
+    if not exists (select 1 from public.doc_line dl where dl.doc_id = r.id) then
+      delete from public.doc x where x.id = r.id;
+      continue;
+    end if;
+    doc_id := r.id; doc_no := r.doc_no; doc_date := r.doc_date; channel := r.channel;
+    begin
+      perform public._post_internal(r.id);
+      ok := true;
+      message := 'Καταχωρήθηκε';
+    exception when others then
+      ok := false;
+      message := sqlerrm;
+    end;
+    return next;
+  end loop;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Λίστα παραστατικών: + is_running (στο τέλος, για create or replace)
+-- ---------------------------------------------------------------------
+create or replace view public.v_doc_list
+with (security_invoker = true) as
+select d.id, d.company_id, d.doc_type, d.doc_no, d.doc_date, d.status, d.channel, d.is_auto, d.source_doc_id,
+       d.partner_id, p.name as partner_name, d.ref_no, d.amount,
+       d.total_net, d.total_vat, d.total_gross, d.notes, d.created_at, d.posted_at,
+       (select count(*) from public.doc_line l where l.doc_id = d.id) as line_count,
+       (select i.name from public.doc_line l join public.item i on i.id = l.item_id
+         where l.doc_id = d.id and l.role = 'output' limit 1) as produced_item_name,
+       d.is_running
+  from public.doc d
+  left join public.partner p on p.id = d.partner_id;
+grant select on public.v_doc_list to authenticated;
+
+-- ---------------------------------------------------------------------
+-- Δικαιώματα
+-- ---------------------------------------------------------------------
+revoke execute on function public._post_production(public.doc) from public, anon, authenticated;
+revoke execute on function public._post_internal(uuid) from public, anon, authenticated;
+revoke execute on function public._unpost_internal(uuid) from public, anon, authenticated;
+
+revoke execute on function public.post_document(uuid) from public, anon;
+revoke execute on function public.unpost_document(uuid) from public, anon;
+revoke execute on function public.tally_add(uuid,date,text,uuid,numeric) from public, anon;
+revoke execute on function public.stocktake_count(uuid,date,uuid,numeric,boolean) from public, anon;
+revoke execute on function public.close_running(uuid,date) from public, anon;
+grant execute on function public.post_document(uuid), public.unpost_document(uuid),
+  public.tally_add(uuid,date,text,uuid,numeric), public.stocktake_count(uuid,date,uuid,numeric,boolean),
+  public.close_running(uuid,date) to authenticated;

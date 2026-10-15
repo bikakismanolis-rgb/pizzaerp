@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { CompanyProvider, useCompany } from './context/CompanyContext'
@@ -22,6 +23,9 @@ import { PurchasesReport } from './pages/reports/PurchasesReport'
 import { ProductionCost } from './pages/reports/ProductionCost'
 import { Stocktakes } from './pages/reports/Stocktakes'
 
+// «Πες το»: ξεχωριστό κομμάτι (parser + φωνή), φορτώνει όταν χρειαστεί
+const Voice = lazy(() => import('./pages/Voice').then((m) => ({ default: m.Voice })))
+
 function Gate() {
   const { session, loading } = useAuth()
   if (loading) return <div className="min-h-screen flex items-center justify-center"><Spinner /></div>
@@ -42,6 +46,7 @@ function CompanyGate() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="voice" element={<Suspense fallback={<Spinner />}><Voice /></Suspense>} />
           <Route path="daily-sales" element={<DailySales />} />
           <Route path="items" element={<Items />} />
           <Route path="items/:id" element={<ItemEdit />} />

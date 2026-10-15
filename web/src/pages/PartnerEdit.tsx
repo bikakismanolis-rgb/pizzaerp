@@ -4,7 +4,7 @@ import { useCompanyId } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { errMsg, supabase } from '../lib/supabase'
 import type { Partner, PartnerPrice } from '../lib/types'
-import { fmtDate, fmtMoney, toNum } from '../lib/format'
+import { fmtDate, fmtMoney, parseAliases, toNum } from '../lib/format'
 import { DOC_TYPE_LABEL, docCode } from '../lib/labels'
 import { Confirm, ErrorBox, Field, NumInput, PageTitle, Spinner, useToast, Empty } from '../components/ui'
 import { useLoad } from '../lib/useLoad'
@@ -12,7 +12,7 @@ import type { DocType } from '../lib/types'
 
 const emptyPartner = (company_id: string): Omit<Partner, 'id'> => ({
   company_id, code: '', name: '', is_customer: true, is_supplier: false, vat_no: null, phone: null, email: null,
-  address: null, city: null, notes: null, is_active: true,
+  address: null, city: null, notes: null, is_active: true, aliases: [],
 })
 
 type Tab = 'info' | 'prices' | 'ledger'
@@ -30,11 +30,12 @@ export function PartnerEdit() {
   const [error, setError] = useState<string | null>(null)
   const [askDelete, setAskDelete] = useState(false)
   const [tab, setTab] = useState<Tab>('info')
+  const [aliasText, setAliasText] = useState('')
 
   useEffect(() => {
     if (isNew) return
     supabase.from('partner').select('*').eq('id', id).single().then(({ data, error: e }) => {
-      if (e) setError(errMsg(e)); else setP(data as Partner)
+      if (e) setError(errMsg(e)); else { setP(data as Partner); setAliasText(((data as Partner).aliases ?? []).join(', ')) }
       setLoading(false)
     })
   }, [id, isNew])
@@ -49,6 +50,7 @@ export function PartnerEdit() {
         company_id: companyId, code: p.code.trim(), name: p.name.trim(), is_customer: p.is_customer, is_supplier: p.is_supplier,
         vat_no: p.vat_no?.trim() || null, phone: p.phone?.trim() || null, email: p.email?.trim() || null,
         address: p.address?.trim() || null, city: p.city?.trim() || null, notes: p.notes?.trim() || null, is_active: p.is_active,
+        aliases: parseAliases(aliasText),
       }
       if (isNew) {
         const { data, error: er } = await supabase.from('partner').insert(payload).select('id').single()
@@ -100,6 +102,9 @@ export function PartnerEdit() {
           </div>
           <Field label="Κωδικός"><input className="input" required value={p.code} onChange={(e) => set('code', e.target.value)} placeholder={p.is_supplier && !p.is_customer ? 'π.χ. ΠΡ-001' : 'π.χ. ΠΕ-001'} /></Field>
           <Field label="Όνομα"><input className="input" required value={p.name} onChange={(e) => set('name', e.target.value)} autoFocus={isNew} /></Field>
+          <Field label="Άλλα ονόματα (πώς τον λέτε)" className="sm:col-span-2">
+            <input className="input" value={aliasText} onChange={(e) => setAliasText(e.target.value)} placeholder="χωρισμένα με κόμμα, π.χ. μύλος, μυλωνάς" />
+          </Field>
           <Field label="ΑΦΜ"><input className="input" value={p.vat_no ?? ''} onChange={(e) => set('vat_no', e.target.value)} /></Field>
           <Field label="Τηλέφωνο"><input className="input" value={p.phone ?? ''} onChange={(e) => set('phone', e.target.value)} /></Field>
           <Field label="Email"><input className="input" type="email" value={p.email ?? ''} onChange={(e) => set('email', e.target.value)} /></Field>
