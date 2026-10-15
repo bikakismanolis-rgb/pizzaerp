@@ -97,6 +97,12 @@ describe('confident / toRef', () => {
     expect(confident([{ entry: e('a'), score: 0.65, explained: 1 }])?.entry.id).toBe('a')
     expect(confident([{ entry: e('a'), score: 0.4, explained: 1 }])).toBeNull()
   })
+  it('ακριβές όνομα μπροστά από άλλη κλίση της ίδιας ρίζας, όχι από μακρύτερο όνομα', () => {
+    const exact = { entry: e('a'), score: 1, explained: 1, exact: true, full: true }
+    expect(confident([exact, { entry: e('b'), score: 1, explained: 1, exact: false, full: true }])?.entry.id).toBe('a')
+    expect(confident([exact, { entry: e('b'), score: 0.95, explained: 1, exact: false, full: false }])).toBeNull()
+    expect(confident([{ ...exact, exact: false }, { entry: e('b'), score: 1, explained: 1, exact: false, full: true }])).toBeNull()
+  })
   it('έως 5 υποψήφιοι σε φθίνουσα σειρά', () => {
     const ranked = [0.9, 0.88, 0.8, 0.7, 0.6, 0.5, 0.45].map((s, i) => ({ entry: e('x' + i), score: s, explained: 1 }))
     const r = toRef('κάτι', ranked)

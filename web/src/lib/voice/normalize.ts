@@ -101,7 +101,9 @@ export function keySim(a: string, b: string): number {
   if (short.length >= 3 && long.length - short.length >= 3 && long.endsWith(short) && long.length - short.length <= 5) return 0.72
   // σύντομες λέξεις: μόνο ακριβές
   if (short.length <= 3) return 0
-  if (long.startsWith(short)) return 0.75 + (0.2 * short.length) / long.length
+  // πρόθεμα: κοντές ρίζες μένουν κάτω από ένα πραγματικό ταίριασμα ρίζας
+  // ("krem" ≠ "kremid", "domat" ≠ "domatin")
+  if (long.startsWith(short)) return short.length < 6 ? 0.8 : 0.75 + (0.2 * short.length) / long.length
   if (long.length - short.length > 3) return 0
   const s = 1 - editDistance(a, b) / long.length
   if (short.length <= 4 && s < 0.75) return 0
@@ -124,6 +126,8 @@ export interface Tok {
   digits?: string
   /** διαχωριστικό (κόμμα, τελεία, ερωτηματικό) */
   sep?: boolean
+  /** γράφτηκε κολλητά με το προηγούμενο ("3Ε", "400γρ") */
+  glued?: boolean
 }
 
 /** Γνωστές συντομογραφίες από μονά γράμματα (Φ.Π.Α., Α.Ε.) */
@@ -160,25 +164,29 @@ export function tokenize(text: string): Tok[] {
   s = s.replace(/μισ[οό]κιλ([οόαά])/gi, 'μισό κιλ$1').replace(/μισ[οό]λιτρ([οα])/gi, 'μισό λίτρ$1')
   // απόστροφοι, παύλες, εισαγωγικά → κενό
   s = s.replace(/[’'`´ʼ"«»“”()[\]{}_\-–—+*=<>|\\]/g, ' ')
-  // 400γρ → 400 γρ, x2 → x 2
-  s = s.replace(/(\d)(?=\p{L})/gu, '$1 ').replace(/(\p{L})(?=\d)/gu, '$1 ')
+  // 400γρ → 400 γρ, x2 → x 2 (το \u0001 θυμάται ότι ήταν κολλητά)
+  s = s.replace(/(\d)(?=\p{L})/gu, '$1\u0001').replace(/(\p{L})(?=\d)/gu, '$1\u0001')
   const out: Tok[] = []
   for (const m of s.matchAll(TOKEN_RE)) {
     const raw = m[0]
+    const at = m.index ?? 0
+    let t: Tok
     if (/^\d/.test(raw)) {
-      out.push({ raw, n: raw, key: '', num: parseDigits(raw), digits: raw.replace(/\D/g, '') })
+      t = { raw, n: raw, key: '', num: parseDigits(raw), digits: raw.replace(/\D/g, '') }
     } else if (/^[,;:.!?·;]$/.test(raw)) {
-      out.push({ raw, n: raw, key: '', sep: true })
+      t = { raw, n: raw, key: '', sep: true }
     } else if (raw === '€') {
-      out.push({ raw, n: 'ευρω', key: 'evro' })
+      t = { raw, n: 'ευρω', key: 'evro' }
     } else if (raw === '/') {
-      out.push({ raw, n: 'ανα', key: 'ana' })
+      t = { raw, n: 'ανα', key: 'ana' }
     } else if (raw === '%') {
-      out.push({ raw, n: '%', key: '' })
+      t = { raw, n: '%', key: '' }
     } else {
       const n = norm(raw)
-      out.push({ raw, n, key: stemKey(n) })
+      t = { raw, n, key: stemKey(n) }
     }
+    if (at > 0 && s[at - 1] === '\u0001') t.glued = true
+    out.push(t)
   }
   // συντομογραφίες με κενά: "φ π α" → "φπα"
   for (let i = 0; i < out.length; i++) {

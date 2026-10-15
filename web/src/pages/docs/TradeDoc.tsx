@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { useMaster } from '../../context/MasterData'
 import { supabase } from '../../lib/supabase'
 import type { Doc, DocType } from '../../lib/types'
 import { CHANNEL_LABEL } from '../../lib/labels'
-import { fmtCost, fmtMoney, round, toNum, today } from '../../lib/format'
+import { fmtCost, fmtDate, fmtMoney, round, toNum, today } from '../../lib/format'
 import { ErrorBox, Field, NumInput, Spinner } from '../../components/ui'
 import { ItemPicker, PartnerPicker } from '../../components/Pickers'
 import type { LineInput } from '../../lib/docs'
@@ -31,6 +31,9 @@ export function TradeDoc({ docType }: { docType: DocType }) {
   const [rows, setRows] = useState<Row[]>([])
   const [seq, setSeq] = useState(1)
   const posted = doc?.status === 'posted'
+  // ανοιχτές πωλήσεις ημέρας: μόνο προβολή (οι γραμμές αλλάζουν από άλλες οθόνες/συσκευές)
+  const running = ed.runningOpen
+  const locked = posted || running
 
   const nextKey = () => { const k = seq; setSeq(seq + 1); return k }
   const addRow = () => setRows((r) => [...r, { key: nextKey(), item_id: null, qty: '', unit_price: '', discount_pct: '0', vat_rate: '13' }])
@@ -43,7 +46,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
     setRows(itemRows.map((l, i) => ({ key: i + 1, item_id: l.item_id, qty: String(l.qty), unit_price: String(l.unit_price), discount_pct: String(l.discount_pct), vat_rate: String(l.vat_rate) })))
     setSeq(itemRows.length + 1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc?.id, doc?.status])
+  }, [doc?.id, doc?.status, ed.ver])
 
   // Στην πώληση: όταν αλλάζει είδος ή πελάτης, φέρε τιμή πελάτη
   const applyPrice = async (rowKey: number, itemId: string | null) => {
@@ -100,27 +103,30 @@ export function TradeDoc({ docType }: { docType: DocType }) {
       onPost={() => ed.post(buildFields(), buildLines())}
       onUnpost={ed.unpost}
       onDelete={ed.remove}
+      running={running ? { what: `οι πωλήσεις ημέρας ${doc?.channel ? CHANNEL_LABEL[doc.channel] : ''} της ${fmtDate(date)}`, onPost: ed.postRunning, onDetach: ed.detachRunning } : null}
     >
       <ErrorBox text={ed.error} />
-      {doc?.is_running && !posted && (
+      {running && (
         <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
-          Πωλήσεις ημέρας σε εξέλιξη: γεμίζουν από τις «Πωλήσεις ημέρας» και το «Πες το». Κλείνουν με «Κλείσιμο ημέρας» ή αυτόματα την επόμενη μέρα.
+          Πωλήσεις ημέρας σε εξέλιξη: γεμίζουν από τις <Link className="underline" to="/daily-sales">Πωλήσεις ημέρας</Link> και
+          το <Link className="underline" to="/voice">Πες το</Link>, γι' αυτό εδώ μόνο φαίνονται. Κλείνουν με «Κλείσιμο ημέρας»
+          ή αυτόματα την επόμενη μέρα. Για αλλαγή τιμής ή γραμμών: «Χειροκίνητη επεξεργασία».
         </div>
       )}
       <div className="card p-4 mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Field label="Ημερομηνία"><input type="date" className="input" value={date} disabled={posted} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Ημερομηνία"><input type="date" className="input" value={date} disabled={locked} onChange={(e) => setDate(e.target.value)} /></Field>
         <Field label={isSale ? 'Πελάτης' : 'Προμηθευτής'} className={isSale ? '' : 'lg:col-span-2'}>
-          <PartnerPicker kind={isSale ? 'customer' : 'supplier'} value={partnerId} disabled={posted}
+          <PartnerPicker kind={isSale ? 'customer' : 'supplier'} value={partnerId} disabled={locked}
             onChange={(v) => { setPartnerId(v); if (isSale) rows.forEach((r) => applyPrice(r.key, r.item_id)) }} />
         </Field>
         {isSale && (
           <Field label="Κανάλι">
-            <select className="input" value={channel ?? ''} disabled={posted} onChange={(e) => setChannel(e.target.value as Doc['channel'])}>
+            <select className="input" value={channel ?? ''} disabled={locked} onChange={(e) => setChannel(e.target.value as Doc['channel'])}>
               {(['wholesale', 'efood', 'wolt', 'box', 'phone', 'store'] as const).map((c) => <option key={c} value={c}>{CHANNEL_LABEL[c]}</option>)}
             </select>
           </Field>
         )}
-        {!isSale && <Field label="Αρ. παραστατικού προμηθευτή"><input className="input" value={refNo} disabled={posted} onChange={(e) => setRefNo(e.target.value)} /></Field>}
+        {!isSale && <Field label="Αρ. παραστατικού προμηθευτή"><input className="input" value={refNo} disabled={locked} onChange={(e) => setRefNo(e.target.value)} /></Field>}
       </div>
 
       <div className="card overflow-x-auto">
@@ -133,7 +139,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
               <th className="num w-20">Έκπτ.%</th>
               <th className="num w-20">ΦΠΑ%</th>
               <th className="num w-28">Καθαρή</th>
-              {!posted && <th className="w-8"></th>}
+              {!locked && <th className="w-8"></th>}
             </tr>
           </thead>
           <tbody>
@@ -143,22 +149,22 @@ export function TradeDoc({ docType }: { docType: DocType }) {
               return (
                 <tr key={r.key}>
                   <td>
-                    <ItemPicker value={r.item_id} types={pickerTypes as unknown as undefined} disabled={posted}
+                    <ItemPicker value={r.item_id} types={pickerTypes as unknown as undefined} disabled={locked}
                       onChange={(v) => { setRows((rs) => rs.map((x, i) => i === idx ? { ...x, item_id: v } : x)); if (isSale) applyPrice(r.key, v); else setCost(r.key, v) }} />
                     {it && <div className="text-xs text-stone-500 mt-0.5">{it.unit}{!isSale && ` · μέσο κόστος ${fmtCost(it.avg_cost)}`}</div>}
                   </td>
-                  <td><NumInput value={r.qty} disabled={posted} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, qty: v } : x))} /></td>
-                  <td><NumInput value={r.unit_price} disabled={posted} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, unit_price: v } : x))} /></td>
-                  <td><NumInput value={r.discount_pct} disabled={posted} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, discount_pct: v } : x))} /></td>
-                  <td><NumInput value={r.vat_rate} disabled={posted} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, vat_rate: v } : x))} /></td>
+                  <td><NumInput value={r.qty} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, qty: v } : x))} /></td>
+                  <td><NumInput value={r.unit_price} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, unit_price: v } : x))} /></td>
+                  <td><NumInput value={r.discount_pct} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, discount_pct: v } : x))} /></td>
+                  <td><NumInput value={r.vat_rate} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, vat_rate: v } : x))} /></td>
                   <td className="num">{fmtMoney(net)}</td>
-                  {!posted && <td><button className="btn-ghost px-2 py-1" onClick={() => setRows((rs) => rs.filter((_, i) => i !== idx))}>✕</button></td>}
+                  {!locked && <td><button className="btn-ghost px-2 py-1" onClick={() => setRows((rs) => rs.filter((_, i) => i !== idx))}>✕</button></td>}
                 </tr>
               )
             })}
           </tbody>
         </table>
-        {!posted && <div className="p-3"><button className="btn-secondary" onClick={addRow}>+ Γραμμή</button></div>}
+        {!locked && <div className="p-3"><button className="btn-secondary" onClick={addRow}>+ Γραμμή</button></div>}
       </div>
 
       <div className="flex flex-col items-end gap-1 mt-3 text-sm">
@@ -168,7 +174,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
       </div>
 
       <div className="card p-4 mt-3">
-        <Field label="Σημειώσεις"><textarea className="input" rows={2} value={notes} disabled={posted} onChange={(e) => setNotes(e.target.value)} /></Field>
+        <Field label="Σημειώσεις"><textarea className="input" rows={2} value={notes} disabled={locked} onChange={(e) => setNotes(e.target.value)} /></Field>
       </div>
     </DocShell>
   )

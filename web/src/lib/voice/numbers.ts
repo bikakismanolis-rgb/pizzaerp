@@ -137,6 +137,17 @@ export function isHalfWord(n: string): boolean {
   return HALF.has(n)
 }
 
+/** Μετά από "χιλιάδες": υπόλοιπο κάτω από 1000 ("2 χιλιάδες 500", "δυόμισι χιλιάδες") */
+function belowThousand(toks: Tok[], j: number): { value: number; to: number } | null {
+  const t = toks[j]
+  if (!t || t.sep) return null
+  if (t.num !== undefined) return Number.isInteger(t.num) && t.num > 0 && t.num < 1000 && !t.digits?.startsWith('0') ? { value: t.num, to: j + 1 } : null
+  const c0 = cardinal(t.n)
+  if (!c0 || c0.slot === 3 || c0.v === 0) return null
+  const c = readCardinal(toks, j)
+  return c && c.value < 1000 ? c : null
+}
+
 /** Αριθμός που ξεκινά στο token i, ή null */
 export function readNumber(toks: Tok[], i: number): NumSeg | null {
   const t = toks[i]
@@ -151,8 +162,14 @@ export function readNumber(toks: Tok[], i: number): NumSeg | null {
     value = t.num
     digits = t.digits ?? String(value)
     j = i + 1
-    if (toks[j] && MULT_K.has(toks[j].n) && Number.isInteger(value)) { value *= 1000; digits = String(value); words = true; j++ }
-    else if (toks[j] && SIZE_SUFFIX.has(toks[j].n)) { size = true; j++ }
+    if (toks[j] && MULT_K.has(toks[j].n) && value > 0 && Number.isInteger(value * 1000)) {
+      value *= 1000
+      words = true
+      j++
+      const r = Number.isInteger(value) ? belowThousand(toks, j) : null
+      if (r) { value += r.value; j = r.to }
+      digits = String(value)
+    } else if (toks[j] && SIZE_SUFFIX.has(toks[j].n)) { size = true; j++ }
   } else {
     const n = t.n
     words = true
@@ -161,13 +178,24 @@ export function readNumber(toks: Tok[], i: number): NumSeg | null {
     else {
       const ch = compoundHalf(n)
       const sz = ch === null ? sizeWord(n) : null
-      if (ch !== null) value = ch
-      else if (sz !== null) { value = sz; size = true }
+      if (ch !== null) {
+        value = ch
+        // "δυόμισι χιλιάδες"
+        if (toks[j] && MULT_K.has(toks[j].n)) { value *= 1000; j++ }
+      } else if (sz !== null) { value = sz; size = true }
       else {
         const c = readCardinal(toks, i)
         if (!c) return null
         value = c.value
         j = c.to
+        // "δύο χιλιάδες 500" (λέξεις και ψηφία μαζί)
+        if (value >= 1000 && value % 1000 === 0 && (MULT_K.has(toks[j - 1]?.n) || THOUSAND.has(toks[j - 1]?.n))) {
+          const t2 = toks[j]
+          if (t2 && t2.num !== undefined) {
+            const r = belowThousand(toks, j)
+            if (r) { value += r.value; j = r.to }
+          }
+        }
       }
     }
     digits = String(value)

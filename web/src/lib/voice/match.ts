@@ -49,6 +49,8 @@ export interface Index {
   codeParts: Set<string>
   /** ομοιότητες λέξεων που έχουν ήδη υπολογιστεί για αυτόν τον κατάλογο */
   simCache: Map<string, Map<string, number>>
+  /** entries που περιέχουν λέξη παρόμοια με μια λέξη που ακούστηκε */
+  entCache: Map<string, Set<number>>
   /** όλοι οι τύποι των συσκευασιών των ενεργών ειδών ("σακιά", "κούτες") */
   packs: Set<string>
 }
@@ -129,7 +131,7 @@ function buildIndex(items: Item[], partners: Partner[]): Index {
   for (const p of partners ?? []) if (p?.is_active && p.code) for (const t of tokenize(p.code)) if (!t.sep) codeParts.add(t.digits ?? t.n)
   const packs = new Set<string>()
   for (const it of items ?? []) if (it?.is_active && it.pack_name) for (const f of packForms(it.pack_name)) packs.add(f)
-  return { entries, vocab, nums, codeParts, simCache: new Map(), packs }
+  return { entries, vocab, nums, codeParts, simCache: new Map(), entCache: new Map(), packs }
 }
 
 const cache = new WeakMap<object, WeakMap<object, { sig: string; idx: Index }>>()
@@ -182,8 +184,20 @@ function tokSim(h: HTok, f: FTok): number {
   return h.sims?.get(f.key) ?? 0
 }
 
+interface FormScore {
+  score: number
+  explained: number
+  mass: number
+  /** ό,τι ακούστηκε είναι ακριβώς το όνομα (ίδιες λέξεις, όχι μόνο ίδια ρίζα) */
+  exact: boolean
+  /** καλύφθηκαν όλες οι λέξεις του ονόματος */
+  full: boolean
+}
+
+const NO_SCORE: FormScore = { score: 0, explained: 0, mass: 0, exact: false, full: false }
+
 /** F0.5 ανάμεσα σε ό,τι ακούστηκε (H) και ένα όνομα (f), με άπληστο ταίριασμα tokens */
-function scoreForm(H: HTok[], f: Form): { score: number; explained: number; mass: number } {
+function scoreForm(H: HTok[], f: Form): FormScore {
   const nh = H.length
   const nf = f.toks.length
   const sim = new Float64Array(nh * nf)
@@ -195,7 +209,7 @@ function scoreForm(H: HTok[], f: Form): { score: number; explained: number; mass
       if (v > 0) any = true
     }
   }
-  if (!any) return { score: 0, explained: 0, mass: 0 }
+  if (!any) return NO_SCORE
   const hs = new Float64Array(nh)
   const fs = new Float64Array(nf)
   const fOf = new Int8Array(nh).fill(-1)
@@ -223,23 +237,30 @@ function scoreForm(H: HTok[], f: Form): { score: number; explained: number; mass
   // αριθμός στην αρχή της φράσης μόνο αν και το όνομα ξεκινά με αυτόν τον αριθμό
   if (H[0]?.k === 'n' && !H[0].size) {
     const first = f.toks.findIndex((t) => !t.opt)
-    if (fOf[0] !== first || f.toks[first]?.k !== 'n') return { score: 0, explained: 0, mass: 0 }
+    if (fOf[0] !== first || f.toks[first]?.k !== 'n') return NO_SCORE
   }
   let recNum = 0
   let recDen = 0
+  let full = true
   for (let j = 0; j < nf; j++) {
     const t = f.toks[j]
     if (fUsed[j]) { recNum += t.w * fs[j]; recDen += t.w }
-    else if (!t.opt) recDen += t.w
+    else if (!t.opt) { recDen += t.w; full = false }
+  }
+  let exact = full
+  for (let i = 0; i < nh && exact; i++) {
+    const j = fOf[i]
+    if (j < 0 || hs[i] < 1) exact = false
+    else if (H[i].k === 'w' && H[i].n !== f.toks[j].n) exact = false
   }
   let precNum = 0
   let precDen = 0
   for (let i = 0; i < nh; i++) { precDen += H[i].hw; precNum += H[i].hw * hs[i] }
-  if (!recDen || !precDen || !recNum || !precNum) return { score: 0, explained: 0, mass: 0 }
+  if (!recDen || !precDen || !recNum || !precNum) return NO_SCORE
   const R = recNum / recDen
   const P = precNum / precDen
   const score = (1.25 * P * R) / (0.25 * P + R)
-  return { score, explained: precNum, mass: precDen }
+  return { score, explained: precNum, mass: precDen, exact, full }
 }
 
 export interface Scored {
@@ -249,6 +270,10 @@ export interface Scored {
   explained: number
   /** σύνολο βάρους των tokens της φράσης */
   mass?: number
+  /** ακριβώς το όνομα ή ένα alias (όχι μόνο ίδια ρίζα) */
+  exact?: boolean
+  /** όλες οι λέξεις του ονόματος ακούστηκαν (έστω με άλλη κατάληξη) */
+  full?: boolean
 }
 
 /** Ρόλος κάθε τμήματος για τον εντοπισμό φράσεων */
@@ -314,35 +339,62 @@ export class Matcher {
     return this.similar(s.tok.key, n).size > 0 || this.idx.codeParts.has(n)
   }
 
-  /** Βαθμοί χωρίς βάρη δεξαμενής (κρατιούνται για όλες τις σαρώσεις της φράσης) */
-  private raw(from: number, to: number, roles: Role[]): Scored[] {
-    const ck = from + ':' + to + ':' + roles.slice(from, to).join(',')
+  /** entries με λέξη παρόμοια με το token (κρατιούνται για τον κατάλογο) */
+  private entsOf(h: HTok): Set<number> {
+    if (h.k === 'n') return new Set(h.size ? this.idx.nums.get(h.value) ?? [] : [])
+    const ck = h.key + '|' + h.n
+    const hit = this.idx.entCache.get(ck)
+    if (hit) return hit
+    const out = new Set<number>()
+    for (const vk of h.sims?.keys() ?? []) for (const e of this.idx.vocab.get(vk) ?? []) out.add(e)
+    if (this.idx.entCache.size > 5000) this.idx.entCache.clear()
+    this.idx.entCache.set(ck, out)
+    return out
+  }
+
+  /**
+   * Βαθμοί χωρίς βάρη δεξαμενής (κρατιούνται για όλες τις σαρώσεις της φράσης).
+   * ends: μόνο ονόματα που εξηγούν την πρώτη και την τελευταία λέξη της φράσης
+   * (αλλιώς η πιο κοντή φράση είναι πάντα καλύτερη) — πολύ λιγότεροι υποψήφιοι.
+   */
+  private raw(from: number, to: number, roles: Role[], ends = false): Scored[] {
+    const ck = from + ':' + to + ':' + (ends ? 'e' : '') + roles.slice(from, to).join(',')
     const hit = this.rawCache.get(ck)
     if (hit) return hit
     const H: HTok[] = []
-    const cand = new Set<number>()
+    let cand = new Set<number>()
+    let first: Set<number> | null = null
+    let last: Set<number> | null = null
     let code = ''
     for (let i = from; i < to; i++) {
       const h = this.hTok(this.segs[i], roles[i])
       if (!h) continue
       H.push(h)
-      if (h.k === 'w' && h.sims) {
-        for (const vk of h.sims.keys()) for (const e of this.idx.vocab.get(vk) ?? []) cand.add(e)
-      } else if (h.k === 'n' && h.size) for (const e of this.idx.nums.get(h.value) ?? []) cand.add(e)
+      if ((h.k === 'w' && h.sims) || (h.k === 'n' && h.size)) {
+        const es = this.entsOf(h)
+        if (!first) first = es
+        last = es
+        if (!ends) for (const e of es) cand.add(e)
+      }
       code += h.n
+    }
+    if (ends && first && last) {
+      const [small, big] = first.size <= last.size ? [first, last] : [last, first]
+      cand = new Set<number>()
+      for (const e of small) if (big.has(e)) cand.add(e)
     }
     const out: Scored[] = []
     if (H.length) {
       const codeKey = code.replace(/[^0-9a-zα-ω]/g, '')
       const consider = (ei: number) => {
         const e = this.idx.entries[ei]
-        let best = { score: 0, explained: 0, mass: 0 }
+        let best = NO_SCORE
         for (const f of e.forms) {
           const r = scoreForm(H, f)
-          if (r.score > best.score) best = r
+          if (r.score > best.score || (r.score === best.score && r.exact && !best.exact)) best = r
         }
-        if (codeKey.length >= 3 && e.codeKey === codeKey) best = { score: 0.97, explained: H.length, mass: H.length }
-        if (best.score > 0) out.push({ entry: e, score: best.score, explained: best.explained, mass: best.mass })
+        if (codeKey.length >= 3 && e.codeKey === codeKey) best = { score: 0.97, explained: H.length, mass: H.length, exact: true, full: true }
+        if (best.score > 0) out.push({ entry: e, score: best.score, explained: best.explained, mass: best.mass, exact: best.exact, full: best.full })
       }
       for (const ei of cand) consider(ei)
       // ακριβής κωδικός
@@ -353,14 +405,15 @@ export class Matcher {
   }
 
   /** Κατάταξη υποψηφίων για τα τμήματα [from, to) */
-  rank(from: number, to: number, roles: Role[], pool: Pool): Scored[] {
+  rank(from: number, to: number, roles: Role[], pool: Pool, ends = false): Scored[] {
     const out: Scored[] = []
-    for (const r of this.raw(from, to, roles)) {
+    for (const r of this.raw(from, to, roles, ends)) {
       const e = r.entry
       const w = e.kind === 'item' ? (e.item && pool.item ? pool.item(e.item) : 0) : e.partner && pool.partner ? pool.partner(e.partner) : 0
-      if (w > 0) out.push({ entry: e, score: r.score * w, explained: r.explained, mass: r.mass })
+      if (w > 0) out.push({ ...r, score: r.score * w })
     }
-    out.sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name))
+    // ίσοι βαθμοί: πρώτα το ακριβές όνομα / alias
+    out.sort((a, b) => b.score - a.score || Number(!!b.exact) - Number(!!a.exact) || a.entry.name.localeCompare(b.entry.name))
     return out
   }
 
@@ -399,7 +452,7 @@ export class Matcher {
         if (r === 'stop') continue
         if (!this.matchable(end - 1, r)) continue
         if (!roles.slice(i, end).some((x, k) => x === 'content' || this.isSize(i + k))) continue
-        const list = this.rank(i, end, roles, pool)
+        const list = this.rank(i, end, roles, pool, true)
         const top = list[0]
         if (!top || top.score < minScore) continue
         // αξία: ό,τι εξηγείται, μείον σταθερό κόστος ανά φράση, μείον ό,τι μένει ανεξήγητο μέσα της
@@ -457,6 +510,8 @@ export function confident(ranked: Scored[]): Scored | null {
   const [a, b] = ranked
   if (!a) return null
   if (a.score >= SURE && (!b || a.score - b.score >= GAP)) return a
+  // ακριβές όνομα / alias μπροστά από άλλη κλίση της ίδιας ρίζας ("πιπέρι" ≠ "πιπεριές")
+  if (a.score >= SURE && a.exact && b && !b.exact && b.full && b.score <= a.score) return a
   if (a.score >= 0.6 && (!b || b.score < 0.45)) return a
   return null
 }

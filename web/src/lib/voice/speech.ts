@@ -185,8 +185,10 @@ export function useSpeechRecognition(lang = 'el-GR') {
   }, [])
 
   const clearError = useCallback(() => setError(null), [])
+  /** ακούει αυτή τη στιγμή; (χωρίς να περιμένει render) */
+  const active = useCallback(() => recRef.current !== null, [])
 
-  return { supported, listening, interim, transcript, error, start, stop, abort, clearError }
+  return { supported, listening, interim, transcript, error, start, stop, abort, clearError, active }
 }
 
 // ---------------------------------------------------------------------
@@ -223,17 +225,24 @@ function pickVoice(lang: string): SpeechSynthesisVoice | null {
   )
 }
 
-let finishCurrent: (() => void) | null = null
+let finishCurrent: ((completed: boolean) => void) | null = null
+// κάθε speak/cancel ακυρώνει ό,τι περίμενε τις φωνές για να μιλήσει
+let speakSeq = 0
 
 export interface SpeakOptions { lang?: string; rate?: number; pitch?: number; volume?: number }
 
-/** Διαβάζει φωναχτά. Επιλύεται όταν τελειώσει (ή αμέσως αν δεν υποστηρίζεται). */
-export function speak(text: string, opts: SpeakOptions = {}): Promise<void> {
-  if (!ttsSupported() || !text.trim()) return Promise.resolve()
+/**
+ * Διαβάζει φωναχτά. Επιλύεται όταν τελειώσει: true αν διαβάστηκε ως το τέλος
+ * (ή δεν υποστηρίζεται), false αν κόπηκε (cancelSpeech, νέο speak, μικρόφωνο).
+ */
+export function speak(text: string, opts: SpeakOptions = {}): Promise<boolean> {
+  if (!ttsSupported() || !text.trim()) return Promise.resolve(true)
   const lang = opts.lang ?? 'el-GR'
-  const run = () => new Promise<void>((resolve) => {
+  const seq = ++speakSeq
+  const run = () => new Promise<boolean>((resolve) => {
+    if (seq !== speakSeq) { resolve(false); return }
     const ss = window.speechSynthesis
-    finishCurrent?.()
+    finishCurrent?.(false)
     ss.cancel()
     const u = new SpeechSynthesisUtterance(text)
     const voice = pickVoice(lang)
@@ -243,28 +252,29 @@ export function speak(text: string, opts: SpeakOptions = {}): Promise<void> {
     u.pitch = opts.pitch ?? 1
     u.volume = opts.volume ?? 1
     let done = false
-    const finish = () => {
+    const finish = (completed: boolean) => {
       if (done) return
       done = true
       window.clearTimeout(guard)
       if (finishCurrent === finish) finishCurrent = null
-      resolve()
+      resolve(completed)
     }
     // ασφάλεια: σε κάποιους browsers το onend δεν έρχεται ποτέ
-    const guard = window.setTimeout(finish, 2500 + text.length * 100)
-    u.onend = finish
-    u.onerror = finish
+    const guard = window.setTimeout(() => finish(true), 2500 + text.length * 100)
+    u.onend = () => finish(true)
+    u.onerror = (e) => finish(!(e && (e.error === 'canceled' || e.error === 'interrupted')))
     finishCurrent = finish
-    try { ss.speak(u) } catch { finish() }
+    try { ss.speak(u) } catch { finish(true) }
   })
   // αν οι φωνές είναι ήδη έτοιμες, μιλάμε συγχρόνως (κρατάει το "άγγιγμα" του χρήστη σε iOS)
   if (window.speechSynthesis.getVoices().length > 0) return run()
   return voicesReady().then(run)
 }
 
-/** Σταματά ό,τι διαβάζεται τώρα */
+/** Σταματά ό,τι διαβάζεται τώρα (και ό,τι περιμένει να διαβαστεί) */
 export function cancelSpeech(): void {
+  speakSeq++
   if (!ttsSupported()) return
   window.speechSynthesis.cancel()
-  finishCurrent?.()
+  finishCurrent?.(false)
 }

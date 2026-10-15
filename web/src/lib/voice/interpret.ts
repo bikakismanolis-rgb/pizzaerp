@@ -5,17 +5,20 @@ import type {
 import { capFirst, norm, titleCase, tokenize, type Tok } from './normalize'
 import { segment, type NumSeg, type Seg } from './numbers'
 import {
-  AFM_WORDS, CENTS, CITY_PREP, EACH, MONEY, PER_ART, PHONE_WORDS, PRICE_PREP, REF_WORDS, TOTAL, UNIT_SHORT, VAT,
-  channelAt, convertUnit, cueOf, genericPack, isItemPack, isMeasureUnit, isStop, unitWord,
+  AFM_WORDS, CENTS, CITIES, CITY_PREP, CORRECTION, EACH, LETTER_NAMES, LOCATION, MINUS_POST, MINUS_PRE, MONEY, MORE,
+  PER_ART, PHONE_WORDS, PLUS_WORDS, PRICE_PREP, REF_WORDS, TOTAL, UNIT_SHORT, VAT,
+  channelAt, convertUnit, cueOf, genericPack, isItemPack, isMeasureUnit, isModifier, isStop, unitWord,
   type Cue, type MeasureUnit,
 } from './lexicon'
 import { Matcher, emptyRef, getIndex, toRef, type Hit, type Index, type Pool, type Role, type Scored } from './match'
+import { fmtCost, fmtMoney } from '../format'
 
 /**
  * Τοπικός interpreter (χωρίς API): κείμενο → εντολή.
- * Στρώσεις: tokens + κανονικοποίηση → αριθμοί → λέξεις εντολής / κανάλια →
- * απόφαση εντολής → φράσεις-οντότητες (είδη, συναλλασσόμενοι) → ζευγάρωμα
- * ποσοτήτων / τιμών / μονάδων → Command. Δεν πετάει ποτέ εξαίρεση.
+ * Στρώσεις: tokens + κανονικοποίηση → αριθμοί → διορθώσεις ("λάθος, 3") →
+ * λέξεις εντολής / κανάλια → απόφαση εντολής → φράσεις-οντότητες (είδη,
+ * συναλλασσόμενοι) → ζευγάρωμα ποσοτήτων / τιμών / μονάδων → Command.
+ * Δεν πετάει ποτέ εξαίρεση.
  */
 
 // ---------------------------------------------------------------------
@@ -45,6 +48,7 @@ const POOL = {
   customers: { partner: (p: Partner) => (p.is_customer ? 1 : 0.55) } as Pool,
   suppliers: { partner: (p: Partner) => (p.is_supplier ? 1 : 0.55) } as Pool,
   partners: { partner: () => 1 } as Pool,
+  items: { item: () => 1 } as Pool,
   all: { item: () => 1, partner: () => 1 } as Pool,
 }
 
@@ -71,6 +75,8 @@ interface NumInfo {
   half: boolean
   size: boolean
   pct: boolean
+  /** αφαιρείται από τη γραμμή ("3 μαργαρίτες μείον 1") */
+  neg?: boolean
 }
 
 interface Ent {
@@ -78,6 +84,8 @@ interface Ent {
   to: number
   hit: Hit
   unknown: boolean
+  /** σκέτος προσδιορισμός δίπλα σε λέξη που δεν βρέθηκε: όχι σίγουρο id */
+  weak?: boolean
 }
 
 interface Line {
@@ -87,6 +95,18 @@ interface Line {
   more?: NumInfo[]
   price: NumInfo | null
 }
+
+const ARTICLES = new Set(['το', 'τον', 'τη', 'την', 'του', 'τησ'])
+const NET_ADJ = new Set(['καθαρη', 'καθαρα', 'καθαρο', 'καθαρησ', 'καθαρων'])
+const TIME_PREV = new Set(['στισ', 'ωρα', 'ωρεσ'])
+/** "τραπέζι 5", "παραγγελία 1234": αριθμός-ετικέτα */
+const LABEL_PREV = new Set(['τραπεζι', 'τραπεζιου', 'τραπεζια', 'παραγγελια', 'παραγγελιασ', 'νουμερο', 'αριθμοσ', 'αριθμο', 'κωδικοσ', 'κωδικο', 'no', 'νο'])
+const CLITIC = new Set(['το', 'τα', 'τη', 'την', 'τον', 'του', 'τουσ', 'τισ', 'μου', 'μασ', 'σου', 'σασ'])
+const SELL_PRESENT = new Set(['πουλαμε', 'πουλαω', 'πουλαει', 'πουλανε', 'πουλαμαι'])
+const TRADE: Cue[] = ['buy', 'sell', 'take1', 'take3', 'invoice', 'note', 'order', 'ordered', 'brought', 'produce', 'did', 'knead', 'count', 'pay', 'receive']
+/** καταλήξεις ρημάτων: λέξη που δεν βρέθηκε και μοιάζει με ρήμα → δεν μαντεύουμε εντολή */
+const KNOWN_VERBS = new Set(['δινουμε', 'δινω', 'δινουν', 'δινουνε', 'πουλαμε', 'πουλαω', 'πουλανε'])
+const VERB_END = /(αμε|ατε|ανε|ουμε|ουνε|ετε|ησα|ησε|ησαν|ηκε|ηκαν|ασα|ασε|ασαν|αξα|αξε|αξαν|ιξα|ιξε|ιξαν|ψα|ψε|ψαν|ωσα|ωσε|ωσαν|εσα|εσε|εσαν|θηκε|θηκαν|ουσε|ουσαν)$/
 
 // ---------------------------------------------------------------------
 // Ανάλυση πρότασης
@@ -101,10 +121,18 @@ class Analysis {
   items: Item[]
   partners: Partner[]
   issues: string[] = []
-  /** τμήματα που "καταναλώθηκαν" από πεδία (αρ. τιμολογίου, ΦΠΑ ...) */
+  /** τμήματα που "καταναλώθηκαν" από πεδία (αρ. τιμολογίου, ΦΠΑ, διορθώσεις ...) */
   used = new Set<number>()
   gross: boolean | null = null
   vatRate: number | null = null
+  /** αριθμοί που δεν μπήκαν πουθενά */
+  loose = 0
+  /** ανώτατη βεβαιότητα (π.χ. όταν μαντέψαμε αν η τιμή είναι σύνολο) */
+  cap = 1
+  /** απογραφή: "στο ψυγείο", "στην αποθήκη" είναι γέμισμα */
+  locStop = false
+  /** αριθμοί που άλλαξαν από διόρθωση: πώς να φαίνονται */
+  relabel = new Map<number, string>()
 
   constructor(public text: string, public ctx: InterpretContext) {
     this.items = Array.isArray(ctx?.items) ? ctx.items : []
@@ -123,6 +151,8 @@ class Analysis {
     }
     this.idx = getIndex(this.items, this.partners)
     this.m = new Matcher(this.idx, this.toks, this.segs)
+    this.applyCorrections()
+    this.uncueNames()
   }
 
   w(i: number): string | null {
@@ -151,14 +181,40 @@ class Analysis {
     return this.chan.some(Boolean)
   }
 
+  /** Μόνο γενικοί προσδιορισμοί ("κατεψυγμένα", "φρέσκο") στο [from, to) */
+  onlyModifiers(from: number, to: number): boolean {
+    let any = false
+    for (let i = from; i < to; i++) {
+      const n = this.w(i)
+      if (n === null) return false
+      if (isStop(n)) continue
+      if (!isModifier(n)) return false
+      any = true
+    }
+    return any
+  }
+
   /** Λέξεις "περιεχομένου": όχι γέμισμα, όχι λέξεις εντολών */
   contentCount(): number {
     let n = 0
     this.segs.forEach((s, i) => {
+      if (this.used.has(i)) return
       if (s.t === 'n') n++
       else if (s.t === 'w' && !isStop(s.tok.n) && !this.cue[i]) n++
     })
     return n
+  }
+
+  /** Απλή λέξη (όχι γέμισμα, εντολή, κανάλι, μονάδα, χρήματα) */
+  isPlainWord(i: number): boolean {
+    const n = this.w(i)
+    if (!n || isStop(n) || this.cue[i] || this.chan[i] || this.unitAt(i)) return false
+    return !MONEY.has(n) && !CENTS.has(n) && !VAT.has(n)
+  }
+
+  contentBetween(p: number, q: number): boolean {
+    for (let i = p; i < q; i++) if (this.isPlainWord(i)) return true
+    return false
   }
 
   roles(reserveChannels: boolean, extraBlock?: Set<number>): Role[] {
@@ -174,15 +230,25 @@ class Analysis {
       if (this.packSlot(i)) return 'unit'
       if (MONEY.has(n) || CENTS.has(n) || VAT.has(n) || TOTAL.has(n) || PRICE_PREP.has(n) || n === 'ανα' || n === '%') return 'block'
       if (REF_WORDS.has(n) || PHONE_WORDS.has(n) || AFM_WORDS.has(n)) return 'block'
-      if (isStop(n)) return 'stop'
+      if (isStop(n) || (this.locStop && LOCATION.has(n))) return 'stop'
       return 'content'
     })
+  }
+
+  /** Φράση μόνο από "πίτσα/πίτσες": δεν είναι είδος (δεν πρέπει να γίνει "Κουτί πίτσας") */
+  private onlyPizza(h: Hit): boolean {
+    for (let i = h.from; i < h.to; i++) {
+      const s = this.segs[i]
+      if (s.t === 'n') return false
+      if (s.t === 'w' && !isStop(s.tok.n) && this.cue[i] !== 'pizza') return false
+    }
+    return true
   }
 
   /** Εντοπισμός οντοτήτων + λέξεων που δεν βρέθηκαν */
   scan(pool: Pool, reserveChannels: boolean, lo = 0, hi = this.segs.length, extraBlock?: Set<number>) {
     const roles = this.roles(reserveChannels, extraBlock)
-    const hits = this.m.find(roles, pool, lo, hi)
+    const hits = this.m.find(roles, pool, lo, hi).filter((h) => !this.onlyPizza(h))
     // λέξεις συσκευασίας / μονάδας αμέσως μετά από αριθμό δεν είναι "άγνωστα είδη"
     const r2 = roles.slice()
     this.segs.forEach((_s, i) => { if (this.packSlot(i)) r2[i] = 'block' })
@@ -205,23 +271,111 @@ class Analysis {
     return this.idx.packs.has(n)
   }
 
-  /** "με ΦΠΑ", "χωρίς ΦΠΑ", "ΦΠΑ 24", "24%" */
-  markVat() {
+  /**
+   * "2 μαργαρίτες, λάθος, 3": η νέα ποσότητα αντικαθιστά την προηγούμενη·
+   * "2 μαργαρίτες λάθος 3 μαργαρίτες": ξαναλέει όλη τη γραμμή.
+   */
+  private applyCorrections() {
+    const n = this.segs.length
+    for (let c = 0; c < n; c++) {
+      const cw = this.w(c)
+      if (!cw || !CORRECTION.has(cw) || this.used.has(c)) continue
+      let j = c + 1
+      while (j < n && (this.segs[j].t === 's' || (this.w(j) !== null && isStop(this.w(j) as string) && !CORRECTION.has(this.w(j) as string)))) j++
+      const M = this.num(j)
+      if (!M || M.pct || M.size) continue
+      let p = c - 1
+      let steps = 0
+      while (p >= 0 && !this.num(p) && steps < 5) { p--; steps++ }
+      const N = p >= 0 ? this.num(p) : null
+      if (!N || N.pct || this.used.has(p)) continue
+      let q = j + 1
+      const mUnit = !!this.unitAt(q)
+      if (mUnit) q++
+      const nx = this.segs[q]
+      const restated = !!nx && nx.t === 'w' && !isStop(nx.tok.n) && !this.cue[q] && !this.chan[q] && !MONEY.has(nx.tok.n) && !CENTS.has(nx.tok.n)
+      if (restated) {
+        for (let k = p; k <= c; k++) if (k === c || (!this.cue[k] && !this.chan[k])) this.used.add(k)
+      } else if (mUnit) {
+        // "5 κιλά μοτσαρέλα, συγγνώμη, 6 κιλά": μένει η νέα με τη μονάδα της
+        this.used.add(p)
+        if (this.unitAt(p + 1)) this.used.add(p + 1)
+        this.used.add(c)
+      } else {
+        // η νέα τιμή μπαίνει στη θέση της παλιάς (κρατά μονάδα και σειρά)
+        N.value = M.value
+        N.digits = M.digits
+        N.words = M.words
+        this.relabel.set(p, this.heard(j, j + 1))
+        if (M.half) N.half = true
+        else delete N.half
+        this.used.add(c)
+        this.used.add(j)
+      }
+      if (cw === 'οχι') this.issues.push(`Κράτησα το «${this.heard(j, j + 1)}» αντί για το προηγούμενο.`)
+      this.cue[c] = null
+    }
+  }
+
+  /** Ονόματα του καταλόγου με λέξεις εντολών ("Μετρό", "Νέα Ζωή"): εκεί δεν είναι εντολές */
+  private uncueNames() {
+    const cand: number[] = []
+    this.segs.forEach((s, i) => {
+      if (s.t === 'w' && this.cue[i] && this.cue[i] !== 'pizza' && !this.used.has(i) && s.tok.key && this.idx.vocab.has(s.tok.key)) cand.push(i)
+    })
+    if (!cand.length) return
+    const roles = this.segs.map((s, i): Role => {
+      if (this.used.has(i) || s.t === 's') return 'block'
+      if (s.t === 'n') return s.pct ? 'block' : 'num'
+      const n = s.tok.n
+      if (this.cue[i] && this.cue[i] !== 'pizza' && !cand.includes(i)) return 'block'
+      if (unitWord(n)) return 'unit'
+      if (isStop(n) && !cand.includes(i)) return 'stop'
+      return 'content'
+    })
+    for (const h of this.m.find(roles, POOL.all, 0, this.segs.length, 0.85)) {
+      const top = h.ranked[0]
+      if (!top || top.score < 0.9) continue
+      for (const i of cand) {
+        if (i < h.from || i >= h.to) continue
+        const n = this.w(i)
+        if (top.entry.forms.some((f) => f.toks.some((t) => t.n === n))) this.cue[i] = null
+      }
+    }
+  }
+
+  /**
+   * "με ΦΠΑ", "χωρίς (το) ΦΠΑ", "ΦΠΑ μέσα", "8 ευρώ καθαρά", "ΦΠΑ 24", "24%".
+   * rate: πότε ένας αριθμός μετά το ΦΠΑ είναι συντελεστής ('always' για νέο
+   * είδος / αγορά, 'strict' όταν ο αριθμός μπορεί να είναι η τιμή).
+   */
+  markVat(rate: 'always' | 'strict' = 'always') {
+    const numCount = this.segs.filter((s) => s.t === 'n').length
     this.segs.forEach((s, i) => {
       const n = this.w(i)
       if (n && VAT.has(n)) {
         this.used.add(i)
-        const p = this.w(i - 1)
-        const pp = this.w(i - 2)
-        if (p === 'με') { this.gross = true; this.used.add(i - 1); if (pp === 'μαζι') this.used.add(i - 2) }
-        else if (p && ['χωρισ', 'συν', 'πλεον', 'προ', 'εκτοσ', 'ανευ'].includes(p)) { this.gross = false; this.used.add(i - 1) }
-        const nx = this.num(i + 1)
-        if (nx && nx.value > 0 && nx.value <= 30) { this.vatRate = nx.value; this.used.add(i + 1) }
-        else if (this.w(i + 1) === 'με' || this.w(i + 1) === 'στο' || this.w(i + 1) === 'στα') {
-          const n2 = this.num(i + 2)
-          if (n2 && n2.value > 0 && n2.value <= 30) { this.vatRate = n2.value; this.used.add(i + 1); this.used.add(i + 2) }
+        let k = i - 1
+        if (ARTICLES.has(this.w(k) ?? '')) k--
+        const p = this.w(k)
+        if (p === 'με' || p === 'συμπεριλαμβανομενου' || p === 'μαζι') {
+          this.gross = true
+          for (let q = k; q < i; q++) this.used.add(q)
+          if (p === 'με' && this.w(k - 1) === 'μαζι') this.used.add(k - 1)
+        } else if (p && ['χωρισ', 'συν', 'πλεον', 'προ', 'εκτοσ', 'ανευ'].includes(p)) {
+          this.gross = false
+          for (let q = k; q < i; q++) this.used.add(q)
         }
-      } else if (n && ['καθαρη', 'καθαρα', 'καθαρο', 'καθαρησ', 'καθαρων'].includes(n) && (this.num(i - 1) || this.num(i + 1))) {
+        const nx = this.w(i + 1)
+        if (nx === 'μεσα' || nx === 'συμπεριλαμβανεται' || nx === 'περιλαμβανεται') { this.gross = true; this.used.add(i + 1) }
+        let r = i + 1
+        if (this.w(r) === 'με' || this.w(r) === 'στο' || this.w(r) === 'στα') r++
+        const x = this.num(r)
+        if (x && this.isRate(x, r, rate === 'always', numCount > 1)) {
+          this.vatRate = x.value
+          for (let q = i + 1; q <= r; q++) this.used.add(q)
+        }
+      } else if (n && NET_ADJ.has(n) && (this.num(i - 1) || this.num(i + 1) || (MONEY.has(this.w(i - 1) ?? '') && this.num(i - 2)))) {
         this.gross = false
         this.used.add(i)
       } else if (s.t === 'n' && s.pct && [6, 13, 24].includes(s.value)) {
@@ -229,6 +383,16 @@ class Analysis {
         this.used.add(i)
       }
     })
+  }
+
+  /** Αριθμός μετά το ΦΠΑ: συντελεστής ή τιμή / ποσότητα; ("με ΦΠΑ 8 ευρώ", "χωρίς ΦΠΑ 20 κιλά") */
+  private isRate(x: NumSeg, r: number, always: boolean, others: boolean): boolean {
+    if (x.pct) return x.value >= 0 && x.value <= 30
+    if (!Number.isInteger(x.value) || x.value > 30) return false
+    const nx = this.w(r + 1)
+    if (nx && (MONEY.has(nx) || CENTS.has(nx) || unitWord(nx) || genericPack(nx) || this.isAnyPack(nx))) return false
+    if ([0, 6, 13, 24].includes(x.value)) return always || others
+    return others
   }
 
   /** Είναι το τμήμα j μονάδα ή συσκευασία; */
@@ -239,6 +403,16 @@ class Analysis {
     if (u && isMeasureUnit(u)) return { unit: u, pack: null }
     if (genericPack(n) || this.isAnyPack(n)) return { unit: null, pack: n }
     return null
+  }
+
+  /** Ακολουθεί είδος του καταλόγου (ή μονάδα); ("τιμολόγιο 20 μοτσαρέλες") */
+  itemFollows(j: number): boolean {
+    const s = this.segs[j]
+    if (!s || s.t !== 'w') return false
+    if (this.unitAt(j)) return true
+    if (isStop(s.tok.n) || this.cue[j] || this.chan[j]) return false
+    const top = this.m.rank(j, j + 1, this.roles(true), POOL.items)[0]
+    return !!top && top.score >= 0.7
   }
 
   /** "το κιλό", "ανά σακί", "τη μία", "έκαστο" */
@@ -275,7 +449,7 @@ class Analysis {
         prep: false, kaiNext: false, words: s.words, half: !!s.half, size: !!s.size, pct: !!s.pct,
       }
       let j = i + 1
-      const u = skip.has(j) ? null : this.unitAt(j)
+      const u = skip.has(j) || this.used.has(j) ? null : this.unitAt(j)
       if (u) { info.unit = u.unit; info.pack = u.pack; j++; info.qtyEnd = j }
       // "ένα κιλό και μισό"
       if (u && this.w(j) === 'και' && this.num(j + 1)?.half) { info.value += 0.5; eaten.add(j + 1); j += 2; info.qtyEnd = j }
@@ -303,7 +477,7 @@ class Analysis {
       const prev = this.w(i - 1)
       const prev2 = this.w(i - 2)
       if (prev && (TOTAL.has(prev) || (prev === 'μαζι' && prev2 && TOTAL.has(prev2)))) info.total = true
-      if (prev && (PRICE_PREP.has(prev) || this.cue[i - 1] === 'price')) info.prep = true
+      if (prev && (PRICE_PREP.has(prev) || this.cue[i - 1] === 'price' || this.cue[i - 1] === 'priceVerb')) info.prep = true
       info.end = j
       info.kaiNext = this.w(j) === 'και' && !!this.num(j + 1)
       out.push(info)
@@ -347,7 +521,16 @@ class Analysis {
   }
 
   heardQty(x: NumInfo): string {
-    return this.heard(x.i, x.qtyEnd)
+    const r = this.relabel.get(x.i)
+    if (r === undefined) return this.heard(x.i, x.qtyEnd)
+    return x.qtyEnd > x.i + 1 ? `${r} ${this.heard(x.i + 1, x.qtyEnd)}` : r
+  }
+
+  /** Αριθμός που περίσσεψε: προειδοποίηση (εκτός από άρθρα "ένα/μία" και ώρες) */
+  lost(x: NumInfo) {
+    if (isArticle(x) || isTime(this, x)) return
+    this.loose++
+    this.issues.push(`Δεν κατάλαβα τι είναι το «${this.heard(x.i, Math.max(x.qtyEnd, x.end))}».`)
   }
 }
 
@@ -355,6 +538,10 @@ class Analysis {
 // Ζευγάρωμα ποσοτήτων / τιμών με είδη
 // ---------------------------------------------------------------------
 const isPriceNum = (x: NumInfo) => x.money || !!x.per || x.total || x.prep
+/** "ένα", "μία" χωρίς μονάδα: μπορεί να είναι απλώς άρθρο */
+const isArticle = (x: NumInfo) => x.words && x.value === 1 && !x.unit && !x.pack && !x.money && !x.per && !x.total
+/** "στις 10", "τραπέζι 5": όχι ποσότητα ούτε τιμή */
+const isTime = (a: Analysis, x: NumInfo) => !x.unit && !x.pack && !x.money && (TIME_PREV.has(a.w(x.i - 1) ?? '') || LABEL_PREV.has(a.w(x.i - 1) ?? ''))
 
 /** Είδη που έχουν αυτή τη συσκευασία ("10 σακιά" χωρίς είδος → αλεύρι) */
 function packRanked(a: Analysis, pack: string, pool: Pool): Scored[] {
@@ -367,10 +554,225 @@ function packRanked(a: Analysis, pack: string, pool: Pool): Scored[] {
   return out.sort((x, y) => y.score - x.score)
 }
 
-function pairLines(a: Analysis, known: Ent[], unknown: Ent[], nums: NumInfo[], priced: boolean, pool: Pool): Line[] {
+/** Ταιριάζει η μονάδα / συσκευασία του αριθμού στο είδος (στους κύριους υποψηφίους του); */
+function fitScore(e: Ent, x: NumInfo): number {
+  if (!x.unit && !x.pack) return 0
+  const r = e.hit.ranked
+  const top = r[0]?.score ?? 0
+  const its = r.filter((s) => s.entry.item && s.score >= top * 0.6).slice(0, 6).map((s) => s.entry.item as Item)
+  if (!its.length) return 0
+  const ok = its.some((it) => (x.unit ? convertUnit(1, x.unit, it.unit) !== null : isItemPack(x.pack as string, it)))
+  return ok ? 1 : -6
+}
+
+/** Λέξεις ανάμεσα σε δύο ποσότητες της ίδιας γραμμής: "και", "και άλλα", "μείον", "στο ψυγείο και" */
+function glueWords(a: Analysis, p: number, q: number, ent: Ent | null): { more: boolean; sub: boolean } | null {
+  let more = false
+  let sub = false
+  for (let i = p; i < q; i++) {
+    if (ent && i >= ent.from && i < ent.to) continue
+    const s = a.segs[i]
+    if (s.t !== 'w') return null
+    const n = s.tok.n
+    if (MORE.has(n) || LOCATION.has(n)) more = true
+    else if (MINUS_PRE.has(n)) sub = true
+    else if (!(n === 'και' || n === 'κι' || isStop(n))) return null
+  }
+  return { more, sub }
+}
+
+/** x προστίθεται (ή αφαιρείται) στην ποσότητα prev της ίδιας γραμμής; */
+function glueFwd(a: Analysis, prev: NumInfo, x: NumInfo, ent: Ent): { sub: boolean } | null {
+  if (x.i < prev.end) return null
+  const g = glueWords(a, prev.end, x.i, ent)
+  if (!g) return null
+  const explicit = g.more || g.sub || a.w(x.end) === 'ακομα' || a.w(x.end) === 'επιπλεον'
+  if (!x.unit && !x.pack) return explicit ? { sub: g.sub } : null
+  if (fitScore(ent, x) < 0) return null
+  if (!prev.unit && !prev.pack && !explicit) return null
+  if (!explicit && ((x.unit && x.unit === prev.unit) || (x.pack && x.pack === prev.pack))) return null
+  return { sub: g.sub }
+}
+
+/** "3 κιλά και 200 γραμμάρια μοτσαρέλα": η x ενώνεται με την επόμενη ποσότητα */
+function glueBack(a: Analysis, x: NumInfo, next: NumInfo, ent: Ent): boolean {
+  if (x.end >= next.i) return false
+  for (let i = x.end; i < next.i; i++) { const n = a.w(i); if (n !== 'και' && n !== 'κι') return false }
+  if (!(x.unit || x.pack) || !(next.unit || next.pack)) return false
+  if ((x.unit && x.unit === next.unit) || (x.pack && x.pack === next.pack)) return false
+  return fitScore(ent, x) >= 0 && fitScore(ent, next) >= 0
+}
+
+/**
+ * Ποσότητες σε είδη: δυναμικός προγραμματισμός πάνω στα είδη. Κάθε είδος
+ * παίρνει τον αριθμό ακριβώς πριν ("3 μαργαρίτες") ή ακριβώς μετά
+ * ("μοτσαρέλα 6 κιλά") ή κανέναν. Κερδίζει η επιλογή που δίνει ποσότητα σε
+ * περισσότερα είδη, με ταιριαστές μονάδες, συνεπή κατεύθυνση και χωρίς
+ * αριθμούς που περισσεύουν. Επιστρέφει τους αριθμούς που μπήκαν.
+ */
+function assignQty(a: Analysis, ents: Ent[], lines: Line[], qn: NumInfo[], priced: boolean): Set<NumInfo> {
+  const k = ents.length
+  const gaps: NumInfo[][] = Array.from({ length: k + 1 }, () => [])
+  for (const x of qn) {
+    let g = 0
+    while (g < k && ents[g].to <= x.i) g++
+    gaps[g].push(x)
+  }
+  const preOf = (g: number) => gaps[g][gaps[g].length - 1] ?? null
+  const postOf = (g: number) => gaps[g + 1][0] ?? null
+  const assignScore = (g: number, c: number): number => {
+    if (c === 0) return 0
+    const e = ents[g]
+    const x = c === 1 ? preOf(g) : postOf(g)
+    if (!x) return -Infinity
+    let v = 10 + fitScore(e, x)
+    if (c === 1) {
+      v += 0.1
+      if (a.sepBetween(x.end, e.from)) v -= 3
+      if (a.contentBetween(x.end, e.from)) v -= 2
+    } else {
+      if (a.sepBetween(e.to, x.i)) v -= 3
+      if (a.contentBetween(e.to, x.i)) v -= 2
+      if (isArticle(x) && a.isPlainWord(x.end)) v -= 3
+    }
+    return v
+  }
+  /** αριθμοί του κενού g που κολλάνε σε γειτονική ποσότητα */
+  const gapGlue = (g: number, cPrev: number, cCur: number, usedIdx: Set<number>): Set<number> => {
+    const L = gaps[g]
+    const glued = new Set<number>()
+    if (g > 0 && cPrev) {
+      let last: NumInfo | null = cPrev === 2 ? L[0] : preOf(g - 1)
+      let j = cPrev === 2 ? 1 : 0
+      while (last && j < L.length && !usedIdx.has(j) && glueFwd(a, last, L[j], ents[g - 1])) { glued.add(j); last = L[j]; j++ }
+    }
+    if (g < k && cCur === 1) {
+      let next = L[L.length - 1]
+      let j = L.length - 2
+      while (j >= 0 && !usedIdx.has(j) && !glued.has(j) && glueBack(a, L[j], next, ents[g])) { glued.add(j); next = L[j]; j-- }
+    }
+    return glued
+  }
+  const gapCost = (g: number, cPrev: number, cCur: number): number => {
+    const L = gaps[g]
+    if (!L.length) return 0
+    const usedIdx = new Set<number>()
+    if (g > 0 && cPrev === 2) usedIdx.add(0)
+    if (g < k && cCur === 1) {
+      if (usedIdx.has(L.length - 1)) return -Infinity
+      usedIdx.add(L.length - 1)
+    }
+    const glued = gapGlue(g, cPrev, cCur, usedIdx)
+    let cost = 0
+    L.forEach((x, j) => {
+      if (usedIdx.has(j)) return
+      if (glued.has(j)) cost -= 0.3
+      else cost -= isArticle(x) || isTime(a, x) ? 0.5 : priced && g > 0 ? 1 : 4
+    })
+    return cost
+  }
+  const switchCost = (g: number, cPrev: number, cCur: number): number => {
+    if (!cPrev || !cCur || cPrev === cCur) return 0
+    if (cPrev === 2 && cCur === 1) {
+      const L = gaps[g]
+      return a.sepBetween(L[0].end, L[L.length - 1].i) ? -0.2 : -1
+    }
+    return -1.5
+  }
+  const NEG = -1e9
+  let f = [0, NEG, NEG]
+  const back: number[][] = []
+  for (let g = 0; g < k; g++) {
+    const nf = [NEG, NEG, NEG]
+    const bk = [0, 0, 0]
+    for (let c = 0; c < 3; c++) {
+      const as = assignScore(g, c)
+      if (as === -Infinity) continue
+      for (let cp = 0; cp < 3; cp++) {
+        if (f[cp] <= NEG / 2) continue
+        const gc = gapCost(g, g === 0 ? 0 : cp, c)
+        if (gc === -Infinity) continue
+        const v = f[cp] + as + gc + (g > 0 ? switchCost(g, cp, c) : 0)
+        if (v > nf[c]) { nf[c] = v; bk[c] = cp }
+      }
+    }
+    f = nf
+    back.push(bk)
+  }
+  let bc = 0
+  let best = NEG
+  for (let c = 0; c < 3; c++) {
+    if (f[c] <= NEG / 2) continue
+    const v = f[c] + gapCost(k, c, 0)
+    if (v > best) { best = v; bc = c }
+  }
+  const choice = new Array<number>(k).fill(0)
+  for (let g = k - 1; g >= 0; g--) { choice[g] = bc; bc = back[g][bc] }
+
+  const used = new Set<NumInfo>()
+  choice.forEach((c, g) => {
+    const x = c === 1 ? preOf(g) : c === 2 ? postOf(g) : null
+    if (x) { lines[g].qty = x; used.add(x) }
+  })
+  // κόλλημα πρόσθετων ποσοτήτων με τους ίδιους κανόνες
+  for (let g = 0; g <= k; g++) {
+    const L = gaps[g]
+    if (!L.length) continue
+    const cPrev = g > 0 ? choice[g - 1] : 0
+    const cCur = g < k ? choice[g] : 0
+    if (g > 0 && cPrev) {
+      const line = lines[g - 1]
+      let last = cPrev === 2 ? L[0] : (preOf(g - 1) as NumInfo)
+      let j = cPrev === 2 ? 1 : 0
+      while (j < L.length && !used.has(L[j])) {
+        const gl = glueFwd(a, last, L[j], ents[g - 1])
+        if (!gl) break
+        const x = L[j]
+        const add: NumInfo = x.unit || x.pack ? { ...x } : { ...x, unit: last.unit, pack: last.pack }
+        if (gl.sub) add.neg = true
+        line.more = [...(line.more ?? []), add]
+        used.add(x)
+        last = x
+        j++
+      }
+    }
+    if (g < k && cCur === 1) {
+      const line = lines[g]
+      const prim = line.qty as NumInfo
+      const before: NumInfo[] = []
+      let next = prim
+      let j = L.length - 2
+      while (j >= 0 && !used.has(L[j]) && glueBack(a, L[j], next, ents[g])) { before.unshift(L[j]); used.add(L[j]); next = L[j]; j-- }
+      if (before.length) {
+        line.qty = before[0]
+        line.more = [...before.slice(1), prim, ...(line.more ?? [])]
+      }
+    }
+  }
+  return used
+}
+
+/** Είδη με αυτόν τον αριθμό στο όνομα, από την ίδια "οικογένεια" με τις άλλες γραμμές ("12 των 400") */
+function sizeFamily(a: Analysis, v: number, lines: Line[], pool: Pool): Scored[] {
+  const keysOf = (e: Scored['entry']) => new Set(e.forms.flatMap((f) => f.toks.filter((t) => t.k === 'w').map((t) => t.key)))
+  const fams = lines.map((l) => l.ent.hit.ranked[0]?.entry).filter(Boolean).map((e) => keysOf(e as Scored['entry']))
+  const out: Scored[] = []
+  for (const ei of a.idx.nums.get(v) ?? []) {
+    const e = a.idx.entries[ei]
+    if (!e.item || !pool.item || pool.item(e.item) <= 0) continue
+    const ks = keysOf(e)
+    if (fams.some((f) => [...ks].some((x) => f.has(x)))) out.push({ entry: e, score: 0.9, explained: 1 })
+  }
+  return out
+}
+
+/** Αριθμός που μοιάζει με τιμή σε εντολή χωρίς τιμές ("18 ευρώ", "κάνουν 16", "12,50") */
+const priceish = (x: NumInfo, tally: boolean) =>
+  x.money || !!x.per || x.prep || x.total || (tally && !Number.isInteger(x.value) && !x.unit && !x.pack)
+
+function pairLines(a: Analysis, known: Ent[], unknown: Ent[], nums: NumInfo[], priced: boolean, pool: Pool, tally = false): Line[] {
   const ents = known.slice().sort((x, y) => x.from - y.from)
   const lines: Line[] = ents.map((e) => ({ ent: e, qty: null, price: null }))
-  const k = lines.length
   // "60 σπέσιαλ κατεψυγμένες 3,90": δεκαδικός χωρίς μονάδα δίπλα σε είδος σε τεμάχια = τιμή
   const unitOfNear = (x: NumInfo) => {
     let near: Ent | undefined
@@ -380,88 +782,28 @@ function pairLines(a: Analysis, known: Ent[], unknown: Ent[], nums: NumInfo[], p
   }
   const looksPrice = (x: NumInfo) =>
     isPriceNum(x) || (!Number.isInteger(x.value) && !x.unit && !x.pack && !x.half && unitOfNear(x) === 'τεμ')
-  const qn = nums.filter((x) => !x.size && !x.pct && !(priced && looksPrice(x)) && !(!priced && (x.money || x.per)))
+  const qn = nums.filter((x) => !x.size && !x.pct && !(priced && looksPrice(x)) && !(!priced && priceish(x, tally)))
   const pn = priced ? nums.filter((x) => !x.size && !x.pct && looksPrice(x)) : []
-  const gapOf = (pos: number) => { let g = 0; while (g < k && ents[g].to <= pos) g++; return g }
-  const give = (g: number, x: NumInfo) => {
-    if (g >= 0 && g < k && !lines[g].qty) { lines[g].qty = x; return true }
-    return false
-  }
-  const left: NumInfo[] = []
-  if (k === 0) left.push(...qn)
-  else {
-    const gaps: NumInfo[][] = Array.from({ length: k + 1 }, () => [])
-    for (const x of qn) gaps[gapOf(x.i)].push(x)
-    // "3 μαργαρίτες 2 σπέσιαλ" (πριν) ή "μοτσαρέλα 6 αλεύρι 47" (μετά) ή ανάμεικτο
-    const style = gaps[0].length && !gaps[k].length ? 'pre' : gaps[k].length && !gaps[0].length ? 'post' : 'mixed'
-    gaps[0].forEach((x, j) => { if (!(j === gaps[0].length - 1 && give(0, x))) left.push(x) })
-    for (let g = 1; g < k; g++) {
-      const L = gaps[g]
-      if (!L.length) continue
-      if (L.length >= 2) {
-        if (style === 'post') {
-          if (!give(g - 1, L[0])) left.push(L[0])
-          left.push(...L.slice(1))
-        } else if (style === 'pre') {
-          const last = L[L.length - 1]
-          left.push(...L.slice(0, -1))
-          if (!give(g, last)) left.push(last)
-        } else {
-          if (!give(g - 1, L[0])) left.push(L[0])
-          left.push(...L.slice(1, -1))
-          const last = L[L.length - 1]
-          if (!give(g, last)) left.push(last)
-        }
-      } else {
-        const x = L[0]
-        const sb = a.sepBetween(ents[g - 1].to, x.i)
-        const sa = a.sepBetween(x.end, ents[g].from)
-        let toLeft = style === 'post'
-        if (sb && !sa) toLeft = false
-        else if (sa && !sb) toLeft = true
-        const ok = toLeft ? give(g - 1, x) || give(g, x) : give(g, x) || give(g - 1, x)
-        if (!ok) left.push(x)
-      }
-    }
-    gaps[k].forEach((x, j) => { if (!(j === 0 && give(k - 1, x))) left.push(x) })
-  }
-  // "αλεύρι 2 σακιά και 10 κιλά", "μοτσαρέλα 5 κιλά και άλλα 2": πρόσθεση στην ίδια γραμμή
-  const MORE = new Set(['αλλα', 'αλλεσ', 'αλλουσ', 'αλλοι', 'αλλο', 'αλλη', 'ακομα', 'ακομη', 'επιπλεον', 'συν'])
-  const glue = (p: number, q: number, ent: Ent) => {
-    let more = false
-    for (let i = p; i < q; i++) {
-      if (i >= ent.from && i < ent.to) continue
-      const s = a.segs[i]
-      if (s.t !== 'w') return null
-      const n = s.tok.n
-      if (MORE.has(n)) more = true
-      else if (!(n === 'και' || n === 'κι' || isStop(n))) return null
-    }
-    return { more }
-  }
-  const sameUnit = (x: NumInfo, y: NumInfo) => (x.unit && x.unit === y.unit) || (x.pack && x.pack === y.pack)
+  const used = lines.length ? assignQty(a, ents, lines, qn, priced) : new Set<NumInfo>()
+  const left = qn.filter((x) => !used.has(x))
+  // "25 ζυμάρια των 250 και 12 των 400": δεύτερη γραμμή μόνο με το μέγεθος
+  const extra: Line[] = []
   for (const x of left.slice()) {
-    for (const l of lines) {
-      const prev = l.more?.length ? l.more[l.more.length - 1] : l.qty
-      if (!prev || prev.i > x.i) continue
-      const gl = glue(prev.end, x.i, l.ent)
-      const after = a.w(x.end)
-      const explicit = !!gl?.more || after === 'ακομα' || after === 'επιπλεον'
-      if (!gl || (!prev.unit && !prev.pack && !explicit)) continue
-      if (!x.unit && !x.pack) {
-        // "5 κιλά και άλλα 2": ίδια μονάδα με πριν
-        if (!explicit) continue
-        l.more = [...(l.more ?? []), { ...x, unit: prev.unit, pack: prev.pack }]
-      } else if (explicit || !sameUnit(prev, x)) {
-        l.more = [...(l.more ?? []), x]
-      } else continue
-      left.splice(left.indexOf(x), 1)
-      break
-    }
+    if (x.unit || x.pack || !left.includes(x)) continue
+    let j = x.end
+    while (['των', 'του', 'τησ', 'τα', 'τισ', 'τουσ', 'απο'].includes(a.w(j) ?? '')) j++
+    if (j === x.end) continue
+    const y = left.find((n) => n.i === j && !n.unit && !n.pack && n !== x)
+    if (!y) continue
+    const fam = sizeFamily(a, y.value, lines, pool)
+    if (!fam.length) continue
+    const hit: Hit = { from: x.end, to: y.end, heard: a.heard(x.end, y.end), ranked: fam }
+    extra.push({ ent: { from: x.end, to: y.end, hit, unknown: false }, qty: x, price: null })
+    left.splice(left.indexOf(x), 1)
+    left.splice(left.indexOf(y), 1)
   }
   // περισσευούμενοι αριθμοί: σε λέξεις που δεν βρέθηκαν ("δύο καλτσόνε")
-  const extra: Line[] = []
-  const rest: NumInfo[] = []
+  let rest: NumInfo[] = []
   const free = unknown.slice()
   const between = (p: number, q: number) => {
     for (let i = p; i < q; i++) {
@@ -475,7 +817,7 @@ function pairLines(a: Analysis, known: Ent[], unknown: Ent[], nums: NumInfo[], p
   for (const x of left.sort((p, q) => p.i - q.i)) {
     let ui = free.findIndex((u) => u.from >= x.end && between(x.end, u.from))
     if (ui < 0) ui = free.findIndex((u) => u.to <= x.i && between(u.to, x.i))
-    if (ui >= 0) {
+    if (ui >= 0 && !(isArticle(x) && free[ui].to <= x.i && a.isPlainWord(x.end))) {
       extra.push({ ent: free[ui], qty: x, price: null })
       free.splice(ui, 1)
     } else if (x.pack && packRanked(a, x.pack, pool).length) {
@@ -484,16 +826,31 @@ function pairLines(a: Analysis, known: Ent[], unknown: Ent[], nums: NumInfo[], p
     } else rest.push(x)
   }
   const all = lines.concat(extra).sort((p, q) => p.ent.from - q.ent.from)
-  if (priced) {
-    // τιμές: στο είδος αριστερά (που δεν έχει τιμή), αλλιώς δεξιά
-    const prices = pn.concat(rest).sort((p, q) => p.i - q.i)
+  if (priced && all.length) {
+    // αριθμός χωρίς "ευρώ" μετά από γραμμή με ποσότητα = τιμή ("10 κιλά μοτσαρέλα 7")·
+    // πριν από τα είδη ή "ένα/μία" ή "στις 10" δεν είναι τιμή
+    const asPrice = rest.filter((x) => !isArticle(x) && !isTime(a, x) && all.some((l) => l.qty && l.ent.to <= x.i && l.qty.i < x.i))
+    rest = rest.filter((x) => !asPrice.includes(x))
+    const prices = pn.concat(a.mergeCents(asPrice.sort((p, q) => p.i - q.i), true)).sort((p, q) => p.i - q.i)
+    const lastEnd = Math.max(...all.map((l) => Math.max(l.ent.to, l.qty?.end ?? 0)))
     for (const p of prices) {
+      // "σύνολο 400" στο τέλος πολλών γραμμών: για όλο το τιμολόγιο, δεν μοιράζεται
+      if (p.total && all.length > 1 && p.i >= lastEnd && all.every((l) => !l.price)) {
+        a.issues.push(`Το σύνολο ${fmtMoney(p.value)} είναι για όλο το τιμολόγιο; Δεν το μοίρασα στα είδη.`)
+        a.cap = Math.min(a.cap, 0.7)
+        continue
+      }
+      // τιμές: στο είδος αριστερά (που δεν έχει τιμή), αλλιώς δεξιά
       let target: Line | null = null
       for (const l of all) if (l.ent.to <= p.i && !l.price) target = l
       if (!target) target = all.find((l) => l.ent.from >= p.end && !l.price) ?? null
       if (target) target.price = p
+      else a.lost(p)
     }
   }
+  if (all.length) for (const x of rest) a.lost(x)
+  // τιμή σε εντολή χωρίς τιμές: ο μετρητής το λέει μόνος του, οι άλλες ως αριθμό που περισσεύει
+  if (!priced && !tally && all.length) for (const x of nums) if (!x.size && !x.pct && priceish(x, false)) a.lost(x)
   return all
 }
 
@@ -501,12 +858,14 @@ function pairLines(a: Analysis, known: Ent[], unknown: Ent[], nums: NumInfo[], p
 function lineQty(a: Analysis, l: Line, item: Item | null, label: string): number | null {
   const q = qtyFor(a, l.qty, item, label)
   if (q === null || !l.more?.length) return q
-  return round(l.more.reduce((s, x) => s + (qtyFor(a, x, item, label) ?? 0), q), 6)
+  return round(l.more.reduce((s, x) => s + (x.neg ? -1 : 1) * (qtyFor(a, x, item, label) ?? 0), q), 6)
 }
 
 function lineHeardQty(a: Analysis, l: Line): string | undefined {
   if (!l.qty) return undefined
-  return [l.qty, ...(l.more ?? [])].map((x) => a.heardQty(x)).join(' και ')
+  let s = a.heardQty(l.qty)
+  for (const x of l.more ?? []) s += (x.neg ? ' μείον ' : ' και ') + a.heardQty(x)
+  return s
 }
 
 /** Ποσότητα στη μονάδα του είδους */
@@ -525,8 +884,70 @@ function qtyFor(a: Analysis, x: NumInfo | null, item: Item | null, label: string
   return round(v, 6)
 }
 
+const UNIT_LABEL: Record<string, string> = { kg: 'κιλό', g: 'γραμμάριο', L: 'λίτρο', ml: 'ml', τεμ: 'τεμάχιο' }
+
+/**
+ * Τιμή χωρίς "το κιλό" / "σύνολο": ανά μονάδα, ανά συσκευασία ή σύνολο γραμμής;
+ * Με μέσο κόστος (αγορά) ή τιμή πώλησης (πώληση): το πιο κοντινό. Χωρίς
+ * αναφορά: κανόνας + προειδοποίηση που λέει πώς διαβάστηκε.
+ */
+function guessPrice(a: Analysis, l: Line, item: Item, qty: number, v: number, ref: Item | null, kind: 'cost' | 'sale'): number {
+  const x = l.qty
+  const pq = Number(item.pack_qty)
+  const inPacks = !!x?.pack && pq > 0 && isItemPack(x.pack, item)
+  const iu: MeasureUnit = isMeasureUnit(item.unit) ? item.unit : 'τεμ'
+  let perNat: number
+  let nNat: number
+  let natLabel: string
+  if (inPacks) {
+    perNat = v / pq
+    nNat = qty / pq
+    natLabel = item.pack_name ?? 'συσκευασία'
+  } else {
+    let u: MeasureUnit = x?.unit ?? iu
+    if (u === 'g') u = 'kg'
+    if (u === 'ml') u = 'L'
+    if (convertUnit(1, u, iu) === null) u = iu
+    const f = convertUnit(1, iu, u) ?? 1
+    perNat = v * f
+    nNat = qty * f
+    natLabel = UNIT_LABEL[u] ?? u
+  }
+  const total = v / qty
+  const opts = [perNat, total]
+  if (inPacks || perNat !== v) opts.push(v)
+  const refV = ref ? Number(kind === 'sale' ? ref.sale_price : ref.avg_cost) : 0
+  const label = item.name
+  if (refV > 0) {
+    const dist = (y: number) => Math.abs(Math.log(y / refV))
+    const best = opts.reduce((b, y) => (y > 0 && dist(y) < dist(b) ? y : b), opts[0])
+    if (dist(best) > Math.log(3)) {
+      a.issues.push(`Η τιμή για «${label}» (${fmtCost(best)} ανά ${UNIT_LABEL[iu] ?? iu}) είναι μακριά από τη συνηθισμένη (${fmtCost(refV)}).`)
+      a.cap = Math.min(a.cap, 0.8)
+    }
+    return best
+  }
+  // "προς 7,20": τιμή μονάδας
+  if (x?.prep || l.price?.prep || Math.abs(nNat - 1) < 1e-9) return perNat
+  let pick: number
+  if (nNat < 1) pick = total
+  else if (inPacks && v < 5) pick = v
+  else if (Number.isInteger(v) && (v >= 3 * nNat || v * nNat > 1000)) pick = total
+  else pick = perNat
+  const unitTxt = UNIT_LABEL[iu] ?? iu
+  if (pick === total) {
+    a.issues.push(`Για «${label}» πήρα τα ${fmtMoney(v)} ως σύνολο (${fmtCost(total)} ανά ${unitTxt}).`)
+    a.cap = Math.min(a.cap, 0.85)
+  } else if (Number.isInteger(v) && v >= nNat) {
+    // "2 κιλά μαγιά 3 ευρώ": θα μπορούσε να είναι και σύνολο
+    a.issues.push(`Για «${label}» πήρα τα ${fmtCost(v)} ανά ${pick === v && pick !== perNat ? unitTxt : natLabel}· αν είναι σύνολο, διόρθωσέ το.`)
+    a.cap = Math.min(a.cap, 0.9)
+  }
+  return pick
+}
+
 /** Τιμή ανά μονάδα είδους, χωρίς ΦΠΑ */
-function priceFor(a: Analysis, l: Line, item: Item | null, qty: number | null): number | null {
+function priceFor(a: Analysis, l: Line, item: Item | null, qty: number | null, ref: Item | null, kind: 'cost' | 'sale'): number | null {
   const p = l.price
   if (!p) return null
   let v = p.value
@@ -540,17 +961,7 @@ function priceFor(a: Analysis, l: Line, item: Item | null, qty: number | null): 
     const pq = Number(item.pack_qty)
     if (pq > 0) v = v / pq
   } else if (!p.per && item && qty) {
-    // χωρίς "το κιλό" / "σύνολο": ανά μονάδα, ανά συσκευασία ή σύνολο γραμμής;
-    const pq = Number(item.pack_qty)
-    const inPacks = !!l.qty?.pack && pq > 0 && isItemPack(l.qty.pack, item)
-    const options = [inPacks ? v / pq : v, v / qty]
-    const avg = Number(item.avg_cost)
-    if (avg > 0) {
-      // το πιο κοντινό στο μέσο κόστος
-      const dist = (x: number) => Math.abs(Math.log(x / avg))
-      v = options.reduce((b, x) => (x > 0 && dist(x) < dist(b) ? x : b), options[0])
-    } else if (inPacks && l.qty && l.qty.value > 1 && v > 50) v = options[1]
-    else v = options[0]
+    v = guessPrice(a, l, item, qty, v, ref, kind)
   }
   if (a.gross && item) v = v / (1 + Number(item.vat_rate ?? 0) / 100)
   return round(v)
@@ -574,10 +985,40 @@ function itemById(a: Analysis, id: string | null): Item | null {
   return id ? a.items.find((i) => i.id === id) ?? null : null
 }
 
+/** Είδη των υποψηφίων μιας αναφοράς */
+function candItems(a: Analysis, r: EntityRef): Item[] {
+  return r.candidates.map((c) => itemById(a, c.id)).filter((x): x is Item => !!x)
+}
+
+/**
+ * Είδος για τη μετατροπή μονάδων όταν δεν ξέρουμε ακόμα ποιο είναι: όλοι οι
+ * υποψήφιοι έχουν την ίδια μονάδα (και την ίδια συσκευασία). Αλλιώς null.
+ */
+function unitItem(a: Analysis, r: EntityRef, l: Line): Item | null {
+  const xs = [l.qty, ...(l.more ?? [])].filter((x): x is NumInfo => !!x)
+  if (!xs.some((x) => x.unit || x.pack)) return null
+  const cs = candItems(a, r)
+  if (!cs.length || !cs.every((c) => c.unit === cs[0].unit)) return null
+  for (const x of xs) {
+    if (x.pack && !cs.every((c) => isItemPack(x.pack as string, c) && Number(c.pack_qty) === Number(cs[0].pack_qty))) return null
+  }
+  return cs[0]
+}
+
+/** Αναφορά χωρίς είδος με μονάδα που ίσως θέλει μετατροπή: προειδοποίηση */
+function unitIssue(a: Analysis, r: EntityRef, l: Line, item: Item | null) {
+  if (item || r.id || !l.qty || !(l.qty.unit || l.qty.pack)) return
+  a.issues.push(`«${r.heard || '?'}»: έλεγξε την ποσότητα όταν διαλέξεις είδος (ακούστηκε «${lineHeardQty(a, l)}»).`)
+}
+
 /** Προειδοποίηση για αναφορά χωρίς σίγουρο id */
 function refIssue(a: Analysis, r: EntityRef, what: string) {
   if (r.id) return
-  if (!r.heard) { a.issues.push(`Δεν ακούστηκε ${what}.`); return }
+  if (!r.heard) {
+    if (r.candidates.length > 1) a.issues.push(`Ποιο από: ${r.candidates.slice(0, 3).map((c) => c.name).join(' ή ')};`)
+    else a.issues.push(`Δεν ακούστηκε ${what}.`)
+    return
+  }
   if (!r.candidates.length) a.issues.push(`Δεν βρέθηκε «${r.heard}».`)
   else if (r.candidates.length === 1) a.issues.push(`«${r.heard}»: εννοείς ${r.candidates[0].name};`)
   else a.issues.push(`«${r.heard}»: εννοείς ${r.candidates.slice(0, 3).map((c) => c.name).join(' ή ')};`)
@@ -619,26 +1060,95 @@ type Kind = Command['kind']
 interface Decision {
   kind: Kind
   conf: number
+  /** εξήγηση για τον χρήστη (π.χ. γιατί δεν καταλάβαμε) */
+  issue?: string
+}
+
+const unknownBecause = (issue: string): Decision => ({ kind: 'unknown', conf: 0, issue })
+
+/** "θα έρθουν", "να παραγγείλουμε", "για αύριο": κάτι που δεν έγινε ακόμα */
+function future(a: Analysis): boolean {
+  const T = new Set<Cue>(TRADE)
+  for (let i = 0; i < a.segs.length; i++) {
+    const w = a.w(i)
+    if (w !== 'θα' && w !== 'να') continue
+    let j = i + 1
+    while (CLITIC.has(a.w(j) ?? '')) j++
+    const c = a.cue[j]
+    if (c && T.has(c)) return true
+  }
+  const later = a.segs.some((_s, i) => a.w(i) === 'αυριο' || a.w(i) === 'μεθαυριο')
+  const today = a.segs.some((_s, i) => a.w(i) === 'σημερα')
+  return later && !today && a.cue.some((c) => !!c && (T.has(c) || c === 'recipeVerb' || c === 'want'))
+}
+
+/** Λέξη που δεν βρέθηκε και μοιάζει με ρήμα ("χάλασαν", "κερνάμε") */
+function unknownVerb(a: Analysis, unknown: Hit[]): string | null {
+  for (const h of unknown) {
+    for (let i = h.from; i < h.to; i++) {
+      const w = a.w(i)
+      if (w && w.length >= 4 && !a.cue[i] && !KNOWN_VERBS.has(w) && VERB_END.test(w)) return (a.segs[i] as { tok: Tok }).tok.raw
+    }
+  }
+  return null
+}
+
+/** Πρώτο ρήμα συνταγής ("έχει", "θέλει", "θέλω" ...) */
+function recipeVerbAt(a: Analysis): number {
+  for (let i = 0; i < a.segs.length; i++) if (a.cue[i] === 'recipeVerb' || a.cue[i] === 'want') return i
+  return -1
 }
 
 function decide(a: Analysis): Decision {
   const has = (...c: Cue[]) => a.has(...c)
   if (a.contentCount() === 0 && !a.cue.some(Boolean) && !a.hasChannel()) return { kind: 'unknown', conf: 0 }
   const txt = a.toks.filter((t) => !t.sep).map((t) => t.n).join(' ')
-  if (has('help') || /(^| )τι (μπορω|λεω|να πω|ξερεισ|κανω)/.test(txt) || /πωσ (δουλευ|λειτουργ)/.test(txt)) return { kind: 'help', conf: 0.95 }
-  const nums = a.segs.some((s) => s.t === 'n')
+  if (has('help') || /(^| )τι (μπορω|λεω|να πω|ξερεισ|κανω|κανουμε)( |$)/.test(txt) || /πωσ (δουλευ|λειτουργ)/.test(txt)) return { kind: 'help', conf: 0.95 }
+  const nums = a.segs.some((s, i) => s.t === 'n' && !a.used.has(i))
+  if (/(^| )(γυρνα|γυρισε|γυρνα) πισω( |$)/.test(txt) && !nums) return { kind: 'undo', conf: 0.85 }
   // κλεισίματα
-  if (has('close') && has('stocktakeNoun')) return { kind: 'close_stocktake', conf: 0.95 }
-  if (has('close') && (has('dayNoun') || has('today') || (has('sell') && !nums))) return { kind: 'close_day', conf: 0.95 }
-  if (has('close') && !nums && a.contentCount() <= 1 && /^(κλεισ|τελοσ)/.test(txt)) return { kind: 'close_day', conf: 0.7 }
-  // αναίρεση
-  if (has('undo') && !has('new')) return { kind: 'undo', conf: /τελευται/.test(txt) ? 0.95 : 0.85 }
+  if (has('close')) {
+    const day = has('dayNoun', 'today') || (has('sell') && !nums)
+    const di = a.cue.findIndex((c) => c === 'dayNoun' || c === 'today')
+    const si = a.at('stocktakeNoun')
+    if (si >= 0 && day) {
+      const dayFirst = di >= 0 && di < si
+      return {
+        kind: dayFirst ? 'close_day' : 'close_stocktake',
+        conf: 0.7,
+        issue: `Ένα κλείσιμο τη φορά· μετά πες «${dayFirst ? 'κλείσε την απογραφή' : 'κλείσε τη μέρα'}».`,
+      }
+    }
+    if (si >= 0) return { kind: 'close_stocktake', conf: 0.95 }
+    if (day) return { kind: 'close_day', conf: 0.95 }
+    if (!nums && a.contentCount() <= 1 && /^(κλεισ|τελοσ)/.test(txt)) {
+      if (a.hasChannel()) return unknownBecause('Το κλείσιμο ημέρας γίνεται για όλα τα κανάλια μαζί· πες «κλείσε τη μέρα».')
+      return unknownBecause('Πες «κλείσε τη μέρα» ή «κλείσε την απογραφή».')
+    }
+  }
+  // αναίρεση (πριν από το "νέο": "ακύρωσε τη νέα πίτσα")
+  const ui = a.at('undo')
+  const ni = a.at('new')
+  if (ui >= 0 && (ni < 0 || ui < ni)) {
+    if (/τελευται/.test(txt)) return { kind: 'undo', conf: 0.95 }
+    // "ακύρωσε μία μαργαρίτα (από το efood)": αφαίρεση από τον μετρητή, όχι αναίρεση
+    const sc = a.scan(POOL.saleTally, true)
+    const numAfter = a.segs.some((s, i) => s.t === 'n' && i > ui && !a.used.has(i))
+    if (sc.hits.some((h) => h.from > ui) || (sc.hits.length && numAfter)) return { kind: 'sale_tally', conf: 0.75 }
+    if (nums) return unknownBecause('Για αναίρεση πες «ακύρωσε το τελευταίο».')
+    return { kind: 'undo', conf: 0.85 }
+  }
   if (has('wrong') && a.contentCount() <= 1) return { kind: 'undo', conf: 0.7 }
-  // νέο είδος / συναλλασσόμενος
-  if (has('new') && !has('order', 'sell', 'buy', 'take1', 'produce', 'count')) {
+  // νέο είδος / συναλλασσόμενος: "νέο" στην αρχή ή πριν από λέξη τύπου
+  if (ni >= 0 && newIsCommand(a, ni) && !has('order', 'sell', 'buy', 'take1', 'produce', 'count')) {
     if (has('customerWord', 'supplierWord')) return { kind: 'new_partner', conf: 0.9 }
     return { kind: 'new_item', conf: has('typeRaw', 'typeSemi', 'typeFinished', 'pizza') || /νε(α|εσ) πρωτ(η|εσ) υλ/.test(txt) ? 0.9 : 0.7 }
   }
+  // πράγματα που δεν είναι καταχωρήσεις
+  if (has('waste')) return unknownBecause('Φύρα, κεράσματα και φαγητό προσωπικού δεν περνιούνται από εδώ.')
+  if (has('ret')) return unknownBecause('Οι επιστροφές δεν περνιούνται από εδώ.')
+  if (!a.has('question') && future(a)) return unknownBecause('Αυτό δεν έχει γίνει ακόμα· πες το όταν γίνει.')
+  if (has('ordered') && !a.hasChannel()) return unknownBecause('Οι παραγγελίες δεν περνιούνται· πες το όταν έρθουν ή όταν παραδοθούν.')
 
   // προκαταρκτικός εντοπισμός οντοτήτων
   const pre = a.scan(POOL.all, true)
@@ -646,15 +1156,35 @@ function decide(a: Analysis): Decision {
   const ih = pre.hits.filter((h) => topKind(h) === 'item')
   const partner = ph[0]?.ranked[0]?.entry.partner ?? null
   const itemsOf = ih.map((h) => h.ranked[0].entry.item as Item)
-  const moneyNum = a.segs.some((s, i) => s.t === 'n' && (MONEY.has(a.w(i + 1) ?? '') || CENTS.has(a.w(i + 1) ?? '')))
+  const moneyNum = a.segs.some((s, i) => s.t === 'n' && !a.used.has(i) && (MONEY.has(a.w(i + 1) ?? '') || CENTS.has(a.w(i + 1) ?? '')))
   const isCustomer = !!partner?.is_customer
   const isSupplier = !!partner?.is_supplier
+  const cov = a.covered(pre.hits)
+  const free = a.segs.map((s, i) => s.t === 'n' && !a.used.has(i) && !cov.has(i) && !s.pct && !s.size)
+  const freeNums = free.some(Boolean)
+  // ποσότητα: με μονάδα / συσκευασία ή ακριβώς πριν από είδος ("2 σπέσιαλ")
+  const qtyNum = free.some((f, i) => {
+    if (!f || MONEY.has(a.w(i + 1) ?? '') || CENTS.has(a.w(i + 1) ?? '')) return false
+    if (a.unitAt(i + 1)) return true
+    let j = i + 1
+    while (j < a.segs.length && a.w(j) && isStop(a.w(j) as string) && a.w(j) !== 'για') j++
+    return ih.some((h) => h.from === j)
+  })
+  const allFin = itemsOf.length > 0 && itemsOf.every(isFin)
+  const sellPresent = a.toks.some((t) => SELL_PRESENT.has(t.n))
 
   // ερωτήσεις
-  // "πόσο κάνει η μαργαρίτα;": ερώτηση τιμής, δεν υποστηρίζεται (και δεν πρέπει να γίνει αλλαγή τιμής)
-  if (has('question') && has('priceVerb', 'price') && !has('owe1', 'owe3')) return { kind: 'unknown', conf: 0 }
-  const asked = has('question') || a.toks.some((t) => t.raw === '?' || t.raw === ';' || t.raw === '\u037e')
-  if (asked && !nums && has('have', 'remain', 'stockNoun') && ih.length) return { kind: 'query_stock', conf: 0.85 }
+  // "πόσο κάνει η μαργαρίτα;", "πόσο πουλάμε τη μαργαρίτα": ερώτηση τιμής (δεν αλλάζει τιμή)
+  if (has('question') && (has('priceVerb', 'price') || sellPresent) && !has('owe1', 'owe3', 'today')) return { kind: 'unknown', conf: 0 }
+  const asked = has('question') || a.toks.some((t) => t.raw === '?' || t.raw === ';' || t.raw === ';')
+  if ((asked && has('sell')) || has('turnover') || /(^| )πωσ παμε( |$)/.test(txt)) {
+    if (!qtyNum) return { kind: 'query_today', conf: 0.85 }
+  }
+  if (has('today') && !nums && !ih.length && !ph.length) return { kind: 'query_today', conf: 0.8 }
+  if (has('runOut') && ih.length) return { kind: 'query_stock', conf: 0.8 }
+  if (asked && !freeNums && has('have', 'remain', 'stockNoun') && ih.length) return { kind: 'query_stock', conf: 0.85 }
+  // "έχουμε μοτσαρέλα" (χωρίς ποσότητα· η αναγνώριση φωνής δεν βάζει ερωτηματικό)
+  if (!freeNums && has('have', 'remain') && ih.length && !has('count', 'stocktakeNoun')) return { kind: 'query_stock', conf: 0.6 }
   if (has('question', 'owe1', 'owe3') || (has('balance', 'stockNoun') && !nums)) {
     if (has('owe1', 'owe3') || (has('balance') && ph.length)) return { kind: 'query_balance', conf: 0.9 }
     if (has('today') && !ih.length) return { kind: 'query_today', conf: 0.9 }
@@ -662,53 +1192,80 @@ function decide(a: Analysis): Decision {
     if (has('today') && ih.length) return { kind: 'query_today', conf: 0.7 }
     if (ih.length) return { kind: 'query_stock', conf: 0.9 }
     if (ph.length) return { kind: 'query_balance', conf: 0.75 }
+    if (asked && a.hasChannel()) return { kind: 'query_today', conf: 0.7 }
     if (has('stockNoun', 'remain', 'have')) return { kind: 'query_stock', conf: 0.5 }
     if (has('question') && has('pizza')) return { kind: 'query_today', conf: 0.6 }
   }
   // συνταγή
-  if (has('recipe')) return { kind: 'recipe', conf: 0.9 }
-  const rv = a.at('recipeVerb')
+  const noQty = 'Πες και τις ποσότητες, π.χ. «η μαργαρίτα θέλει ένα ζυμάρι 250 και 120 γραμμάρια μοτσαρέλα».'
+  if (has('recipe')) return freeNums ? { kind: 'recipe', conf: 0.9 } : unknownBecause(noQty)
+  const rv = recipeVerbAt(a)
   if (rv >= 0) {
     const before = pre.hits.filter((h) => h.to <= rv)
     const after = ih.filter((h) => h.from > rv)
     // υποκείμενο: το πρώτο έτοιμο/ημιέτοιμο ή ο πρώτος συναλλασσόμενος πριν από το ρήμα
     const subj = before.find((h) => topKind(h) === 'partner' || h.ranked[0].entry.item?.item_type !== 'raw')
-    if (subj && topKind(subj) === 'item' && after.length) {
-      return { kind: 'recipe', conf: 0.85 }
-    }
-    if (subj && topKind(subj) === 'partner' && after.length) {
-      const afterNum = a.segs.some((s, i) => s.t === 'n' && i > after[0].from)
-      const beforeNum = a.segs.some((s, i) => s.t === 'n' && i > rv && i < after[0].from)
-      if (afterNum && !beforeNum) return { kind: 'partner_price', conf: 0.8 }
-      if (beforeNum) return { kind: 'sale', conf: 0.65 }
+    if (a.cue[rv] === 'want') {
+      // "για 20 ζυμάρια θέλω 3 κιλά αλεύρι": συνταγή· "θέλω 10 σακιά": ανάγκη
+      let j = subj ? subj.from - 1 : -1
+      while (j >= 0 && (a.num(j) || (a.w(j) && isStop(a.w(j) as string) && a.w(j) !== 'για'))) j--
+      if (subj && topKind(subj) === 'item' && after.length && a.w(j) === 'για') return freeNums ? { kind: 'recipe', conf: 0.8 } : unknownBecause(noQty)
+      if (a.w(rv + 1) !== 'να' && (ih.length || freeNums)) return unknownBecause('Ανάγκες και παραγγελίες δεν περνιούνται· πες το όταν έρθουν.')
+    } else {
+      if (subj && topKind(subj) === 'item' && after.length) return freeNums ? { kind: 'recipe', conf: 0.85 } : unknownBecause(noQty)
+      if (subj && topKind(subj) === 'partner' && after.length) {
+        const afterNum = a.segs.some((s, i) => s.t === 'n' && i > after[0].from)
+        const beforeNum = a.segs.some((s, i) => s.t === 'n' && i > rv && i < after[0].from)
+        if (afterNum && !beforeNum) return { kind: 'partner_price', conf: 0.8 }
+        if (beforeNum) return { kind: 'sale', conf: 0.65 }
+      }
     }
   }
   // τιμές
-  const trade = has('buy', 'sell', 'take1', 'take3', 'invoice', 'note', 'order', 'brought', 'produce', 'count', 'pay', 'receive')
-  if (has('price', 'priceVerb') && !trade && !a.hasChannel()) {
-    // "2 μαργαρίτες κάνουν 16": ποσότητα πριν από το είδος → πώληση, όχι αλλαγή τιμής
-    const first = ih[0]
-    const qtyBefore = !!first && a.segs.some((s, i) => s.t === 'n' && i < first.from && !MONEY.has(a.w(i + 1) ?? ''))
+  const trade = has(...TRADE)
+  if (has('relPrice') && !trade && ih.length && (has('price', 'priceVerb') || moneyNum || nums)) {
+    return unknownBecause('Πες την καινούργια τιμή, π.χ. «η μαργαρίτα κάνει 9 ευρώ».')
+  }
+  // "2 μαργαρίτες κάνουν 16", "2 μαργαρίτες 18 ευρώ": ποσότητα πριν από το είδος → πώληση, όχι αλλαγή τιμής
+  const first = ih[0]
+  const qtyBefore = !!first && a.segs.some((s, i) => s.t === 'n' && !a.used.has(i) && i < first.from && !MONEY.has(a.w(i + 1) ?? ''))
+  if (has('price', 'priceVerb') && !trade) {
     if (!ph.length && qtyBefore) return { kind: 'sale_tally', conf: 0.6 }
+    if (a.hasChannel()) return { kind: ph.length ? 'partner_price' : 'item_price', conf: 0.6, issue: 'Η τιμή είναι μία για όλα τα κανάλια.' }
     return { kind: ph.length ? 'partner_price' : 'item_price', conf: 0.9 }
   }
   // χρήματα
   if (has('receive')) return { kind: 'receipt', conf: 0.9 }
   if (has('pay')) {
-    // "πλήρωσα 10 σακιά αλεύρι 155 ευρώ": αγορά τοις μετρητοίς
-    if (ih.length && nums) return { kind: 'purchase', conf: 0.6 }
+    // "δώσαμε 3 μαργαρίτες στο μαγαζί", "έδωσα στο Αστέρια 20 κατεψυγμένες"
+    if (allFin && !moneyNum && (a.hasChannel() || (isCustomer && !isSupplier))) return { kind: a.hasChannel() ? 'sale_tally' : 'sale', conf: 0.6 }
+    // "πλήρωσα 10 σακιά αλεύρι 155 ευρώ": αγορά τοις μετρητοίς· "πλήρωσα τον μύλο 150 ευρώ για το αλεύρι": πληρωμή
+    if (ih.length && qtyNum) return { kind: 'purchase', conf: 0.6 }
     return { kind: 'payment', conf: 0.9 }
   }
   if (has('paid3', 'gave3')) {
+    // "το Αστέρια πληρώνει τη σπέσιαλ 4 ευρώ": ειδική τιμή
+    if (ih.length === 1 && !qtyNum && (moneyNum || freeNums) && isCustomer && /(^| )(πληρωνει|πληρωνουν|δινει)( |$)/.test(txt)) {
+      return { kind: 'partner_price', conf: 0.6 }
+    }
     if (ih.length && !moneyNum && has('gave3') && isCustomer) return { kind: 'sale', conf: 0.6 }
     if (isSupplier && !isCustomer) return { kind: 'payment', conf: 0.85 }
     return { kind: 'receipt', conf: ph.length ? 0.9 : 0.75 }
+  }
+  if ((has('take1') || has('brought')) && moneyNum && !qtyNum && (isCustomer || !ih.length) && !(isSupplier && !isCustomer)) {
+    // "πήρα 300 ευρώ από το Αστέρια (για τις κατεψυγμένες)"
+    return { kind: 'receipt', conf: ph.length ? 0.85 : 0.7 }
   }
   if ((has('take1') || has('brought')) && !ih.length && (moneyNum || (nums && isCustomer))) {
     if (isSupplier && !isCustomer && has('brought')) return { kind: 'purchase', conf: 0.5 }
     return { kind: 'receipt', conf: ph.length ? 0.85 : 0.7 }
   }
   // συναλλαγές
+  // "ήρθε μια παραγγελία από το efood με 2 μαργαρίτες": πώληση λιανικής
+  if (has('order') && !isSupplier && (a.hasChannel() || (allFin && itemsOf.every((it) => it.make_to_order)))) {
+    return { kind: 'sale_tally', conf: a.hasChannel() ? 0.85 : 0.6 }
+  }
+  if (has('ordered')) return { kind: 'sale_tally', conf: 0.6 }
   if (has('buy')) return { kind: 'purchase', conf: 0.9 }
   if (has('take1', 'brought') && nums && !moneyNum && !ih.length && !isCustomer) return { kind: 'purchase', conf: 0.55 }
   if (has('take1', 'brought') && ih.length) return { kind: 'purchase', conf: isCustomer && !isSupplier ? 0.6 : 0.85 }
@@ -716,38 +1273,66 @@ function decide(a: Analysis): Decision {
     if (a.hasChannel() && !ph.length) return { kind: 'sale_tally', conf: 0.85 }
     if (isCustomer && !isSupplier) return { kind: 'sale', conf: 0.85 }
     if (isSupplier) return { kind: 'purchase', conf: 0.85 }
-    if (itemsOf.length && itemsOf.every((it) => it.item_type === 'finished')) return { kind: 'sale', conf: 0.6 }
+    if (allFin) return { kind: 'sale', conf: 0.6 }
     return { kind: 'purchase', conf: has('invoice') ? 0.7 : 0.55 }
   }
   if (has('sell', 'take3')) {
+    // "στο ξενοδοχείο Χ πουλάμε την κατεψυγμένη 3,90": ειδική τιμή πελάτη
+    if (sellPresent && isCustomer && ih.length === 1 && !qtyNum && freeNums) return { kind: 'partner_price', conf: 0.7 }
     if (ph.length && !a.hasChannel()) return { kind: 'sale', conf: isCustomer ? 0.9 : 0.6 }
-    if (has('take3') && !a.hasChannel()) return { kind: 'sale', conf: 0.6 }
-    if (!a.hasChannel() && itemsOf.length && itemsOf.every((it) => it.item_type === 'finished' && !it.make_to_order)) {
+    if (has('take3') && !a.hasChannel()) {
+      // "ένας πελάτης πήρε 2 μαργαρίτες": λιανική
+      if (!ph.length && allFin && itemsOf.every((it) => it.make_to_order)) return { kind: 'sale_tally', conf: 0.6 }
       return { kind: 'sale', conf: 0.6 }
     }
+    if (!a.hasChannel() && allFin && itemsOf.every((it) => !it.make_to_order)) return { kind: 'sale', conf: 0.6 }
     return { kind: 'sale_tally', conf: 0.9 }
   }
   if (has('produce', 'knead')) return { kind: 'production', conf: 0.9 }
+  // "κάναμε 50 ζυμάρια"· "efood κάναμε 30 μαργαρίτες" = πωλήσεις
+  if (has('did')) return a.hasChannel() ? { kind: 'sale_tally', conf: 0.7 } : { kind: 'production', conf: 0.75 }
   if (has('count', 'stocktakeNoun', 'remain', 'have')) return { kind: 'stocktake', conf: has('count', 'stocktakeNoun') ? 0.9 : 0.75 }
   if (a.hasChannel()) return { kind: 'sale_tally', conf: 0.85 }
-  // χωρίς ρήμα: από τα είδη
+  // χωρίς ρήμα: από τα είδη (εκτός αν ακούστηκε ρήμα που δεν ξέρουμε: "χάλασαν", "κερνάμε")
+  const verb = unknownVerb(a, pre.unknown)
+  if (verb) return unknownBecause(`Δεν κατάλαβα το «${verb}».`)
   if (ph.length && ih.length) {
     // "στο Αστέρια η σπέσιαλ 3,90": μόνο τιμή, καμία ποσότητα → ειδική τιμή πελάτη
-    const nn = a.segs.filter((s): s is NumSeg => s.t === 'n')
+    const nn = a.segs.filter((s, i): s is NumSeg => s.t === 'n' && !a.used.has(i))
     if (isCustomer && ih.length === 1 && nn.length === 1 && (!Number.isInteger(nn[0].value) || moneyNum)) {
       return { kind: 'partner_price', conf: 0.55 }
     }
     return { kind: isSupplier && !isCustomer ? 'purchase' : 'sale', conf: 0.55 }
   }
-  if (ph.length && nums) return { kind: isSupplier && !isCustomer ? 'payment' : 'receipt', conf: 0.45 }
+  if (ph.length && nums) {
+    // "θα φέρει ο μύλος 10 σακιά": ποσότητα (μονάδα / συσκευασία) χωρίς είδος, όχι ποσό
+    if (qtyNum && !moneyNum) return unknownBecause('Ποσότητα χωρίς είδος: πες π.χ. «ήρθαν δέκα σακιά αλεύρι» ή, για χρήματα, «πλήρωσα 300 ευρώ».')
+    return { kind: isSupplier && !isCustomer ? 'payment' : 'receipt', conf: 0.45 }
+  }
   if (ih.length) {
-    const allFin = itemsOf.every((it) => it.item_type === 'finished')
-    if (allFin && ih.length === 1 && moneyNum) return { kind: 'item_price', conf: 0.55 }
+    if (allFin && ih.length === 1 && moneyNum && !qtyBefore) return { kind: 'item_price', conf: 0.55 }
     if (allFin) return { kind: 'sale_tally', conf: nums ? 0.75 : 0.6 }
     if (nums) return { kind: 'stocktake', conf: 0.45 }
   }
   if (has('stockNoun')) return { kind: 'query_stock', conf: 0.5 }
   return { kind: 'unknown', conf: 0 }
+}
+
+/** "νέο" ως εντολή: στην αρχή της φράσης ή πριν από λέξη τύπου ("Νέα Ζωή" δεν είναι εντολή) */
+function newIsCommand(a: Analysis, ni: number): boolean {
+  let atStart = true
+  for (let i = 0; i < ni; i++) {
+    const s = a.segs[i]
+    if (s.t === 's') continue
+    const w = a.w(i)
+    if (!w || !(isStop(w) || a.cue[i] === 'want')) { atStart = false; break }
+  }
+  if (atStart) return true
+  let j = ni + 1
+  while (a.w(j) && isStop(a.w(j) as string)) j++
+  const c = a.cue[j]
+  return c === 'typeRaw' || c === 'typeSemi' || c === 'typeFinished' || c === 'typeGeneric' || c === 'pizza' ||
+    c === 'customerWord' || c === 'supplierWord' || a.w(j) === 'πρωτη' || a.w(j) === 'πρωτεσ'
 }
 
 // ---------------------------------------------------------------------
@@ -763,34 +1348,60 @@ function refNo(a: Analysis): string | null {
     const n = a.w(i)
     if (!n || !REF_WORDS.has(n)) continue
     let j = i + 1
-    if (a.w(j) === 'αριθμοσ' || a.w(j) === 'αριθμο' || a.w(j) === 'νουμερο' || a.w(j) === 'αρ') j++
+    let explicit = false
+    if (['αριθμοσ', 'αριθμο', 'νουμερο', 'αρ', 'νο', 'no'].includes(a.w(j) ?? '')) { j++; explicit = true }
+    // σειρά με γράμματα: "ΑΒ 1234", "άλφα βήτα 1234"
+    let prefix = ''
+    const pIdx: number[] = []
+    for (let k = j; k < j + 3; k++) {
+      const s = a.segs[k]
+      if (!s || s.t !== 'w') break
+      const letter = LETTER_NAMES[s.tok.n] ?? (/^\p{Lu}{1,3}$/u.test(s.tok.raw) && !isStop(s.tok.n) && !a.cue[k] && !a.chan[k] ? s.tok.raw : null)
+      if (!letter) break
+      prefix += letter.toUpperCase()
+      pIdx.push(k)
+    }
+    if (prefix && a.num(j + pIdx.length)) j += pIdx.length
+    else { prefix = ''; pIdx.length = 0 }
     const parts: string[] = []
     const idx: number[] = []
     while (a.num(j) && !(a.num(j) as NumSeg).half) {
       const x = a.num(j) as NumSeg
-      if (a.unitAt(j + 1)) break
+      if (a.unitAt(j + 1) || MONEY.has(a.w(j + 1) ?? '') || CENTS.has(a.w(j + 1) ?? '')) break
+      // ποσότητα, όχι αριθμός: "δελτίο είκοσι σπέσιαλ", "τιμολόγιο 20 μοτσαρέλες"
+      if (!explicit && !prefix && !parts.length && ((x.words && x.value < 10) || a.itemFollows(j + 1))) break
       parts.push(x.words ? String(x.value) : x.digits)
       idx.push(j)
       j++
     }
     if (parts.length) {
-      idx.forEach((k) => a.used.add(k))
-      return parts.join('')
+      for (const k of [...pIdx, ...idx]) a.used.add(k)
+      return prefix + parts.join('')
     }
   }
   return null
 }
 
 /** Γραμμές με ποσότητες (και τιμές) για τα είδη μιας περιοχής */
-function buildLines(a: Analysis, pool: Pool, priced: boolean, lo = 0, hi = a.segs.length, reserveChannels = true) {
+function buildLines(a: Analysis, pool: Pool, priced: boolean, lo = 0, hi = a.segs.length, reserveChannels = true, tally = false) {
   const sc = a.scan(pool, reserveChannels, lo, hi)
   const itemHits = sc.hits.filter((h) => topKind(h) === 'item')
   const partnerHits = sc.hits.filter((h) => topKind(h) === 'partner')
   const cov = a.covered(sc.hits)
   let nums = a.numbers(cov).filter((x) => x.i >= lo && x.i < hi)
   if (priced) nums = a.mergeCents(nums, false)
-  const lines = pairLines(a, hitsToEnts(itemHits), hitsToEnts(sc.unknown, true), nums, priced, pool)
+  const lines = pairLines(a, hitsToEnts(itemHits), hitsToEnts(sc.unknown, true), nums, priced, pool, tally)
   const usedUnknown = new Set<Hit>(lines.filter((l) => l.ent.unknown).map((l) => l.ent.hit))
+  // "λαζάνια κατεψυγμένα": ο προσδιορισμός μόνος του δεν φτάνει όταν δίπλα του
+  // υπάρχει λέξη που δεν βρέθηκε → ρωτάμε, με όλη τη φράση όπως ακούστηκε
+  for (const l of lines) {
+    if (l.ent.unknown || !a.onlyModifiers(l.ent.from, l.ent.to)) continue
+    const u = sc.unknown.find((h) => !usedUnknown.has(h) && (h.to === l.ent.from || h.from === l.ent.to))
+    if (!u) continue
+    usedUnknown.add(u)
+    const heard = a.heard(Math.min(u.from, l.ent.from), Math.max(u.to, l.ent.to))
+    l.ent = { ...l.ent, weak: true, hit: { ...l.ent.hit, heard } }
+  }
   return { lines, partnerHits, sc, usedUnknown, nums }
 }
 
@@ -808,10 +1419,13 @@ function lineRef(l: Line): EntityRef {
       })
       .sort((x, y) => y.score - x.score)
   }
-  return toRef(l.ent.hit.heard, ranked)
+  const r = toRef(l.ent.hit.heard, ranked)
+  return l.ent.weak ? { ...r, id: null } : r
 }
 
-function qtyLines(a: Analysis, lines: Line[], missing: 'one' | 'issue'): { out: QtyLine[]; conf: number } {
+type Missing = 'one' | 'issue' | ((item: Item | null, ref: EntityRef) => number | null)
+
+function qtyLines(a: Analysis, lines: Line[], missing: Missing): { out: QtyLine[]; conf: number } {
   const out: QtyLine[] = []
   let conf = 1
   for (const l of lines) {
@@ -819,10 +1433,13 @@ function qtyLines(a: Analysis, lines: Line[], missing: 'one' | 'issue'): { out: 
     refIssue(a, ref, 'είδος')
     conf = Math.min(conf, refConf(ref))
     const item = itemById(a, ref.id)
+    const conv = item ?? unitItem(a, ref, l)
+    unitIssue(a, ref, l, conv)
     const label = item?.name ?? ref.heard
-    let qty = lineQty(a, l, item, label)
+    let qty = lineQty(a, l, conv, label)
     if (qty === null) {
-      if (missing === 'one') qty = 1
+      const d = typeof missing === 'function' ? missing(item, ref) : missing === 'one' ? 1 : null
+      if (d !== null) qty = d
       else { a.issues.push(`Δεν ακούστηκε ποσότητα για «${label}».`); qty = 0; conf = Math.min(conf, 0.5) }
     }
     const line: QtyLine = { item: ref, qty }
@@ -845,24 +1462,80 @@ function mergeSame(lines: QtyLine[]): QtyLine[] {
   return out
 }
 
+const lineStart = (l: Line) => Math.min(l.ent.from, l.qty?.i ?? Infinity, ...(l.more ?? []).map((x) => x.i))
+const lineEnd = (l: Line) => Math.max(l.ent.to, l.qty?.end ?? 0, ...(l.more ?? []).map((x) => x.end))
+
+/**
+ * Πρόσημο ανά γραμμή του μετρητή: "βγάλε μία μαργαρίτα (και μία σπέσιαλ)"
+ * αφαιρεί ό,τι ακολουθεί μέχρι το "βάλε"· "μία μαργαρίτα λιγότερη" μόνο αυτή·
+ * "με λιγότερο τυρί" τίποτα.
+ */
+function tallySigns(a: Analysis, lines: Line[]): number[] {
+  const order = lines.map((_l, k) => k).sort((x, y) => lineStart(lines[x]) - lineStart(lines[y]))
+  const starts = new Set(lines.flatMap((l) => [l.ent.from, l.qty?.i ?? -1]))
+  const signs = lines.map(() => 1)
+  let prevPrefix = false
+  let prevEnd = -1
+  for (const k of order) {
+    const l = lines[k]
+    const start = lineStart(l)
+    const end = lineEnd(l)
+    let neg = false
+    let prefix = false
+    let j = start - 1
+    while (j >= 0 && (a.chan[j] || (a.segs[j].t === 'w' && isStop(a.w(j) as string) && a.w(j) !== 'και' && a.w(j) !== 'κι' && !PLUS_WORDS.has(a.w(j) as string)))) j--
+    const pw = a.w(j)
+    if (pw && (MINUS_PRE.has(pw) || a.cue[j] === 'undo')) { neg = true; prefix = true }
+    // "μία λιγότερη σπέσιαλ": ανάμεσα στην ποσότητα και το είδος
+    for (let i = start; i < end && !neg; i++) {
+      if (i >= l.ent.from && i < l.ent.to) continue
+      if (MINUS_POST.has(a.w(i) ?? '')) neg = true
+    }
+    if (!neg) {
+      let q = end
+      while (q < a.segs.length && (a.chan[q] || (a.segs[q].t === 'w' && isStop(a.w(q) as string) && a.w(q) !== 'με' && a.w(q) !== 'και' && a.w(q) !== 'κι'))) q++
+      const nw = a.w(q)
+      if (nw && MINUS_POST.has(nw)) {
+        const an = a.w(q + 1)
+        const after = a.segs[q + 1]
+        if (!after || after.t !== 'w' || an === 'και' || an === 'κι' || a.chan[q + 1] || starts.has(q + 1) || !a.isPlainWord(q + 1)) neg = true
+      }
+    }
+    if (!neg && prevPrefix) {
+      let stop = false
+      for (let i = prevEnd; i < start; i++) {
+        const w = a.w(i)
+        if ((w && (PLUS_WORDS.has(w) || MINUS_POST.has(w))) || a.segs[i]?.t === 'n') stop = true
+      }
+      if (!stop) { neg = true; prefix = true }
+    }
+    signs[k] = neg ? -1 : 1
+    prevPrefix = neg && prefix
+    prevEnd = end
+  }
+  return signs
+}
+
 function buildSaleTally(a: Analysis): Built {
   const ci = a.chan.findIndex(Boolean)
   const chans = new Set(a.chan.filter(Boolean))
   const channel = (ci >= 0 ? a.chan[ci] : null) ?? a.ctx?.defaultChannel ?? 'store'
   if (chans.size > 1) a.issues.push(`Άκουσα ${chans.size} κανάλια· κράτησα το πρώτο.`)
-  const { lines } = buildLines(a, POOL.saleTally, false)
+  const { lines, nums } = buildLines(a, POOL.saleTally, false, 0, a.segs.length, true, true)
   const q = qtyLines(a, lines, 'one')
+  const signs = tallySigns(a, lines)
+  q.out.forEach((l, k) => { if (signs[k] < 0) l.qty = -Math.abs(l.qty) })
   const out = mergeSame(q.out)
-  const conf = q.conf
-  if (a.has('minus')) for (const l of out) l.qty = -Math.abs(l.qty)
+  const money = nums.find((x) => !x.size && !x.pct && priceish(x, true))
+  if (money && out.length) a.issues.push(`Αγνόησα το «${a.heard(money.i, money.end)}»· οι πωλήσεις ημέρας παίρνουν την τιμή του είδους.`)
   if (!out.length) a.issues.push('Δεν κατάλαβα ποια προϊόντα.')
   return {
     command: { kind: 'sale_tally', channel: channel as TallyChannel, channelHeard: ci >= 0, lines: out },
-    conf: out.length ? conf : 0.2,
+    conf: out.length ? q.conf : 0.2,
   }
 }
 
-function pricedLines(a: Analysis, lines: Line[], missingPriceIssue: boolean, missingQty: 'one' | 'issue'): { out: PricedLine[]; conf: number } {
+function pricedLines(a: Analysis, lines: Line[], missingPriceIssue: boolean, missingQty: 'one' | 'issue', kind: 'cost' | 'sale'): { out: PricedLine[]; conf: number } {
   const out: PricedLine[] = []
   let conf = 1
   for (const l of lines) {
@@ -870,8 +1543,10 @@ function pricedLines(a: Analysis, lines: Line[], missingPriceIssue: boolean, mis
     refIssue(a, ref, 'είδος')
     conf = Math.min(conf, refConf(ref))
     const item = itemById(a, ref.id)
+    const conv = item ?? unitItem(a, ref, l)
+    unitIssue(a, ref, l, conv)
     const label = item?.name ?? ref.heard
-    let qty = lineQty(a, l, item, label)
+    let qty = lineQty(a, l, conv, label)
     if (qty === null && missingQty === 'one') {
       qty = 1
       conf = Math.min(conf, 0.85)
@@ -880,7 +1555,7 @@ function pricedLines(a: Analysis, lines: Line[], missingPriceIssue: boolean, mis
       qty = 0
       conf = Math.min(conf, 0.5)
     }
-    const unitPrice = priceFor(a, l, item, qty)
+    const unitPrice = priceFor(a, l, conv, qty, item, kind)
     if (unitPrice === null && missingPriceIssue) {
       a.issues.push(`Δεν ακούστηκε τιμή για «${label}»· θα μπει το μέσο κόστος.`)
       conf = Math.min(conf, 0.9)
@@ -895,10 +1570,11 @@ function pricedLines(a: Analysis, lines: Line[], missingPriceIssue: boolean, mis
 
 function buildSale(a: Analysis): Built {
   a.markVat()
+  // "δελτίο 55 στον Χ ...": ο αριθμός δελτίου δεν είναι ποσότητα (η πώληση δεν τον κρατά)
   refNo(a)
   const { lines, partnerHits, sc, usedUnknown } = buildLines(a, POOL.sale, true)
   const partner = pickPartner(a, partnerHits, sc.unknown, usedUnknown, 'πελάτης')
-  const { out, conf } = pricedLines(a, lines, false, 'one')
+  const { out, conf } = pricedLines(a, lines, false, 'one', 'sale')
   if (!out.length) a.issues.push('Δεν κατάλαβα ποια προϊόντα.')
   return { command: { kind: 'sale', partner, lines: out }, conf: Math.min(conf, refConf(partner)) * (out.length ? 1 : 0.3) }
 }
@@ -908,7 +1584,7 @@ function buildPurchase(a: Analysis): Built {
   const ref = refNo(a)
   const { lines, partnerHits, sc, usedUnknown } = buildLines(a, POOL.purchase, true)
   const partner = pickPartner(a, partnerHits, sc.unknown, usedUnknown, 'προμηθευτής')
-  const { out, conf } = pricedLines(a, lines, true, 'issue')
+  const { out, conf } = pricedLines(a, lines, true, 'issue', 'cost')
   if (!out.length) a.issues.push('Δεν κατάλαβα ποια είδη.')
   return {
     command: { kind: 'purchase', partner, lines: out, refNo: ref },
@@ -921,14 +1597,14 @@ function buildProduction(a: Analysis): Built {
   const known = lines.filter((l) => !l.ent.unknown)
   const main = known[0] ?? lines[0]
   if (!main) {
-    // "ζύμωσα 80": ζυμάρια
+    // "ζύμωσα 80": ζυμάρια (δεν το λέμε «ζύμωσα», για να μη γίνει ψευδώνυμο)
     const kneadIdx = a.at('knead')
     const doughs = a.items.filter((i) => i.is_active && i.item_type === 'semi' && /^ζυμαρ/.test(norm(i.name)))
     const x = a.numbers(new Set()).find((n) => !n.money)
     let item: EntityRef = emptyRef()
     if (kneadIdx >= 0 && doughs.length) {
       item = {
-        heard: a.heard(kneadIdx, kneadIdx + 1),
+        heard: '',
         id: doughs.length === 1 ? doughs[0].id : null,
         candidates: doughs.slice(0, 5).map((d) => ({ id: d.id, name: d.name, score: 0.6 })),
       }
@@ -944,22 +1620,37 @@ function buildProduction(a: Analysis): Built {
 }
 
 function buildStocktake(a: Analysis): Built {
+  a.locStop = true
   const { lines } = buildLines(a, POOL.stock, false)
+  // "μέτρησα κι άλλα 2 κιλά": η απογραφή γράφει τη μέτρηση, δεν προσθέτει σε παλιότερη
+  for (const l of lines) {
+    if (!l.qty) continue
+    let j = l.qty.i - 1
+    const isMore = (w: string | null) => !!w && MORE.has(w) && w !== 'ακομα' && w !== 'ακομη'
+    while (j >= 0 && a.w(j) && isStop(a.w(j) as string) && !isMore(a.w(j))) j--
+    if (isMore(a.w(j))) {
+      a.issues.push('Η απογραφή κρατά τη μέτρηση που λες· δεν προσθέτει σε προηγούμενη μέτρηση.')
+      a.cap = Math.min(a.cap, 0.7)
+      break
+    }
+  }
   const q = qtyLines(a, lines, 'issue')
   const out = mergeSame(q.out)
-  const conf = q.conf
   if (!out.length) a.issues.push('Δεν κατάλαβα ποια είδη μετρήθηκαν.')
-  return { command: { kind: 'stocktake', lines: out }, conf: out.length ? conf : 0.2 }
+  return { command: { kind: 'stocktake', lines: out }, conf: out.length ? q.conf : 0.2 }
 }
 
 function amountOf(a: Analysis, skip: Set<number>): number | null {
-  const nums = a.mergeCents(a.numbers(skip), false).filter((x) => !x.pct && !x.size)
+  // "10 σακιά", "5 κιλά": ποσότητα, όχι ποσό
+  const nums = a.mergeCents(a.numbers(skip), true).filter((x) => !x.pct && !x.size && !x.unit && !x.pack)
   const money = nums.filter((x) => x.money)
   const pick = money[0] ?? nums.slice().sort((p, q) => q.value - p.value)[0]
   return pick ? round(pick.value, 2) : null
 }
 
 function buildMoney(a: Analysis, kind: 'receipt' | 'payment'): Built {
+  // "πλήρωσα το τιμολόγιο 4521": αριθμός τιμολογίου, όχι ποσό
+  refNo(a)
   const sc = a.scan(kind === 'receipt' ? POOL.customers : POOL.suppliers, false)
   const partner = pickPartner(a, sc.hits, sc.unknown, new Set(), kind === 'receipt' ? 'πελάτης' : 'προμηθευτής')
   const amount = amountOf(a, a.covered(sc.hits))
@@ -976,18 +1667,36 @@ function priceValue(a: Analysis, skip: Set<number>): number | null {
   return pick ? pick.value : null
 }
 
+/** Δεύτερο είδος με τιμή στην ίδια φράση: δεν χάνεται σιωπηλά */
+function onePriceIssue(a: Analysis, hits: Hit[], kept: Hit) {
+  const others = hits.filter((h) => h !== kept && topKind(h) === 'item')
+  if (others.length) a.issues.push(`Μία τιμή τη φορά: κράτησα «${kept.heard}»· πες ξεχωριστά για «${others[0].heard}».`)
+}
+
 function buildItemPrice(a: Analysis): Built {
-  a.markVat()
+  a.markVat('strict')
   const sc = a.scan(POOL.itemPrice, true)
   const h = sc.hits.find((x) => topKind(x) === 'item')
   const item = h ? itemRef(h) : sc.unknown[0] ? toRef(sc.unknown[0].heard, onlyKind(sc.unknown[0].ranked, 'item')) : emptyRef()
   refIssue(a, item, 'είδος')
-  const price = priceValue(a, a.covered(sc.hits))
+  if (h) onePriceIssue(a, sc.hits, h)
+  // μόνο οι αριθμοί μέχρι το επόμενο είδος
+  const next = h ? sc.hits.find((x) => x.from >= h.to && topKind(x) === 'item') : undefined
+  const skip = a.covered(sc.hits)
+  if (next) for (let i = next.from; i < a.segs.length; i++) skip.add(i)
+  const price = priceValue(a, skip)
   const it = itemById(a, item.id)
-  let heardGross = it ? isFin(it) && it.make_to_order : false
+  // χωρίς σίγουρο είδος: ό,τι ισχύει για όλους τους υποψηφίους
+  const cs = it ? [it] : candItems(a, item)
+  let heardGross = cs.length > 0 && cs.every((x) => isFin(x) && x.make_to_order)
   if (a.gross !== null) heardGross = a.gross
   if (price === null) a.issues.push('Δεν ακούστηκε τιμή.')
-  const vat = Number(it?.vat_rate ?? 13)
+  // άγνωστο είδος: ο ΦΠΑ δεν κρίνεται, να το δει όταν διαλέξει είδος
+  const mixed = cs.length > 0 && !cs.every((x) => (isFin(x) && x.make_to_order) === heardGross)
+  if (!it && price !== null && a.gross === null && (!cs.length || mixed)) {
+    a.issues.push(`Δεν ξέρω αν τα ${fmtMoney(price)} είναι με ή χωρίς ΦΠΑ· έλεγξέ το όταν διαλέξεις είδος.`)
+  }
+  const vat = Number((it ?? cs[0])?.vat_rate ?? 13)
   const netPrice = price === null ? 0 : heardGross ? round(price / (1 + vat / 100)) : round(price)
   return {
     command: { kind: 'item_price', item, netPrice, heardGross },
@@ -996,12 +1705,13 @@ function buildItemPrice(a: Analysis): Built {
 }
 
 function buildPartnerPrice(a: Analysis): Built {
-  a.markVat()
+  a.markVat('strict')
   const sc = a.scan(POOL.partnerPrice, false)
   const partner = pickPartner(a, sc.hits, [], new Set(), 'πελάτης')
   const h = sc.hits.find((x) => topKind(x) === 'item')
   const item = h ? itemRef(h) : sc.unknown[0] ? toRef(sc.unknown[0].heard, onlyKind(sc.unknown[0].ranked, 'item')) : emptyRef()
   refIssue(a, item, 'είδος')
+  if (h) onePriceIssue(a, sc.hits, h)
   const price = priceValue(a, a.covered(sc.hits))
   if (price === null) a.issues.push('Δεν ακούστηκε τιμή.')
   const it = itemById(a, item.id)
@@ -1014,7 +1724,7 @@ function buildPartnerPrice(a: Analysis): Built {
 
 function buildRecipe(a: Analysis): Built {
   const r = a.at('recipe')
-  const v = a.at('recipeVerb')
+  const v = recipeVerbAt(a)
   const n = a.segs.length
   // περιοχή προϊόντος
   let pLo = 0
@@ -1026,16 +1736,17 @@ function buildRecipe(a: Analysis): Built {
       const s = a.segs[i]
       // "για 40": ποσότητα παρτίδας· "συνταγή για τη χαβανέζα": απλή πρόθεση
       const forQty = a.w(i) === 'για' && (!!a.num(i + 1) || (!!a.w(i + 1) && isStop(a.w(i + 1) as string) && !!a.num(i + 2)))
-      if ((s.t === 's' && i > pLo) || forQty || a.cue[i] === 'recipeVerb' || (s.t === 'n' && a.unitAt(i + 1))) { pHi = i; break }
+      if ((s.t === 's' && i > pLo) || forQty || a.cue[i] === 'recipeVerb' || a.cue[i] === 'want' || (s.t === 'n' && a.unitAt(i + 1))) { pHi = i; break }
     }
   } else if (v >= 0) pHi = v
   const ps = a.scan(POOL.recipeProduct, true, pLo, pHi)
   const ph = ps.hits.filter((h) => topKind(h) === 'item')
-  const prodHit = ph[ph.length - 1] ?? null
+  // προϊόν: το πρώτο έτοιμο, αλλιώς το πρώτο ημιέτοιμο ("συνταγή μαργαρίτας 1 ζυμάρι 250 80 γρ σάλτσα")
+  const prodHit = ph.find((h) => h.ranked[0]?.entry.item?.item_type === 'finished') ?? ph[0] ?? null
   const product = prodHit ? itemRef(prodHit) : ps.unknown[0] ? toRef(ps.unknown[0].heard, onlyKind(ps.unknown[0].ranked, 'item')) : emptyRef()
   refIssue(a, product, 'σε ποιο είδος')
   const prodItem = itemById(a, product.id)
-  // ποσότητα παρτίδας: "για 40 (τεμάχια)", "βγάζει 40", "παρτίδα 40"
+  // ποσότητα παρτίδας: "για 40 (τεμάχια)", "για 10 κιλά", "βγάζει 40", "παρτίδα 40"
   let outputQty = 1
   const block = new Set<number>()
   for (let i = 0; i < n; i++) {
@@ -1045,16 +1756,19 @@ function buildRecipe(a: Analysis): Built {
       if (a.w(j) === 'των' || a.w(j) === 'τα' || a.w(j) === 'τουσ' || a.w(j) === 'τισ') j++
       const x = a.num(j)
       const xu = a.unitAt(j + 1)
-      if (x && !x.size && (!xu || xu.unit === 'τεμ')) {
-        outputQty = x.value
-        block.add(j)
-        // "για 40 τεμάχια / ζυμάρια / πίτσες"
-        const nx = a.w(j + 1)
-        const nxKey = (a.segs[j + 1] as { tok?: Tok })?.tok?.key ?? ''
-        const sameAsProduct = !!prodItem && tokenize(prodItem.name).some((t) => t.key && t.key === nxKey)
-        if (nx && (unitWord(nx) === 'τεμ' || sameAsProduct || /^(ζυμαρ|πιτσ|τεμαχ|κομματ|μεριδ|μπαλ)/.test(nx))) block.add(j + 1)
-        break
-      }
+      if (!x || x.size) continue
+      let val: number | null = null
+      if (!xu || xu.unit === 'τεμ') val = x.value
+      else if (xu.unit && prodItem && prodItem.unit !== 'τεμ') val = convertUnit(x.value, xu.unit, prodItem.unit)
+      if (val === null) continue
+      outputQty = val
+      block.add(j)
+      // "για 40 τεμάχια / ζυμάρια / πίτσες", "για 10 κιλά"
+      const nx = a.w(j + 1)
+      const nxKey = (a.segs[j + 1] as { tok?: Tok })?.tok?.key ?? ''
+      const sameAsProduct = !!prodItem && tokenize(prodItem.name).some((t) => t.key && t.key === nxKey)
+      if (nx && (xu || sameAsProduct || /^(ζυμαρ|πιτσ|τεμαχ|κομματ|μεριδ|μπαλ)/.test(nx))) block.add(j + 1)
+      break
     }
   }
   if (prodHit) for (let i = prodHit.from; i < prodHit.to; i++) block.add(i)
@@ -1066,7 +1780,12 @@ function buildRecipe(a: Analysis): Built {
   for (const b of block) cov.add(b)
   const nums = a.numbers(cov).filter((x) => x.i >= cLo)
   const lines = pairLines(a, hitsToEnts(itemHits), hitsToEnts(cs.unknown, true), nums, false, pool)
-  const { out, conf } = qtyLines(a, lines, 'issue')
+  // "ζυμάρι 400" χωρίς αριθμό σε συνταγή μίας πίτσας: 1 τεμάχιο
+  const oneIfCount = (it: Item | null, ref: EntityRef): number | null => {
+    const us = it ? [it.unit] : candItems(a, ref).map((c) => c.unit)
+    return outputQty === 1 && us.length > 0 && us.every((u) => u === 'τεμ') ? 1 : null
+  }
+  const { out, conf } = qtyLines(a, lines, oneIfCount)
   // "120 μοτσαρέλα" σε συνταγή μίας πίτσας: εννοεί γραμμάρια, όχι κιλά
   out.forEach((l, k) => {
     const x = lines[k]?.qty
@@ -1091,6 +1810,9 @@ function buildRecipe(a: Analysis): Built {
 const TRAIL = new Set(['και', 'κι', 'με', 'απο', 'στο', 'στη', 'στην', 'στον', 'στα', 'σε', 'το', 'τα', 'τη', 'την', 'τον', 'του', 'τησ', 'των', 'ο', 'η', 'οι', 'για', 'ε', 'εε', 'λοιπον', 'ενα', 'μια'])
 const NAME_END = new Set(['σε', 'ερχεται', 'ερχονται', 'μοναδα', 'τιμη', 'κατα', 'με', 'χωρισ', 'των', 'συσκευασια', 'αυτοματα', 'ανα', 'πουλιεται', 'κανει', 'κοστιζει'])
 
+/** Κλειδί ονόματος για "υπάρχει ήδη" (ίδια ρίζα / φωνητικά, π.χ. "σπέσιαλ" = "Special") */
+const nameKey = (s: string) => tokenize(String(s ?? '')).filter((t) => !t.sep).map((t) => (t.num !== undefined ? String(t.num) : t.key)).join(' ')
+
 function buildNewItem(a: Analysis): Built {
   a.markVat()
   const n = a.segs.length
@@ -1107,12 +1829,15 @@ function buildNewItem(a: Analysis): Built {
     if (c === 'typeRaw') { type = 'raw'; i++; break }
     if (c === 'typeSemi') { type = 'semi'; i++; break }
     if (c === 'pizza') { type = 'finished'; mto = true; i++; break }
-    if (c === 'typeFinished') { type = 'finished'; i++; if (a.cue[i] === 'pizza') i++; break }
+    if (c === 'typeFinished') { type = 'finished'; i++; if (a.cue[i] === 'pizza') { mto = true; i++ } break }
     if (c === 'typeGeneric') { i++; break }
     if (/^ζυμαρ/.test(wd)) { type = 'semi'; break }
     if (isStop(wd)) { i++; continue }
     break
   }
+  // δηλωμένη μονάδα ("σε τεμάχια"): τότε το "330ml" είναι μέρος του ονόματος
+  let declared: string | null = null
+  for (let k = i; k < n; k++) if (a.w(k) === 'σε' && a.w(k + 1) && unitWord(a.w(k + 1) as string)) { declared = unitWord(a.w(k + 1) as string); break }
   // όνομα ("με όνομα", "που λέγεται" = γέμισμα)
   const parts: string[] = []
   let j = i
@@ -1125,7 +1850,7 @@ function buildNewItem(a: Analysis): Built {
     if (s.t === 'n') {
       const u = a.w(j + 1) ? unitWord(a.w(j + 1) as string) : null
       if (isPriceHere(s, j) || s.pct) break
-      if (type !== 'raw' && (u === 'g' || u === 'εκ' || u === 'ml' || u === 'kg' || u === 'L')) {
+      if ((type !== 'raw' || declared === 'τεμ') && (u === 'g' || u === 'εκ' || u === 'ml' || u === 'kg' || u === 'L')) {
         parts.push(`${s.value}${UNIT_SHORT[u] === 'κιλά' ? 'kg' : UNIT_SHORT[u] === 'λίτρα' ? 'L' : UNIT_SHORT[u]}`)
         j += 2
         continue
@@ -1142,7 +1867,8 @@ function buildNewItem(a: Analysis): Built {
     if (NAME_END.has(wd) || MONEY.has(wd) || VAT.has(wd) || PHONE_WORDS.has(wd)) break
     if (type === 'raw' && (unitWord(wd) || genericPack(wd))) break
     if (!parts.length && isStop(wd)) { j++; continue }
-    parts.push(s.tok.raw)
+    if (s.tok.glued && parts.length) parts[parts.length - 1] += s.tok.raw
+    else parts.push(s.tok.raw)
     j++
   }
   while (parts.length && TRAIL.has(norm(parts[parts.length - 1]))) parts.pop()
@@ -1192,19 +1918,26 @@ function buildNewItem(a: Analysis): Built {
     else { type = 'raw'; a.issues.push('Δεν είπες τι είδος είναι· το πέρασα ως πρώτη ύλη.') }
   }
   if (!unit) unit = type === 'raw' ? 'kg' : 'τεμ'
-  if (type === 'finished' && mto === null) mto = !/κατεψυγμεν|χονδρικ|συσκευασμεν/.test(norm(name) + ' ' + txt)
+  // χονδρική / κατεψυγμένα: τιμή χωρίς ΦΠΑ· λιανική: με ΦΠΑ
+  const retail = !/κατεψυγμεν|χονδρικ|συσκευασμεν/.test(norm(name) + ' ' + txt)
   if (/κατα παραγγελια|αυτοματα/.test(txt)) mto = true
-  if (type !== 'finished' && mto === null) mto = false
+  if (type === 'finished' && mto === null) {
+    // κατά παραγγελία μόνο για "νέα πίτσα" (αλλιώς θα ήθελε συνταγή για να κλείσει η μέρα)
+    mto = false
+    if (retail) a.issues.push('Δεν θα είναι «κατά παραγγελία»· αν είναι πίτσα με συνταγή, πες «νέα πίτσα …».')
+  }
+  if (mto === null) mto = false
   const vatRate = a.vatRate !== null && [0, 6, 13, 24].includes(a.vatRate) ? a.vatRate : 13
   if (a.vatRate !== null && vatRate !== a.vatRate) a.issues.push(`Ο ΦΠΑ ${a.vatRate}% δεν υπάρχει· έβαλα 13%.`)
   let salePrice: number | null = null
   if (price !== null) {
-    const gross = a.gross ?? (type === 'finished' && !!mto)
+    const gross = a.gross ?? (type === 'finished' && retail)
     salePrice = gross ? round(price / (1 + vatRate / 100)) : round(price)
   }
   if (!name) a.issues.push('Δεν ακούστηκε όνομα.')
   if (packName && packQty === null) a.issues.push(`Δεν ακούστηκε πόσο έχει το ${packName}.`)
-  const exists = name ? a.items.find((it) => norm(it.name) === norm(name)) : null
+  const key = name ? nameKey(name) : ''
+  const exists = key ? a.items.find((it) => [it.name, ...(it.aliases ?? [])].some((x) => nameKey(x) === key)) : null
   if (exists) a.issues.push(`Υπάρχει ήδη «${exists.name}».`)
   return {
     command: {
@@ -1282,18 +2015,27 @@ function buildNewPartner(a: Analysis): Built {
       continue
     }
     if (wd && (a.cue[j] === 'customerWord' || a.cue[j] === 'supplierWord')) { j++; continue }
-    if (mode === 'city') cityParts.push((s as { tok: Tok }).tok.raw)
-    else if (!(nameParts.length === 0 && wd && isStop(wd))) nameParts.push((s as { tok: Tok }).tok.raw)
+    const tok = (s as { tok: Tok }).tok
+    const target = mode === 'city' ? cityParts : nameParts
+    // "Coca Cola 3Ε": κολλητά γράμματα μένουν κολλητά
+    if (tok.glued && target.length) target[target.length - 1] += tok.raw
+    else if (mode === 'city') cityParts.push(tok.raw)
+    else if (!(nameParts.length === 0 && wd && isStop(wd))) nameParts.push(tok.raw)
     j++
   }
   while (nameParts.length && TRAIL.has(norm(nameParts[nameParts.length - 1]))) nameParts.pop()
+  // "ξενοδοχείο Κνωσός Ηράκλειο": γνωστή πόλη στο τέλος του ονόματος
+  if (!cityParts.length && nameParts.length >= 2 && CITIES.has(norm(nameParts[nameParts.length - 1]))) {
+    cityParts.push(nameParts.pop() as string)
+  }
   if (cityParts.length) city = titleCase(cityParts.join(' '))
   const name = titleCase(nameParts.join(' '))
   if (!isCustomer && !isSupplier) isCustomer = true
   if (!name) a.issues.push('Δεν ακούστηκε όνομα.')
   if (phone && phone.length !== 10) a.issues.push(`Το τηλέφωνο έχει ${phone.length} ψηφία.`)
   if (vatNo && vatNo.length !== 9) a.issues.push(`Το ΑΦΜ έχει ${vatNo.length} ψηφία.`)
-  const exists = name ? a.partners.find((p) => norm(p.name) === norm(name)) : null
+  const key = name ? nameKey(name) : ''
+  const exists = key ? a.partners.find((p) => [p.name, ...(p.aliases ?? [])].some((x) => nameKey(x) === key)) : null
   if (exists) a.issues.push(`Υπάρχει ήδη «${exists.name}».`)
   return {
     command: { kind: 'new_partner', name, isCustomer, isSupplier, phone, vatNo, city },
@@ -1343,10 +2085,12 @@ function run(text: string, ctx: InterpretContext): Interpretation {
       b = { command: { kind: d.kind }, conf: 1 }
       break
     default:
-      return { text, command: { kind: 'unknown' }, confidence: 0, issues: [] }
+      return { text, command: { kind: 'unknown' }, confidence: 0, issues: d.issue ? [d.issue] : [] }
   }
+  if (d.issue) a.issues.unshift(d.issue)
   const issues = Array.from(new Set(a.issues))
-  const confidence = Math.max(0.05, Math.min(1, Math.round(d.conf * b.conf * 100) / 100))
+  const conf = d.conf * b.conf * a.cap * (a.loose ? 0.7 : 1)
+  const confidence = Math.max(0.05, Math.min(1, Math.round(conf * 100) / 100))
   return { text, command: b.command, confidence, issues }
 }
 
@@ -1360,5 +2104,70 @@ export function interpret(text: string, ctx: InterpretContext): Interpretation {
   }
 }
 
-export const localInterpreter: Interpreter = { interpret }
+/**
+ * Προετοιμασία ευρετηρίου του καταλόγου (π.χ. όταν ανοίγει η οθόνη), ώστε η
+ * πρώτη φράση να μην πληρώνει το χτίσιμό του. Δεν πετάει ποτέ.
+ */
+export function warmUp(ctx: InterpretContext): void {
+  try {
+    getIndex(Array.isArray(ctx?.items) ? ctx.items : [], Array.isArray(ctx?.partners) ? ctx.partners : [])
+    interpret('efood 2 μαργαρίτες', ctx)
+  } catch {
+    // τίποτα
+  }
+}
 
+/**
+ * Ποσότητα από ό,τι ακούστηκε ("500 γραμμάρια", "2 σακιά και 10 κιλά",
+ * "3 μείον 1") στη μονάδα ενός είδους. Για την οθόνη: όταν ο χρήστης
+ * διαλέγει είδος σε γραμμή που δεν είχε σίγουρο id, η ποσότητα πρέπει να
+ * ξαναμετατραπεί. null αν δεν βγαίνει (π.χ. κιλά σε είδος με τεμάχια).
+ */
+export function qtyForItem(heardQty: string | null | undefined, item: Item | null | undefined): number | null {
+  try {
+    if (!heardQty || !item) return null
+    const segs = segment(tokenize(heardQty))
+    let total = 0
+    let any = false
+    let sign = 1
+    let lastUnit: MeasureUnit | null = null
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i]
+      if (s.t === 'w') {
+        if (MINUS_PRE.has(s.tok.n)) sign = -1
+        continue
+      }
+      if (s.t !== 'n') continue
+      let v = s.value
+      const nx = segs[i + 1]
+      const w = nx?.t === 'w' ? nx.tok.n : null
+      const u = w ? unitWord(w) : null
+      if (u && isMeasureUnit(u)) {
+        const c = convertUnit(v, u, item.unit)
+        if (c === null) return null
+        v = c
+        lastUnit = u
+        i++
+      } else if (w && (genericPack(w) || isItemPack(w, item))) {
+        const pq = Number(item.pack_qty)
+        if (!isItemPack(w, item) || !(pq > 0)) return null
+        v *= pq
+        lastUnit = null
+        i++
+      } else if (s.half && lastUnit) {
+        // "ένα κιλό και μισό"
+        const c = convertUnit(v, lastUnit, item.unit)
+        if (c === null) return null
+        v = c
+      }
+      total += sign * v
+      sign = 1
+      any = true
+    }
+    return any ? round(total, 6) : null
+  } catch {
+    return null
+  }
+}
+
+export const localInterpreter: Interpreter = { interpret }

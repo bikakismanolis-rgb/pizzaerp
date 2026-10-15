@@ -25,17 +25,22 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastCtx.Provider value={api}>
       {children}
-      {/* σε κινητό πάνω (για να μην κρύβει μικρόφωνο / κουμπιά κάτω), σε desktop κάτω δεξιά */}
-      <div className="fixed z-50 flex flex-col gap-2 top-2 inset-x-2 md:inset-x-auto md:top-auto md:bottom-4 md:right-4 md:max-w-sm pointer-events-none">
+      {/* σε κινητό πάνω, κάτω από την μπάρα με το μενού (για να μην κρύβει μικρόφωνο /
+          κουμπιά κάτω), σε desktop κάτω δεξιά. Κλείνει με πάτημα. */}
+      <div className="fixed z-50 flex flex-col gap-2 top-14 inset-x-2 md:inset-x-auto md:top-auto md:bottom-4 md:right-4 md:max-w-sm pointer-events-none">
         {toasts.map((t) => (
           <div
             key={t.id}
+            role={t.kind === 'err' ? 'alert' : 'status'}
+            title="Πάτα για κλείσιμο"
+            onClick={() => setToasts((ts) => ts.filter((x) => x.id !== t.id))}
             className={
-              'rounded-md px-4 py-3 text-sm shadow-lg text-white pointer-events-auto ' +
+              'rounded-md px-4 py-3 text-sm shadow-lg text-white pointer-events-auto cursor-pointer flex items-start gap-3 ' +
               (t.kind === 'ok' ? 'bg-emerald-700' : t.kind === 'err' ? 'bg-red-700' : 'bg-stone-800')
             }
           >
-            {t.text}
+            <span className="flex-1">{t.text}</span>
+            <span aria-hidden="true" className="opacity-70 leading-5">✕</span>
           </div>
         ))}
       </div>

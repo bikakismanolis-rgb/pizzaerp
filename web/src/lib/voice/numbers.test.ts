@@ -89,6 +89,15 @@ describe('ακολουθίες', () => {
   it('ψηφία + "χιλιάδες"', () => {
     expect(nums('2 χιλιάδες')).toEqual([2000])
   })
+  it('χιλιάδες + υπόλοιπο, μισά, ψηφία μαζί με λέξεις', () => {
+    expect(nums('2 χιλιάδες 500')).toEqual([2500])
+    expect(nums('δύο χιλιάδες 500')).toEqual([2500])
+    expect(nums('χίλια 500')).toEqual([1500])
+    expect(nums('δυόμισι χιλιάδες')).toEqual([2500])
+    expect(nums('2,5 χιλιάδες')).toEqual([2500])
+    expect(nums('ενάμισι κιλό')).toEqual([1.5])
+    expect(nums('2 χιλιάδες 0030')).toEqual([2000, 30])
+  })
 })
 
 describe('σημαίες', () => {

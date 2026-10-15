@@ -1,6 +1,8 @@
 -- Σενάριο δοκιμής 0004 ("Πες το"): aliases, κανάλια, μετρητής ημέρας,
 -- απογραφή σε εξέλιξη, αυτόματο κλείσιμο ημερών, αυτόματο ζυμάρι (backflush
--- δύο επιπέδων), επιμερισμός απογραφής πάνω σε αυτόματες παραγωγές.
+-- δύο επιπέδων, μόνο όσο λείπει από το απόθεμα), επιμερισμός απογραφής πάνω
+-- σε αυτόματες παραγωγές (και σε δύο διαδοχικές απογραφές), απογραφή με
+-- ανοιχτές πωλήσεις ημέρας, κλειδωμένες ημέρες, ασφάλεια (RLS, εταιρεία).
 \set ON_ERROR_STOP on
 \pset format aligned
 
@@ -45,8 +47,9 @@ declare
   mill uuid; hotel uuid;
   b_dough uuid; b_marg uuid; b_special uuid; b_pep uuid;
   d uuid; s1 uuid; p1 uuid; p2 uuid; a1 uuid; a2 uuid; a3 uuid;
-  t uuid; t2 uuid; t10 uuid; t11 uuid; t12 uuid; t13 uuid; t15 uuid; st uuid; st30 uuid;
-  v numeric; v2 numeric; v3 numeric; v_total numeric;
+  t uuid; t2 uuid; t3 uuid; t10 uuid; t11 uuid; t12 uuid; t13 uuid; t15 uuid; st uuid; st30 uuid;
+  p3 uuid; p4 uuid; a4 uuid; imp uuid; b_x uuid;
+  v numeric; v2 numeric; v3 numeric; v4 numeric; v_total numeric;
   n int; n2 int; n3 int;
   r record;
   sql text;
@@ -134,7 +137,8 @@ begin
   select count(*) into n
     from pg_constraint k
    where k.conrelid = 'public.doc'::regclass and k.contype = 'c'
-     and pg_get_constraintdef(k.oid) like '%channel%';
+     and k.conkey = array[(select a.attnum from pg_attribute a
+                            where a.attrelid = 'public.doc'::regclass and a.attname = 'channel')]::int2[];
   if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: % περιορισμοί για το channel', n; end if;
   raise notice 'OK κανάλια wolt/box';
 
@@ -157,7 +161,16 @@ begin
   if has_function_privilege('authenticated', 'public._post_production(public.doc)', 'execute')
      or has_function_privilege('authenticated', 'public._post_internal(uuid)', 'execute')
      or has_function_privilege('authenticated', 'public._unpost_internal(uuid)', 'execute')
-     or has_function_privilege('anon', 'public._unpost_internal(uuid)', 'execute') then
+     or has_function_privilege('anon', 'public._unpost_internal(uuid)', 'execute')
+     or has_function_privilege('authenticated', 'public._post_sale(public.doc)', 'execute')
+     or has_function_privilege('authenticated', 'public._post_stocktake(public.doc)', 'execute')
+     or has_function_privilege('authenticated', 'public._allocate_stocktake(public.doc)', 'execute')
+     or has_function_privilege('authenticated', 'public._allocate_cascade(public.doc,uuid,numeric,numeric,date)', 'execute')
+     or has_function_privilege('authenticated', 'public._semi_stock_use(uuid,uuid,date,date)', 'execute')
+     or has_function_privilege('authenticated', 'public._available_qty(uuid,date)', 'execute')
+     or has_function_privilege('authenticated', 'public._item_tree(uuid)', 'execute')
+     or has_function_privilege('anon', 'public._stocktake_lock(uuid,date,uuid[])', 'execute')
+     or has_function_privilege('authenticated', 'public._stocktake_lock(uuid,date,uuid[])', 'execute') then
     raise exception 'ΑΠΟΤΥΧΙΑ: εσωτερική function εκτελείται από τον client';
   end if;
   perform pg_temp.expect_fail(format('select public._post_internal(%L)', c), '%permission denied%', 'εσωτερική function από client');
@@ -250,7 +263,8 @@ begin
   if n <> 1 or n2 <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ ξανακαταχώρηση: % / %', n, n2; end if;
 
   -- -------------------------------------------------------------------
-  -- 6. Χειροκίνητη παραγωγή (όχι κατά παραγγελία) που αναλώνει αυτόματο ζυμάρι
+  -- 6. Χειροκίνητη παραγωγή (όχι κατά παραγγελία) που αναλώνει αυτόματο ζυμάρι:
+  --    πρώτα τα ζυμάρια του αποθέματος, αυτόματα μόνο όσα λείπουν
   -- -------------------------------------------------------------------
   -- 3/9: προετοιμασία 40 ζυμαριών με το χέρι (επιτρέπεται και για αυτόματο ημιέτοιμο)
   insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2026-09-03') returning id into p1;
@@ -267,23 +281,30 @@ begin
   create temp table snap2 on commit drop as
     select b.item_id, b.on_hand, b.avg_cost from public.v_stock_balance b where b.company_id = c;
 
-  -- 4/9: 20 Special κατεψυγμένες (η ανάπτυξη συνταγής γίνεται στην καταχώρηση)
+  -- 4/9: 60 Special κατεψυγμένες (η ανάπτυξη συνταγής γίνεται στην καταχώρηση):
+  -- 40 ζυμάρια από το απόθεμα + 20 αυτόματα
+  select on_hand into v3 from public.v_stock_balance where item_id = flour;
   insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2026-09-04') returning id into p2;
-  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p2, 1, 'output', special, 20);
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p2, 1, 'output', special, 60);
   perform public.post_document(p2);
   select count(*), min(id::text)::uuid into n, a3 from public.doc where source_doc_id = p2 and is_auto and status = 'posted';
   if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: % αυτόματα ζυμάρια από παραγωγή', n; end if;
   if not exists (select 1 from public.doc x join public.doc_line o on o.doc_id = x.id and o.role = 'output'
                   where x.id = a3 and o.item_id = dough and o.qty = 20 and x.doc_date = '2026-09-04'
                     and x.notes = 'Αυτόματη παραγωγή από ΠΑ-' || (select doc_no from public.doc where id = p2)) then
-    raise exception 'ΑΠΟΤΥΧΙΑ: λάθος αυτόματο ζυμάρι από παραγωγή';
+    raise exception 'ΑΠΟΤΥΧΙΑ: λάθος αυτόματο ζυμάρι από παραγωγή (μόνο τα 20 που έλειπαν)';
+  end if;
+  if (select qty from public.doc_line where doc_id = p2 and role = 'input' and item_id = dough) <> 60 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ανάλωση ζυμαριού της παραγωγής';
   end if;
   select on_hand, avg_cost into v, v2 from public.v_stock_balance where item_id = dough;
-  if v <> 40 then raise exception 'ΑΠΟΤΥΧΙΑ υπόλοιπο ζυμαριού (40): %', v; end if;
+  if v <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ υπόλοιπο ζυμαριού (40+20-60=0): %', v; end if;
   if round(v2, 5) = 0.13955 then raise exception 'ΑΠΟΤΥΧΙΑ: το μέσο κόστος ζυμαριού δεν άλλαξε'; end if;
+  select v3 - on_hand into v from public.v_stock_balance where item_id = flour;
+  if v <> 3.25 then raise exception 'ΑΠΟΤΥΧΙΑ: αλεύρι μόνο για τα 20 αυτόματα (3.25): %', v; end if;
   select on_hand into v from public.v_stock_balance where item_id = special;
-  if v <> 20 then raise exception 'ΑΠΟΤΥΧΙΑ υπόλοιπο special: %', v; end if;
-  raise notice 'OK παραγωγή special με αυτόματο ζυμάρι: μέσο κόστος ζυμαριού %', round(v2, 6);
+  if v <> 60 then raise exception 'ΑΠΟΤΥΧΙΑ υπόλοιπο special: %', v; end if;
+  raise notice 'OK παραγωγή special: 40 ζυμάρια από απόθεμα + 20 αυτόματα, μέσο κόστος ζυμαριού %', round(v2, 6);
 
   perform public.unpost_document(p2);
   if exists (select 1 from public.doc where id = a3) then raise exception 'ΑΠΟΤΥΧΙΑ: έμεινε το αυτόματο ζυμάρι της παραγωγής'; end if;
@@ -582,16 +603,35 @@ begin
   if cardinality(names) <> 3 or not names @> array['Μαργαρίτα', 'Πεπερόνι', 'Special κατεψυγμένη'] then
     raise exception 'ΑΠΟΤΥΧΙΑ cascade σε: %', names;
   end if;
-  -- η αυτόματη μαργαρίτα της πώλησης (10 από τα 41 ζυμάρια που αναλώθηκαν)
-  select sum(-m.qty) into v_total from public.stock_move m where m.company_id = c and m.item_id = dough and m.move_type = 'prod_consume';
+  -- (α) αυτόματο ζυμάρι μέσα σε παραγωγή: όλος ο επιμερισμός του στη γονική
+  --     (π.χ. η αυτόματη μαργαρίτα της πώλησης παίρνει ακριβώς ό,τι πήρε το ζυμάρι της)
   a1 := (select id from public.doc where source_doc_id = s1);
+  a2 := (select id from public.doc where source_doc_id = a1);
   select cost_alloc into v3 from public.cost_alloc where stocktake_doc_id = st30 and production_doc_id = a1 and component_item_id = dough;
-  if v_total <> 41 or abs(v3 - v * 10 / 41) > 0.0002 then raise exception 'ΑΠΟΤΥΧΙΑ cascade στην αυτόματη μαργαρίτα: % (ζυμάρια %)', v3, v_total; end if;
+  if v3 is distinct from (select sum(cost_alloc) from public.cost_alloc where stocktake_doc_id = st30 and production_doc_id = a2 and level = 1) then
+    raise exception 'ΑΠΟΤΥΧΙΑ cascade στην αυτόματη μαργαρίτα: %', v3;
+  end if;
+  select count(*) into n
+    from public.doc x join public.doc p on p.id = x.source_doc_id and p.doc_type = 'production'
+   where x.company_id = c and x.is_auto and x.status = 'posted' and p.id <> p2
+     and (select coalesce(sum(ca.cost_alloc), 0) from public.cost_alloc ca
+           where ca.stocktake_doc_id = st30 and ca.production_doc_id = p.id and ca.component_item_id = dough and ca.source = 'cascade')
+      <> (select coalesce(sum(ca.cost_alloc), 0) from public.cost_alloc ca
+           where ca.stocktake_doc_id = st30 and ca.production_doc_id = x.id and ca.level = 1);
+  if n <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ: % αυτόματες πίτσες με cascade <> επιμερισμός του ζυμαριού τους', n; end if;
+  -- (β) τα 40 ζυμάρια με το χέρι τα ανάλωσε από απόθεμα μόνο η παραγωγή special:
+  --     εκείνη παίρνει όλο τον επιμερισμό τους (+ του δικού της αυτόματου ζυμαριού)
+  a3 := (select id from public.doc where source_doc_id = p2);
+  select sum(cost_alloc) into v4 from public.cost_alloc where stocktake_doc_id = st30 and production_doc_id = p2 and component_item_id = dough;
+  if v4 is distinct from (select sum(cost_alloc) from public.cost_alloc
+                           where stocktake_doc_id = st30 and production_doc_id in (p1, a3) and level = 1) then
+    raise exception 'ΑΠΟΤΥΧΙΑ cascade στην παραγωγή special: %', v4;
+  end if;
   if not (select is_final from public.v_production_cost where doc_id = a1)
      or (select alloc_cost from public.v_production_cost where doc_id = a1) <> v3 then
     raise exception 'ΑΠΟΤΥΧΙΑ: πραγματικό κόστος αυτόματης μαργαρίτας';
   end if;
-  raise notice 'OK επίπεδο 2: cascade % -> πίτσες, αυτόματη μαργαρίτα πώλησης %', v2, v3;
+  raise notice 'OK επίπεδο 2: cascade % -> πίτσες, αυτόματη μαργαρίτα πώλησης %, special (απόθεμα + αυτόματο) %', v2, v3, v4;
 
   -- -------------------------------------------------------------------
   -- 12. Κλειδώματα με αυτόματα επίπεδα
@@ -604,11 +644,27 @@ begin
   if exists (select 1 from public.doc where source_doc_id = d) then raise exception 'ΑΠΟΤΥΧΙΑ: έμειναν μισές αυτόματες'; end if;
   update public.doc set doc_date = '2026-10-01' where id = d;
   perform public.post_document(d);
-  -- μετρητής 30/9 που έμεινε ανοιχτός: δεν κλείνει μετά την απογραφή (αναφέρεται)
-  t := public.tally_add(c, d30, 'efood', marg, 2);
+  -- μετρητής σε κλειδωμένη μέρα: απορρίπτεται αμέσως (αλλιώς θα έμενε πρόχειρο
+  -- που δεν καταχωρείται ποτέ)· είδος που δεν κινεί αλεύρι (κατεψυγμένη) περνάει
+  perform pg_temp.expect_fail(format('select public.tally_add(%L, %L, %L, %L, %L)', c, d30, 'efood', marg, 2),
+    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής σε κλειδωμένη μέρα');
+  perform pg_temp.expect_fail(format('select public.tally_add(%L, %L, %L, %L, %L)', c, d20, 'wolt', pep, 1),
+    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής σε παλιότερη κλειδωμένη μέρα');
+  t := public.tally_add(c, d30, 'box', special, 1);
+  if t is null then raise exception 'ΑΠΟΤΥΧΙΑ: κατεψυγμένη σε μέρα κλειδωμένη μόνο για το αλεύρι'; end if;
+  perform public.tally_add(c, d30, 'box', special, -1);
+  -- μετρητής που έμεινε ανοιχτός σε κλειδωμένη μέρα (π.χ. από παλιότερη έκδοση): το
+  -- close_running τον αναφέρει, και η μείωση επιτρέπεται για να καθαρίσει
+  insert into public.doc (company_id, doc_type, doc_date, channel, is_running, notes)
+  values (c, 'sale', d30, 'efood', true, 'Πωλήσεις ημέρας') returning id into t;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (t, 1, marg, 2, 8, 13);
   select count(*) into n from public.close_running(c, '2026-10-01') x where x.doc_id = t and not x.ok and x.message like 'Κλειδωμένη περίοδος%';
   if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: close_running σε κλειδωμένη μέρα'; end if;
-  perform public.tally_add(c, d30, 'efood', marg, -2);
+  t2 := public.tally_add(c, d30, 'efood', marg, -2);
+  if t2 is not null or exists (select 1 from public.doc where id = t) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: καθάρισμα μετρητή σε κλειδωμένη μέρα';
+  end if;
+  raise notice 'OK μετρητής σε κλειδωμένη μέρα: απορρίπτεται η αύξηση, επιτρέπεται η μείωση';
 
   -- ακυρώσεις: παραγωγή με επιμερισμούς δεν ακυρώνεται (ούτε έμμεσα)
   perform pg_temp.expect_fail(format('select public.unpost_document(%L)', s1), '%επιμερισμούς κόστους από την απογραφή%', 'ακύρωση πώλησης με επιμερισμούς');
@@ -620,14 +676,246 @@ begin
   perform public.unpost_document(st30);
   perform public.unpost_document(s1);
   if exists (select 1 from public.doc where id in (a1, a2)) then raise exception 'ΑΠΟΤΥΧΙΑ: έμειναν αυτόματες της πώλησης'; end if;
+  if (select is_running from public.doc where id = s1) then raise exception 'ΑΠΟΤΥΧΙΑ: απλή πώληση έγινε ανοιχτό πρόχειρο'; end if;
   -- καμία ορφανή αυτόματη παραγωγή
   if exists (select 1 from public.doc a left join public.doc s on s.id = a.source_doc_id
               where a.company_id = c and a.is_auto and (a.status <> 'posted' or s.status is distinct from 'posted')) then
     raise exception 'ΑΠΟΤΥΧΙΑ: ορφανές αυτόματες παραγωγές';
   end if;
   select on_hand into v from public.v_stock_balance where item_id = dough;
-  if v <> 40 then raise exception 'ΑΠΟΤΥΧΙΑ τελικό υπόλοιπο ζυμαριού (40): %', v; end if;
+  if v <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ τελικό υπόλοιπο ζυμαριού (0): %', v; end if;
   raise notice 'OK κλειδώματα και ακυρώσεις με αυτόματα επίπεδα';
+
+  -- -------------------------------------------------------------------
+  -- 13. Δύο μηνιαίες απογραφές αλευριού: το έλλειμμα του Νοεμβρίου πέφτει
+  --     μόνο σε παραγωγές του Νοεμβρίου, όχι σε πίτσες κλεισμένων μηνών
+  --     (το αυτόματο ζυμάρι δεν μετριέται ποτέ)
+  -- -------------------------------------------------------------------
+  t := public.tally_add(c, '2026-10-10', 'efood', marg, 30);
+  perform public.post_document(t);
+  st := public.stocktake_count(c, '2026-10-31', flour, public.item_on_hand(flour, '2026-10-31'));
+  perform public.post_document(st);
+  if exists (select 1 from public.cost_alloc where stocktake_doc_id = st) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: απογραφή χωρίς διαφορά έγραψε επιμερισμούς';
+  end if;
+  -- Νοέμβριος: 10 ζυμάρια με το χέρι (5/11) -> 10 Special από το απόθεμα (6/11),
+  -- 10 πεπερόνι από τον μετρητή (10/11, αυτόματο ζυμάρι)
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2026-11-05') returning id into p3;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p3, 1, 'output', dough, 10);
+  perform public.post_document(p3);
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2026-11-06') returning id into p4;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p4, 1, 'output', special, 10);
+  perform public.post_document(p4);
+  if exists (select 1 from public.doc where source_doc_id = p4) then raise exception 'ΑΠΟΤΥΧΙΑ: αυτόματο ζυμάρι ενώ υπήρχε απόθεμα'; end if;
+  t := public.tally_add(c, '2026-11-10', 'efood', pep, 10);
+  perform public.post_document(t);
+  a4 := (select id from public.doc where source_doc_id = t);
+  st := public.stocktake_count(c, '2026-11-30', flour, public.item_on_hand(flour, '2026-11-30') - 1);
+  perform public.post_document(st);
+  select diff_value, allocated_value into v, v2 from public.v_stocktake_result where doc_id = st and item_id = flour;
+  if v <= 0 or v2 <> v then raise exception 'ΑΠΟΤΥΧΙΑ επιμερισμός Νοεμβρίου: % / %', v, v2; end if;
+  -- επίπεδο 1: μόνο οι δύο παραγωγές ζυμαριού του Νοεμβρίου (10 + 10 ζυμάρια, μισό-μισό)
+  select count(*) into n from public.cost_alloc ca join public.doc x on x.id = ca.production_doc_id
+   where ca.stocktake_doc_id = st and ca.level = 1 and x.doc_date > '2026-10-31';
+  select count(*) into n2 from public.cost_alloc ca where ca.stocktake_doc_id = st and ca.level = 1;
+  if n <> 2 or n2 <> 2 then raise exception 'ΑΠΟΤΥΧΙΑ επίπεδο 1 Νοεμβρίου: % από %', n, n2; end if;
+  -- επίπεδο 2: τίποτα σε παραγωγές πριν από 31/10
+  if exists (select 1 from public.cost_alloc ca join public.doc x on x.id = ca.production_doc_id
+              where ca.stocktake_doc_id = st and x.doc_date <= '2026-10-31') then
+    raise exception 'ΑΠΟΤΥΧΙΑ: το έλλειμμα του Νοεμβρίου έπεσε σε παραγωγές κλεισμένων μηνών';
+  end if;
+  select sum(cost_alloc) into v2 from public.cost_alloc where stocktake_doc_id = st and level = 2 and source = 'cascade';
+  if v2 <> v then raise exception 'ΑΠΟΤΥΧΙΑ cascade Νοεμβρίου: % <> %', v2, v; end if;
+  -- τα ζυμάρια με το χέρι -> Special (που τα ανάλωσε), το αυτόματο -> πεπερόνι
+  if (select sum(cost_alloc) from public.cost_alloc where stocktake_doc_id = st and production_doc_id = p4 and level = 2)
+     is distinct from (select sum(cost_alloc) from public.cost_alloc where stocktake_doc_id = st and production_doc_id = p3 and level = 1)
+     or (select sum(cost_alloc) from public.cost_alloc where stocktake_doc_id = st and production_doc_id = a4 and level = 2)
+     is distinct from (select sum(cost_alloc) from public.cost_alloc ca join public.doc x on x.id = ca.production_doc_id
+                        where ca.stocktake_doc_id = st and x.source_doc_id = a4 and ca.level = 1) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: cascade Νοεμβρίου στις σωστές παραγωγές';
+  end if;
+  raise notice 'OK δύο απογραφές: έλλειμμα Νοεμβρίου % μόνο σε παραγωγές Νοεμβρίου', v;
+
+  -- -------------------------------------------------------------------
+  -- 14. Απογραφή με ανοιχτές πωλήσεις ημέρας: όσες κινούν είδη της
+  --     καταχωρούνται πρώτα (αλλιώς η κατανάλωσή τους θα έβγαινε έλλειμμα)
+  -- -------------------------------------------------------------------
+  t := public.tally_add(c, '2026-12-05', 'efood', marg, 4);
+  t2 := public.tally_add(c, '2026-12-05', 'box', special, 1);    -- κατεψυγμένη από απόθεμα: δεν κινεί αλεύρι
+  t3 := public.tally_add(c, '2026-12-04', 'phone', marg, 1);     -- προηγούμενη μέρα, ακόμα ανοιχτή
+  v := public.item_on_hand(flour, '2026-12-05') - 5 * 6.5 / 40;  -- το αλεύρι που υπάρχει πραγματικά
+  st := public.stocktake_count(c, '2026-12-05', flour, v);
+  perform public.post_document(st);
+  select expected_qty, diff_qty into v2, v3 from public.v_stocktake_result where doc_id = st and item_id = flour;
+  if v2 <> v or v3 <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ: η απογραφή δεν είδε τις πωλήσεις ημέρας (% / %)', v2, v3; end if;
+  if (select count(*) from public.doc where id in (t, t3) and status = 'posted' and not is_running) <> 2 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: δεν καταχωρήθηκαν οι ανοιχτές πωλήσεις πριν την απογραφή';
+  end if;
+  if not exists (select 1 from public.doc where id = t2 and status = 'draft' and is_running) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: έκλεισε πώληση ημέρας που δεν κινεί είδη της απογραφής';
+  end if;
+  perform pg_temp.expect_fail(format('select public.tally_add(%L, %L, %L, %L, %L)', c, '2026-12-05', 'efood', marg, 1),
+    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής μετά την απογραφή της ημέρας');
+  if public.tally_add(c, '2026-12-05', 'box', special, 1) is distinct from t2 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: μετρητής κατεψυγμένης μετά την απογραφή αλευριού';
+  end if;
+  perform public.post_document(t2);
+
+  -- πώληση ημέρας που δεν καταχωρείται: η απογραφή αποτυγχάνει με καθαρό μήνυμα
+  t := public.tally_add(c, '2026-12-10', 'store', marg, 1);
+  update public.bom set is_active = false where id = b_dough;
+  st := public.stocktake_count(c, '2026-12-10', mozz, public.item_on_hand(mozz, '2026-12-10') - 0.12);
+  perform pg_temp.expect_fail(format('select public.post_document(%L)', st),
+    'Πρώτα πρέπει να καταχωρηθούν οι πωλήσεις ημέρας ΠΩ-% (10/12 store): Το ημιέτοιμο "Ζυμάρι 250γρ"%συνταγή',
+    'απογραφή με πώληση ημέρας που αποτυγχάνει');
+  if not exists (select 1 from public.doc where id = t and status = 'draft' and is_running)
+     or not exists (select 1 from public.doc where id = st and status = 'draft') then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η αποτυχημένη απογραφή άφησε αλλαγές';
+  end if;
+  update public.bom set is_active = true where id = b_dough;
+  -- πρόχειρο που κόλλησε σε ημέρα ήδη κλειδωμένη (4/12, από το αλεύρι της 5/12): δεν μπλοκάρει
+  insert into public.doc (company_id, doc_type, doc_date, channel, is_running, notes)
+  values (c, 'sale', '2026-12-04', 'wolt', true, 'Πωλήσεις ημέρας') returning id into t3;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (t3, 1, marg, 1, 8, 13);
+  perform public.post_document(st);
+  if not exists (select 1 from public.doc where id = t and status = 'posted')
+     or not exists (select 1 from public.doc where id = t3 and status = 'draft' and is_running)
+     or (select diff_qty from public.doc_line where doc_id = st) <> 0 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: απογραφή μοτσαρέλας με ανοιχτές πωλήσεις';
+  end if;
+  t2 := public.tally_add(c, '2026-12-04', 'wolt', marg, -1);
+  if t2 is not null or exists (select 1 from public.doc where id = t3) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: καθάρισμα κολλημένου μετρητή';
+  end if;
+  raise notice 'OK απογραφή με ανοιχτές πωλήσεις ημέρας';
+
+  -- -------------------------------------------------------------------
+  -- 15. Ακύρωση πωλήσεων ημέρας: ξαναγίνονται ανοιχτό πρόχειρο
+  -- -------------------------------------------------------------------
+  t := public.tally_add(c, '2026-12-12', 'efood', marg, 5);
+  select count(*) into n from public.close_running(c, '2026-12-13') x where x.doc_id = t and x.ok;
+  if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: κλείσιμο 12/12'; end if;
+  perform public.unpost_document(t);
+  if not exists (select 1 from public.doc where id = t and status = 'draft' and is_running) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: οι ακυρωμένες πωλήσεις ημέρας δεν ξανάνοιξαν';
+  end if;
+  t2 := public.tally_add(c, '2026-12-12', 'efood', marg, 1);
+  if t2 is distinct from t or (select qty from public.doc_line where doc_id = t) <> 6 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ο μετρητής δεν συνέχισε στο ίδιο παραστατικό';
+  end if;
+  select count(*) into n from public.close_running(c, '2026-12-13') x where x.doc_id = t and x.ok;
+  if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: ξανακλείσιμο 12/12'; end if;
+  -- άνοιξε νέος μετρητής για την ίδια μέρα: το ακυρωμένο μένει απλό πρόχειρο
+  t2 := public.tally_add(c, '2026-12-12', 'efood', marg, 1);
+  perform public.unpost_document(t);
+  if (select is_running from public.doc where id = t) or not (select is_running from public.doc where id = t2) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: δύο ανοιχτοί μετρητές για την ίδια μέρα';
+  end if;
+  delete from public.doc where id = t;
+  perform public.tally_add(c, '2026-12-12', 'efood', marg, -1);
+  raise notice 'OK ακύρωση πωλήσεων ημέρας: ξανανοίγουν';
+
+  -- -------------------------------------------------------------------
+  -- 16. Συστατικό που στρογγυλεύεται στο 0 σε ένα αυτόματο ζυμάρι
+  -- -------------------------------------------------------------------
+  insert into public.item (company_id, code, name, item_type, unit) values (c, 'ΠΥ-009', 'Βελτιωτικό', 'raw', 'kg') returning id into imp;
+  insert into public.bom_line (company_id, bom_id, line_no, component_item_id, qty) values (c, b_dough, 6, imp, 0.0015);
+  t := public.tally_add(c, '2026-12-14', 'box', marg, 1);
+  perform public.post_document(t);
+  if exists (select 1 from public.doc_line where item_id = imp) then raise exception 'ΑΠΟΤΥΧΙΑ: γραμμή 0 βελτιωτικού'; end if;
+  -- σε παρτίδα 40 μπαίνει κανονικά
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2026-12-14') returning id into d;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (d, 1, 'output', dough, 40);
+  perform public.explode_bom(d);
+  if (select qty from public.doc_line where doc_id = d and item_id = imp) <> 0.0015 then raise exception 'ΑΠΟΤΥΧΙΑ: βελτιωτικό σε παρτίδα'; end if;
+  delete from public.doc where id = d;
+  delete from public.bom_line where bom_id = b_dough and component_item_id = imp;
+  raise notice 'OK συστατικό που στρογγυλεύεται στο 0 παραλείπεται';
+
+  -- -------------------------------------------------------------------
+  -- 17. Ζυμάρια σε απόθεμα αναλώνονται πρώτα· αυτόματα μόνο όσα λείπουν,
+  --     και ποτέ "δανεικά" από μεταγενέστερη ημέρα
+  -- -------------------------------------------------------------------
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2026-12-16') returning id into p3;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p3, 1, 'output', dough, 5);
+  perform public.post_document(p3);
+  -- 15/12: τα ζυμάρια δεν υπήρχαν ακόμα -> όλα αυτόματα
+  t := public.tally_add(c, '2026-12-15', 'store', marg, 2);
+  perform public.post_document(t);
+  select o.qty into v from public.doc a join public.doc b on b.source_doc_id = a.id join public.doc_line o on o.doc_id = b.id and o.role = 'output'
+   where a.source_doc_id = t;
+  if v is distinct from 2 or public.item_on_hand(dough) <> 5 then raise exception 'ΑΠΟΤΥΧΙΑ 15/12: αυτόματα %', v; end if;
+  -- 16/12: 8 πίτσες = 5 από απόθεμα + 3 αυτόματα
+  v2 := public.item_on_hand(flour);
+  t := public.tally_add(c, '2026-12-16', 'store', marg, 8);
+  perform public.post_document(t);
+  select o.qty into v from public.doc a join public.doc b on b.source_doc_id = a.id join public.doc_line o on o.doc_id = b.id and o.role = 'output'
+   where a.source_doc_id = t;
+  if v is distinct from 3 or public.item_on_hand(dough) <> 0 or v2 - public.item_on_hand(flour) <> 3 * 6.5 / 40 then
+    raise exception 'ΑΠΟΤΥΧΙΑ 16/12: αυτόματα %, ζυμάρι %', v, public.item_on_hand(dough);
+  end if;
+  -- 17/12: 5 με το χέρι, όλα πουλημένα στις 18/12· πώληση 17/12 περασμένη μετά: αυτόματα
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2026-12-17') returning id into p4;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p4, 1, 'output', dough, 5);
+  perform public.post_document(p4);
+  t := public.tally_add(c, '2026-12-18', 'store', marg, 5);
+  perform public.post_document(t);
+  if exists (select 1 from public.doc a join public.doc b on b.source_doc_id = a.id where a.source_doc_id = t) then
+    raise exception 'ΑΠΟΤΥΧΙΑ 18/12: αυτόματο ζυμάρι ενώ υπήρχε απόθεμα';
+  end if;
+  t2 := public.tally_add(c, '2026-12-17', 'phone', marg, 3);
+  perform public.post_document(t2);
+  select o.qty into v from public.doc a join public.doc b on b.source_doc_id = a.id join public.doc_line o on o.doc_id = b.id and o.role = 'output'
+   where a.source_doc_id = t2;
+  if v is distinct from 3 or public.item_on_hand(dough) <> 0
+     or exists (select 1 from public.v_item_ledger where item_id = dough and running_qty < 0) then
+    raise exception 'ΑΠΟΤΥΧΙΑ 17/12: αυτόματα %, ζυμάρι %', v, public.item_on_hand(dough);
+  end if;
+  -- ακύρωση και ξανά καταχώρηση: ίδιο αποτέλεσμα
+  perform public.unpost_document(t);
+  perform public.post_document(t);
+  if exists (select 1 from public.doc a join public.doc b on b.source_doc_id = a.id where a.source_doc_id = t)
+     or public.item_on_hand(dough) <> 0 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ξανακαταχώρηση 18/12';
+  end if;
+  raise notice 'OK ζυμάρια από απόθεμα πρώτα, αυτόματα μόνο όσα λείπουν';
+
+  -- -------------------------------------------------------------------
+  -- 18. Ασφάλεια: σύνδεση/αυτόματο μόνο από τις functions· συνταγές και
+  --     τιμές μόνο με είδη και πελάτες της ίδιας εταιρείας
+  -- -------------------------------------------------------------------
+  insert into public.doc (company_id, doc_type, doc_date, channel) values (c, 'sale', '2026-12-20', 'store') returning id into d;
+  perform pg_temp.expect_fail(
+    format('insert into public.doc (company_id, doc_type, doc_date, partner_id, source_doc_id) values (%L, %L, %L, %L, %L)', c, 'purchase', '2026-12-20', mill, d),
+    '%row-level security%', 'πρόχειρο με source_doc_id');
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2026-12-20', mill) returning id into t;
+  perform pg_temp.expect_fail(format('update public.doc set source_doc_id = %L where id = %L', d, t),
+    '%row-level security%', 'αλλαγή source_doc_id');
+  perform pg_temp.expect_fail(format('update public.doc set is_auto = true where id = %L', d),
+    '%row-level security%', 'αλλαγή is_auto');
+  delete from public.doc where id in (d, t);
+  if (select confdeltype from pg_constraint where conrelid = 'public.doc'::regclass and conname = 'doc_source_doc_id_fkey') <> 'a' then
+    raise exception 'ΑΠΟΤΥΧΙΑ: το source_doc_id σβήνει με cascade';
+  end if;
+  perform pg_temp.expect_fail(
+    format('insert into public.doc (company_id, doc_type, doc_date, channel, is_running) values (%L, %L, %L, %L, true)', c, 'stocktake', '2026-12-20', 'efood'),
+    '%doc_running_check%', 'ανοιχτή απογραφή με κανάλι');
+  perform set_config('request.jwt.claim.sub', other::text, false);
+  perform pg_temp.expect_fail(format('insert into public.bom (company_id, item_id, output_qty) values (%L, %L, 1)', c2, dough),
+    'Το είδος της συνταγής ανήκει σε άλλη εταιρεία', 'συνταγή για είδος άλλης εταιρείας');
+  insert into public.bom (company_id, item_id, output_qty) values (c2, foreign_item, 1) returning id into b_x;
+  perform pg_temp.expect_fail(format('insert into public.bom_line (company_id, bom_id, line_no, component_item_id, qty) values (%L, %L, 1, %L, 5)', c2, b_x, mozz),
+    'Το συστατικό ανήκει σε άλλη εταιρεία', 'συστατικό άλλης εταιρείας');
+  perform pg_temp.expect_fail(format('insert into public.bom_line (company_id, bom_id, line_no, component_item_id, qty) values (%L, %L, 9, %L, 5)', c2, b_marg, foreign_item),
+    'Η γραμμή συνταγής ανήκει σε άλλη εταιρεία%', 'γραμμή σε συνταγή άλλης εταιρείας');
+  perform pg_temp.expect_fail(format('insert into public.partner_price (company_id, partner_id, item_id, price) values (%L, %L, %L, 1)', c2, hotel, foreign_item),
+    'Ο πελάτης ή το είδος ανήκει σε άλλη εταιρεία', 'τιμή για πελάτη άλλης εταιρείας');
+  delete from public.bom where id = b_x;
+  perform set_config('request.jwt.claim.sub', me::text, false);
+  if (select count(*) from public.bom where item_id = dough) <> 1 or (select count(*) from public.bom_line where bom_id = b_marg) <> 4 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: άλλαξαν οι συνταγές μας';
+  end if;
+  raise notice 'OK ασφάλεια: source_doc_id/is_auto, συνταγές και τιμές ίδιας εταιρείας';
 
   raise notice 'ΟΛΑ ΟΚ (φωνή)';
 end $$;

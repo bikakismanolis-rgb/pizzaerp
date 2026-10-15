@@ -68,6 +68,11 @@ describe('keySim', () => {
   it('σύντομες λέξεις μόνο ακριβώς', () => {
     expect(keySim('mag', 'mal')).toBe(0)
   })
+  it('κοντή ρίζα ως πρόθεμα μένει κάτω από ταίριασμα ρίζας (κρέμα ≠ κρεμμύδι)', () => {
+    expect(keySim(stemKey('κρεμα'), stemKey('κρεμμυδι'))).toBeLessThanOrEqual(0.8)
+    expect(keySim(stemKey('ντοματεσ'), stemKey('ντοματινια'))).toBeLessThanOrEqual(0.8)
+    expect(keySim(stemKey('ντοματεσ'), stemKey('ντοματα'))).toBe(1)
+  })
 })
 
 describe('parseDigits', () => {
@@ -116,5 +121,15 @@ describe('κεφαλαία', () => {
     expect(capFirst('μοτσαρέλα')).toBe('Μοτσαρέλα')
     expect(titleCase('ταβέρνα ο νίκος')).toBe('Ταβέρνα ο Νίκος')
     expect(titleCase('τυροκομείο κρήτης')).toBe('Τυροκομείο Κρήτης')
+  })
+})
+
+describe('κολλητά γράμματα και αριθμοί', () => {
+  it('"3Ε" σπάει σε δύο tokens αλλά θυμάται ότι ήταν κολλητά', () => {
+    const t = tokenize('Coca Cola 3Ε')
+    expect(t.map((x) => x.raw)).toEqual(['Coca', 'Cola', '3', 'Ε'])
+    expect(t[3].glued).toBe(true)
+    expect(t[2].glued).toBeUndefined()
+    expect(tokenize('3 Ε')[1].glued).toBeUndefined()
   })
 })

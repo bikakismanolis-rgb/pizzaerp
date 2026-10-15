@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { useCompanyId } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { supabase, errMsg } from '../lib/supabase'
+import { tallyMessage } from '../lib/errors'
 import { postDoc } from '../lib/docs'
 import type { TallyChannel } from '../lib/voice/types'
 import { CHANNEL_LABEL, TALLY_CHANNELS, docCode } from '../lib/labels'
@@ -11,6 +12,9 @@ import { Confirm, ErrorBox, Field, PageTitle, Spinner, useToast } from '../compo
 
 const LS_CHANNEL = 'pizza-erp.channel'
 
+/** Η οθόνη (κανάλι/ημέρα) όπου έγινε μια αλλαγή */
+interface At { gen: number; date: string; channel: TallyChannel }
+
 /**
  * Πωλήσεις ημέρας = μετρητής: κάθε +/− (ή πληκτρολόγηση) γράφεται αμέσως στο
  * ανοιχτό πρόχειρο της ημέρας/καναλιού (tally_add), ώστε να το βλέπουν όλες
@@ -18,9 +22,12 @@ const LS_CHANNEL = 'pizza-erp.channel'
  */
 export function DailySales() {
   const companyId = useCompanyId()
-  const { items, refresh } = useMaster()
+  const { items, ready, refresh } = useMaster()
   const toast = useToast()
-  const [date, setDate] = useState(today())
+  const [date, setDateState] = useState(today())
+  // ημερομηνία που διάλεξε ο χρήστης: αλλιώς ακολουθεί τη σημερινή (tablet ανοιχτό από χθες)
+  const manualDate = useRef(false)
+  const setDate = (d: string) => { manualDate.current = d !== today(); setDateState(d) }
   const [channel, setChannelState] = useState<TallyChannel>(() => {
     try {
       const c = localStorage.getItem(LS_CHANNEL) as TallyChannel | null
@@ -37,19 +44,30 @@ export function DailySales() {
   // (refs: σωστοί υπολογισμοί και με γρήγορα διαδοχικά πατήματα)
   const baseRef = useRef(new Map<string, number>())
   const inflightRef = useRef(new Map<string, number>())
-  const keyRef = useRef('')
+  // αυξάνεται σε κάθε αλλαγή καναλιού/ημέρας: απαντήσεις που αφορούν
+  // προηγούμενη οθόνη δεν πειράζουν τη νέα
+  const genRef = useRef(0)
+  // αύξων αριθμός αλλαγών και η τελευταία ανά είδος: μια φόρτωση που ξεκίνησε
+  // πριν από μια αλλαγή δεν γράφει πάνω της
+  const epochRef = useRef(0)
+  const touchedRef = useRef(new Map<string, number>())
   const [, setTick] = useState(0)
   const rerender = () => setTick((t) => t + 1)
   // ό,τι πληκτρολογείται (πριν σταλεί)
-  const [edit, setEdit] = useState<Map<string, string>>(new Map())
+  const [edit, setEditState] = useState<Map<string, string>>(new Map())
+  const editRef = useRef(edit)
+  const setEdit = (f: (m: Map<string, string>) => Map<string, string>) => {
+    editRef.current = f(editRef.current)
+    setEditState(editRef.current)
+  }
   const [running, setRunning] = useState<string | null>(null)
   const [posted, setPosted] = useState<{ id: string; doc_no: number }[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
   const [askClose, setAskClose] = useState(false)
-  const timers = useRef(new Map<string, number>())
-  const busyRef = useRef(0)
+  // πληκτρολογήσεις που περιμένουν να σταλούν (debounce)
+  const timers = useRef(new Map<string, { t: number; v: string; at: At }>())
   const base = baseRef.current
   const inflight = inflightRef.current
 
@@ -60,6 +78,8 @@ export function DailySales() {
   /** Φόρτωση του ανοιχτού πρόχειρου (date, channel) */
   const load = useCallback(async (quiet = false) => {
     if (!companyId) return
+    const gen = genRef.current
+    const startEpoch = epochRef.current
     if (!quiet) setLoading(true)
     try {
       const { data, error: e } = await supabase.from('doc')
@@ -67,97 +87,154 @@ export function DailySales() {
         .eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', date).eq('channel', channel).eq('is_auto', false)
         .order('doc_no')
       if (e) throw e
+      // στο μεταξύ άλλαξε κανάλι ή ημέρα: η απάντηση δεν αφορά την οθόνη
+      if (genRef.current !== gen) return
       const docs = (data ?? []) as unknown as { id: string; doc_no: number; status: string; is_running: boolean; doc_line: { item_id: string; qty: number }[] }[]
       const run = docs.find((d) => d.is_running && d.status === 'draft')
-      // στο μεταξύ μπορεί να πατήθηκε κάτι: δεν πατάμε πάνω σε εκκρεμότητες
-      if (busyRef.current > 0) return
+      const fresh = new Map<string, number>()
+      for (const l of run?.doc_line ?? []) fresh.set(l.item_id, round((fresh.get(l.item_id) ?? 0) + Number(l.qty), 4))
+      // είδη με αποστολή σε εξέλιξη ή αλλαγή μετά την έναρξη της φόρτωσης: κρατάμε το δικό μας
+      const keep = (id: string) => inflightRef.current.has(id) || (touchedRef.current.get(id) ?? 0) > startEpoch
       const m = new Map<string, number>()
-      for (const l of run?.doc_line ?? []) m.set(l.item_id, round((m.get(l.item_id) ?? 0) + Number(l.qty), 4))
+      for (const [id, q] of baseRef.current) if (keep(id)) m.set(id, q)
+      for (const [id, q] of fresh) if (!keep(id)) m.set(id, q)
       baseRef.current = m
-      setRunning(run ? run.id : null)
+      if (run || epochRef.current === startEpoch) setRunning(run ? run.id : null)
       setPosted(docs.filter((d) => d.status === 'posted').map((d) => ({ id: d.id, doc_no: d.doc_no })))
       setError(null)
+      rerender()
     } catch (e) {
-      setError(errMsg(e))
+      if (genRef.current === gen) setError(errMsg(e))
     } finally {
-      if (!quiet) setLoading(false)
+      if (!quiet && genRef.current === gen) setLoading(false)
     }
   }, [companyId, date, channel])
 
   useEffect(() => {
-    keyRef.current = `${date}|${channel}`
-    for (const t of timers.current.values()) window.clearTimeout(t)
+    genRef.current++
+    // ό,τι γράφτηκε και δεν στάλθηκε ακόμα πάει στο κανάλι/ημέρα όπου γράφτηκε
+    const waiting = [...timers.current]
     timers.current.clear()
-    baseRef.current = new Map(); inflightRef.current = new Map()
-    setEdit(new Map())
+    for (const [id, w] of waiting) { window.clearTimeout(w.t); commitTyped(id, w.v, w.at) }
+    baseRef.current = new Map(); inflightRef.current = new Map(); touchedRef.current = new Map()
+    setEdit(() => new Map())
+    setRunning(null); setPosted([])
     load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load, date, channel])
 
-  // άλλη συσκευή μπορεί να πρόσθεσε: ξαναφόρτωση όταν γυρνάμε στη σελίδα
+  // άλλη συσκευή μπορεί να πρόσθεσε: ξαναφόρτωση όταν γυρνάμε στη σελίδα.
+  // Νέα μέρα (σελίδα ανοιχτή από χθες): πάμε στη σημερινή, αν δεν διάλεξε ημερομηνία
+  // ο χρήστης και δεν περιμένει κάτι να σταλεί.
   useEffect(() => {
-    const h = () => { if (document.visibilityState === 'visible') load(true) }
+    const followToday = () => {
+      const t = today()
+      if (!manualDate.current && t !== date && editRef.current.size === 0 && inflightRef.current.size === 0) {
+        setDateState(t)
+        return true
+      }
+      return false
+    }
+    const h = () => { if (document.visibilityState === 'visible' && !followToday()) load(true) }
     window.addEventListener('focus', h)
     document.addEventListener('visibilitychange', h)
-    return () => { window.removeEventListener('focus', h); document.removeEventListener('visibilitychange', h) }
-  }, [load])
+    const iv = window.setInterval(followToday, 60000)
+    return () => { window.removeEventListener('focus', h); document.removeEventListener('visibilitychange', h); window.clearInterval(iv) }
+  }, [load, date])
 
-  useEffect(() => () => { for (const t of timers.current.values()) window.clearTimeout(t) }, [])
+  useEffect(() => () => { for (const w of timers.current.values()) window.clearTimeout(w.t) }, [])
 
   const confirmed = (id: string) => round((baseRef.current.get(id) ?? 0) + (inflightRef.current.get(id) ?? 0), 4)
+  /** η οθόνη τη στιγμή του πατήματος (σε event handler: το τρέχον κανάλι/ημέρα) */
+  const at = (): At => ({ gen: genRef.current, date, channel })
 
   /** Στέλνει διαφορά ποσότητας· αισιόδοξα στην οθόνη, επαναφορά σε λάθος */
-  const send = async (itemId: string, delta: number) => {
+  const send = async (itemId: string, delta: number, where: At) => {
     delta = round(delta, 4)
     if (!delta) return
-    const key = keyRef.current
+    const here = () => genRef.current === where.gen
     const add = (m: Map<string, number>, d: number) => { const v = round((m.get(itemId) ?? 0) + d, 4); if (v > 0 || (v < 0 && m === inflightRef.current)) m.set(itemId, v); else m.delete(itemId) }
-    busyRef.current++
-    add(inflightRef.current, delta)
-    rerender()
+    const mine = here()
+    if (mine) {
+      touchedRef.current.set(itemId, ++epochRef.current)
+      add(inflightRef.current, delta)
+      rerender()
+    }
     try {
-      const { data, error: e } = await supabase.rpc('tally_add', { p_company: companyId, p_date: date, p_channel: channel, p_item: itemId, p_delta: delta })
+      const { data, error: e } = await supabase.rpc('tally_add', { p_company: companyId, p_date: where.date, p_channel: where.channel, p_item: itemId, p_delta: delta })
       if (e) throw e
-      if (keyRef.current === key) {
+      if (here()) {
         add(baseRef.current, delta)
         setRunning((data as string | null) ?? null)
       }
     } catch (e) {
-      toast.err(errMsg(e))
+      toast.err(tallyMessage(errMsg(e)))
     } finally {
-      if (keyRef.current === key) add(inflightRef.current, -delta)
-      busyRef.current--
+      if (mine && here()) add(inflightRef.current, -delta)
       rerender()
     }
   }
 
+  /** Ποσότητα του είδους στην ανοιχτή πώληση (date, channel) όπως είναι στη βάση τώρα */
+  const serverQty = async (itemId: string, where: At): Promise<number | null> => {
+    const { data, error: e } = await supabase.from('doc').select('id, doc_line(item_id, qty)')
+      .eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', where.date).eq('channel', where.channel)
+      .eq('is_running', true).eq('status', 'draft').eq('is_auto', false)
+    if (e) return null
+    let q = 0
+    for (const d of (data ?? []) as unknown as { doc_line: { item_id: string; qty: number }[] }[]) {
+      for (const l of d.doc_line) if (l.item_id === itemId) q += Number(l.qty)
+    }
+    return round(q, 4)
+  }
+
   const bump = (itemId: string, d: number) => {
-    const t = timers.current.get(itemId)
-    if (t) { window.clearTimeout(t); timers.current.delete(itemId) }
-    const typed = edit.get(itemId)
+    const w = timers.current.get(itemId)
+    if (w) { window.clearTimeout(w.t); timers.current.delete(itemId) }
+    const typed = editRef.current.get(itemId)
     const cur = typed !== undefined ? Math.max(0, toNum(typed)) : confirmed(itemId)
     const next = Math.max(0, round(cur + d, 4))
     setEdit((m) => { const n = new Map(m); n.delete(itemId); return n })
-    send(itemId, next - confirmed(itemId))
+    send(itemId, next - confirmed(itemId), at())
   }
 
-  const commitTyped = (itemId: string, v: string) => {
+  /**
+   * Πληκτρολογημένη ποσότητα = απόλυτη τιμή: διαφορά από ό,τι υπάρχει στη βάση
+   * τώρα (φρέσκια ανάγνωση: μπορεί να πρόσθεσε άλλη συσκευή). Αν στο μεταξύ
+   * άλλαξε κανάλι/ημέρα, η τιμή πάει εκεί που γράφτηκε.
+   */
+  const commitTyped = async (itemId: string, v: string, where: At) => {
     timers.current.delete(itemId)
-    setEdit((m) => { const n = new Map(m); n.delete(itemId); return n })
+    const here = () => genRef.current === where.gen
     const target = Math.max(0, round(toNum(v), 4))
-    send(itemId, target - confirmed(itemId))
+    const fresh = here() && inflightRef.current.has(itemId) ? null : await serverQty(itemId, where)
+    if (here()) {
+      // ξαναγράφτηκε άλλη τιμή ή πατήθηκε +/− στο μεταξύ
+      if (editRef.current.get(itemId) !== v) return
+      if (fresh !== null && !inflightRef.current.has(itemId)) {
+        baseRef.current.set(itemId, fresh)
+        touchedRef.current.set(itemId, ++epochRef.current)
+      }
+      setEdit((m) => { const n = new Map(m); n.delete(itemId); return n })
+      send(itemId, target - confirmed(itemId), where)
+    } else if (fresh !== null) {
+      send(itemId, target - fresh, where)
+    } else {
+      toast.err(`Δεν αποθηκεύτηκε η ποσότητα ${target} (${CHANNEL_LABEL[where.channel]}). Γράψ' την ξανά.`)
+    }
   }
 
   const type = (itemId: string, v: string) => {
     setEdit((m) => new Map(m).set(itemId, v))
-    const t = timers.current.get(itemId)
-    if (t) window.clearTimeout(t)
-    timers.current.set(itemId, window.setTimeout(() => commitTyped(itemId, v), 900))
+    const w = timers.current.get(itemId)
+    if (w) window.clearTimeout(w.t)
+    const where = at()
+    timers.current.set(itemId, { v, at: where, t: window.setTimeout(() => commitTyped(itemId, v, where), 900) })
   }
 
   const flush = (itemId: string) => {
-    const t = timers.current.get(itemId)
-    const v = edit.get(itemId)
-    if (t && v !== undefined) { window.clearTimeout(t); commitTyped(itemId, v) }
+    const w = timers.current.get(itemId)
+    if (w) { window.clearTimeout(w.t); commitTyped(itemId, w.v, w.at) }
   }
 
   const shown = (id: string) => edit.get(id) ?? (confirmed(id) ? String(confirmed(id)) : '')
@@ -183,7 +260,7 @@ export function DailySales() {
   return (
     <div className="pb-24">
       <PageTitle title="Πωλήσεις ημέρας">
-        <Link to="/voice" className="btn-secondary">🎤 Πες το</Link>
+        <Link to="/voice" className="btn-secondary h-11 inline-flex items-center">🎤 Πες το</Link>
       </PageTitle>
       <ErrorBox text={error} />
 
@@ -191,13 +268,13 @@ export function DailySales() {
         <div className="flex gap-2 flex-wrap">
           {TALLY_CHANNELS.map((c) => (
             <button key={c} type="button" onClick={() => setChannel(c)}
-              className={'shrink-0 rounded-full px-4 py-2 text-sm font-medium border ' + (c === channel ? 'bg-red-700 text-white border-red-700' : 'bg-white text-stone-700 border-stone-300')}>
+              className={'shrink-0 rounded-full px-4 h-11 text-sm font-medium border ' + (c === channel ? 'bg-red-700 text-white border-red-700' : 'bg-white text-stone-700 border-stone-300')}>
               {CHANNEL_LABEL[c]}
             </button>
           ))}
         </div>
         <div className="flex flex-wrap gap-3 items-end">
-          <Field label="Ημερομηνία"><input type="date" className="input" value={date} max={today()} onChange={(e) => e.target.value && setDate(e.target.value)} /></Field>
+          <Field label="Ημερομηνία"><input type="date" className="input h-11" value={date} max={today()} onChange={(e) => e.target.value && setDate(e.target.value)} /></Field>
           <div className="text-xs text-stone-500 flex-1 min-w-[12rem]">
             Κάθε αλλαγή αποθηκεύεται αμέσως. Οι πίτσες «κατεβαίνουν» από την αποθήκη μαζί με τα υλικά τους όταν κλείσει η μέρα.
           </div>
@@ -218,7 +295,7 @@ export function DailySales() {
         )}
       </div>
 
-      {loading ? <Spinner /> : products.length === 0 ? (
+      {loading || !ready ? <Spinner /> : products.length === 0 ? (
         <div className="card p-6 text-sm text-stone-600">
           Δεν υπάρχουν προϊόντα λιανικής. Πήγαινε στα «Είδη», φτιάξε τις πίτσες ως «Έτοιμα προϊόντα» και τσέκαρε «Φτιάχνεται κατά παραγγελία».
         </div>
@@ -227,11 +304,14 @@ export function DailySales() {
           {products.map((p) => {
             const q = lineQty(p.id)
             const busy = inflight.has(p.id)
+            const noPrice = !(Number(p.sale_price) > 0)
             return (
               <div key={p.id} className={'card p-2 pl-3 flex items-center gap-2 ' + (q > 0 ? 'border-red-200' : '')}>
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{p.name}</div>
-                  <div className="text-xs text-stone-500">{fmtMoney(Number(p.sale_price) * (1 + Number(p.vat_rate) / 100))} με ΦΠΑ{busy && ' · αποθήκευση…'}</div>
+                  <div className={'text-xs ' + (noPrice ? 'text-red-700' : 'text-stone-500')}>
+                    {noPrice ? 'Χωρίς τιμή: γράφεται 0 € (βάλε τιμή στα Είδη)' : `${fmtMoney(Number(p.sale_price) * (1 + Number(p.vat_rate) / 100))} με ΦΠΑ`}{busy && ' · αποθήκευση…'}
+                  </div>
                 </div>
                 <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Μείον ${p.name}`}
                   onClick={() => bump(p.id, -1)} disabled={q <= 0}>−</button>

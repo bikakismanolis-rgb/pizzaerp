@@ -4,13 +4,17 @@ import { useCompanyId } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import type { Item, ItemType } from '../lib/types'
 import type { Command, EntityRef, InterpretContext, Interpretation, Interpreter, QtyLine, TallyChannel } from '../lib/voice/types'
-import { localInterpreter } from '../lib/voice/interpret'
-import { describe, parseYesNo } from '../lib/voice/describe'
+import { localInterpreter, qtyForItem, warmUp } from '../lib/voice/interpret'
+import { describe } from '../lib/voice/describe'
 import { cancelSpeech, speak, useSpeechRecognition } from '../lib/voice/speech'
 import {
-  addAlias, createItem, createPartner, execute, loadRunning, undoCreate, voiceError,
-  type ExecEnv, type RunningState,
+  addAlias, createItem, createPartner, execute, loadRunning, resolveSalePrices, undoCreate, voiceError,
+  type ExecEnv, type RunningState, type SalePrice,
 } from '../lib/voice/actions'
+import {
+  answerTo, cardProblem, hasLines, plural, refSlots, setRefAt, shiftFlags, stocktakeDate, suggestName, visibleIssues,
+  type RefSlot, type Solved, type TallyRow,
+} from '../lib/voiceRules'
 import { CHANNEL_LABEL, ITEM_TYPE_LABEL, TALLY_CHANNELS, UNITS, VAT_RATES, docCode } from '../lib/labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round, today } from '../lib/format'
 import { MicIcon, useToast } from '../components/ui'
@@ -35,45 +39,8 @@ function lsSet(key: string, v: string) {
 }
 
 const normText = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ς/g, 'σ').replace(/\s+/g, ' ').trim()
-const capFirst = (s: string) => { const t = s.trim(); return t ? t[0].toLocaleUpperCase('el') + t.slice(1) : t }
-
-// ---------------------------------------------------------------------
-// Αναφορές (είδη / συναλλασσόμενοι) μέσα σε μια εντολή
-// ---------------------------------------------------------------------
-type RefKind = 'item' | 'partner'
-interface RefSlot { path: string; kind: RefKind; ref: EntityRef }
-
-type WithLines = Extract<Command, { lines: QtyLine[] }>
-const hasLines = (c: Command): c is WithLines => 'lines' in c
-
-function refSlots(cmd: Command): RefSlot[] {
-  const out: RefSlot[] = []
-  if ('partner' in cmd) out.push({ path: 'partner', kind: 'partner', ref: cmd.partner })
-  if ('item' in cmd) out.push({ path: 'item', kind: 'item', ref: cmd.item })
-  if (hasLines(cmd)) cmd.lines.forEach((l, i) => out.push({ path: `lines.${i}.item`, kind: 'item', ref: l.item }))
-  return out
-}
-
-function setRefAt(cmd: Command, path: string, ref: EntityRef): Command {
-  const [head, idx] = path.split('.')
-  if (head === 'lines' && hasLines(cmd)) {
-    return { ...cmd, lines: cmd.lines.map((l, i) => (i === Number(idx) ? { ...l, item: ref } : l)) } as Command
-  }
-  return { ...cmd, [head]: ref } as Command
-}
-
-/** Μετά από αφαίρεση γραμμής i, οι σημαίες των επόμενων γραμμών μετακινούνται */
-function shiftFlags(flags: Record<string, boolean>, removed: number): Record<string, boolean> {
-  const out: Record<string, boolean> = {}
-  for (const [k, v] of Object.entries(flags)) {
-    const m = /^lines\.(\d+)\.(.+)$/.exec(k)
-    if (!m) { out[k] = v; continue }
-    const i = Number(m[1])
-    if (i === removed) continue
-    out[i > removed ? `lines.${i - 1}.${m[2]}` : k] = v
-  }
-  return out
-}
+const shortDate = (d: string) => fmtDate(d).slice(0, 5)
+const tallyText = (t: TallyRow, withDate: boolean) => `${withDate ? shortDate(t.date) + ' ' : ''}${CHANNEL_LABEL[t.channel]} ${fmtQty(t.qty)}`
 
 /** Ποια είδη επιτρέπονται σε κάθε θέση (ίδια λογική με τον parser) */
 function itemTypesFor(cmd: Command, path: string, itemById: Map<string, Item>): ItemType[] | undefined {
@@ -98,7 +65,6 @@ function partnerRoleFor(cmd: Command): 'customer' | 'supplier' | 'any' {
 }
 
 const isQuery = (c: Command) => c.kind === 'query_stock' || c.kind === 'query_balance' || c.kind === 'query_today'
-const okNum = (n: number | null | undefined): n is number => typeof n === 'number' && Number.isFinite(n)
 
 // ---------------------------------------------------------------------
 // Κατάσταση οθόνης
@@ -114,6 +80,8 @@ interface Pending {
   picked: Record<string, boolean>
   /** "να το θυμάμαι ως ..." */
   remember: Record<string, boolean>
+  /** πεδία που έγραψε ο χρήστης ('lines.0.qty', 'netPrice', ...) */
+  edited: Record<string, boolean>
 }
 
 interface LogEntry {
@@ -130,7 +98,7 @@ type Tone = 'ok' | 'info' | 'warn' | 'err'
 interface Answer { text: string; tone: Tone }
 
 const EXAMPLES: { title: string; items: string[] }[] = [
-  { title: 'Πωλήσεις', items: ['efood τρεις μαργαρίτες και δύο σπέσιαλ', 'τηλέφωνο μία πεπερόνι', 'πούλησα στο ξενοδοχείο Αστέρια εξήντα σπέσιαλ κατεψυγμένες'] },
+  { title: 'Πωλήσεις', items: ['efood τρεις μαργαρίτες και δύο σπέσιαλ', 'τηλέφωνο μία πεπερόνι', 'βγάλε μία μαργαρίτα από το efood', 'πούλησα στο ξενοδοχείο Αστέρια εξήντα σπέσιαλ κατεψυγμένες'] },
   { title: 'Αγορές', items: ['πήρα από τον μύλο δέκα σακιά αλεύρι 0,62 το κιλό', 'τιμολόγιο 1234 από το τυροκομείο μοτσαρέλα 20 κιλά 7 ευρώ το κιλό'] },
   { title: 'Παραγωγή', items: ['έφτιαξα ογδόντα ζυμάρια'] },
   { title: 'Απογραφή', items: ['μέτρησα μοτσαρέλα έξι κιλά και αλεύρι σαράντα επτά κιλά', 'τέλος απογραφής'] },
@@ -146,7 +114,7 @@ const EXAMPLES: { title: string; items: string[] }[] = [
 // ---------------------------------------------------------------------
 export function Voice() {
   const companyId = useCompanyId()
-  const { items, partners, itemById, partnerById, refresh } = useMaster()
+  const { items, partners, itemById, partnerById, refresh, ready, loading: masterLoading } = useMaster()
   const toast = useToast()
   const nav = useNavigate()
   const location = useLocation()
@@ -166,11 +134,18 @@ export function Voice() {
   const [log, setLog] = useState<LogEntry[]>([])
   const [running, setRunning] = useState<RunningState | null>(null)
   const [showHelp, setShowHelp] = useState(false)
+  // τιμές χονδρικής (πελάτη ή γενική) για γραμμές χωρίς ειπωμένη τιμή: "πελάτης|είδος"
+  const [salePrices, setSalePrices] = useState<Map<string, SalePrice>>(new Map())
   const pendingRef = useRef<Pending | null>(null)
   const seqRef = useRef(0)
   const pendSeq = useRef(0)
   // εκτελείται τώρα (φρουρός και για διπλό "ναι" φωνή + πάτημα)
   const execRef = useRef(false)
+  // αναίρεση σε εξέλιξη (φρουρός για διπλό πάτημα)
+  const undoingRef = useRef(false)
+  const mountedRef = useRef(true)
+  // φράση που ήρθε πριν φορτώσει ο κατάλογος
+  const queuedRef = useRef<string | null>(null)
   const logSeq = useRef(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const helpRef = useRef<HTMLDivElement>(null)
@@ -178,7 +153,7 @@ export function Voice() {
   const newPending = (interp: Interpretation): Pending => ({
     id: ++pendSeq.current,
     lineKeys: hasLines(interp.command) ? interp.command.lines.map((_, i) => i) : [],
-    interp, cmd: interp.command, picked: {}, remember: {},
+    interp, cmd: interp.command, picked: {}, remember: {}, edited: {},
   })
 
   const setPending = (p: Pending | null | ((cur: Pending | null) => Pending | null)) => {
@@ -190,7 +165,19 @@ export function Voice() {
   const ctx: InterpretContext = useMemo(() => ({ items, partners, defaultChannel: channel }), [items, partners, channel])
   const env = (): ExecEnv => ({ companyId, today: today(), items, partners, refreshMaster: refresh })
 
-  const say = (text: string) => (readAloud ? speak(text) : Promise.resolve())
+  // ευρετήριο του καταλόγου από πριν: η πρώτη φράση να μην περιμένει
+  useEffect(() => {
+    if (!ready) return
+    const t = window.setTimeout(() => warmUp({ items, partners, defaultChannel: 'efood' }), 50)
+    return () => window.clearTimeout(t)
+  }, [ready, items, partners])
+
+  /** Ανάγνωση φωναχτά· true αν διαβάστηκε ως το τέλος. Ποτέ μέσα σε ανοιχτό μικρόφωνο. */
+  const say = (text: string): Promise<boolean> => {
+    if (!readAloud) return Promise.resolve(true)
+    sr.abort()
+    return speak(text)
+  }
 
   const setChannel = (c: TallyChannel) => {
     setChannelState(c)
@@ -199,8 +186,15 @@ export function Voice() {
     setPending((p) => (p && p.cmd.kind === 'sale_tally' && !p.cmd.channelHeard ? { ...p, cmd: { ...p.cmd, channel: c } } : p))
   }
 
+  // φεύγοντας από τη σελίδα: ούτε ανάγνωση ούτε μικρόφωνο που μένει ανοιχτό
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false; cancelSpeech(); sr.abort() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // -------------------------------------------------------------------
-  // Ανοιχτά πρόχειρα σήμερα (μετρητής, απογραφή)
+  // Ανοιχτά πρόχειρα (μετρητής, απογραφή)
   // -------------------------------------------------------------------
   const refreshRunning = useCallback(async () => {
     if (!companyId) return
@@ -215,6 +209,29 @@ export function Voice() {
     return () => { window.removeEventListener('focus', h); document.removeEventListener('visibilitychange', h) }
   }, [refreshRunning])
 
+  // τιμές χονδρικής: ξανά για κάθε νέα κάρτα και με κάθε ανανέωση του καταλόγου
+  // (τιμή πελάτη μπορεί να άλλαξε από άλλη συσκευή)
+  const pendingId = pending?.id
+  useEffect(() => { setSalePrices(new Map()) }, [items, pendingId])
+  const salePartner = pending?.cmd.kind === 'sale' ? pending.cmd.partner.id : null
+  const saleItems = pending?.cmd.kind === 'sale' ? pending.cmd.lines.filter((l) => l.unitPrice == null && l.item.id).map((l) => l.item.id!).join(',') : ''
+  useEffect(() => {
+    if (!salePartner || !saleItems) return
+    const missing = saleItems.split(',').filter((id) => !salePrices.has(`${salePartner}|${id}`))
+    if (missing.length === 0) return
+    let alive = true
+    resolveSalePrices({ items }, salePartner, missing).then((m) => {
+      if (!alive) return
+      setSalePrices((cur) => {
+        const n = new Map(cur)
+        for (const [id, v] of m) n.set(`${salePartner}|${id}`, v)
+        return n
+      })
+    }).catch(() => { /* η εκτέλεση ξαναελέγχει την τιμή */ })
+    return () => { alive = false }
+  }, [salePartner, saleItems, salePrices, items])
+  const salePriceOf = (itemId: string): SalePrice | undefined => (salePartner ? salePrices.get(`${salePartner}|${itemId}`) : undefined)
+
   // -------------------------------------------------------------------
   // Ροή: κείμενο → κατανόηση → κάρτα επιβεβαίωσης → ναι → εκτέλεση
   // -------------------------------------------------------------------
@@ -227,31 +244,83 @@ export function Voice() {
     sr.start({ quiet, onFinal: (t) => heardRef.current(t) })
   }
 
+  const interpretText = async (text: string): Promise<Interpretation> => {
+    try {
+      return await interpreter.interpret(text, ctx)
+    } catch {
+      try { return await localInterpreter.interpret(text, ctx) } catch { return { text, command: { kind: 'unknown' }, confidence: 0, issues: [] } }
+    }
+  }
+
   const handleText = async (raw: string) => {
     const text = raw.trim()
-    if (!text || busy) return
+    if (!text || busy || execRef.current) return
     setInput('')
-    if (pendingRef.current) {
-      const yn = parseYesNo(text)
-      if (yn === 'yes') { await confirm(); return }
-      if (yn === 'no') { cancel(); return }
+    // ο κατάλογος δεν έχει φορτώσει ακόμα: αλλιώς όλα «δεν βρέθηκε» (και διπλά νέα είδη)
+    if (!ready) {
+      queuedRef.current = text
+      setAnswer({ text: `Φορτώνω τα είδη… μόλις φορτώσουν συνεχίζω με «${text}».`, tone: 'info' })
+      return
     }
-    await understand(text)
+    const p = pendingRef.current
+    if (!p) { await understand(text); return }
+
+    // περιμένει κάρτα: «ναι»/«όχι» μόνο ως σκέτη απάντηση, όχι μέσα σε νέα εντολή
+    const seq = ++seqRef.current
+    setThinking(true)
+    const interp = await interpretText(text)
+    if (seq !== seqRef.current) return
+    setThinking(false)
+    if (pendingRef.current !== p) { await understand(text, interp); return }
+    switch (answerTo(text, interp.command.kind)) {
+      case 'yes': await confirm(); return
+      case 'no': cancel(); return
+      case 'fix': await understand(text, interp, p); return
+      case 'unclear': {
+        const m = `Δεν κατάλαβα αν είναι «ναι» («${text}»). Πες «ναι» για να περάσει ή «όχι» για ακύρωση.`
+        setAnswer({ text: m, tone: 'warn' })
+        say('Πες ναι ή όχι.')
+        return
+      }
+      default:
+        if (interp.command.kind === 'unknown') {
+          setAnswer({ text: `Δεν κατάλαβα «${text}». Η κάρτα περιμένει: «ναι» ή «όχι».`, tone: 'warn' })
+          say('Δεν κατάλαβα. Πες ναι ή όχι.')
+          return
+        }
+        await understand(text, interp)
+    }
   }
   heardRef.current = (t) => { handleText(t) }
 
-  const understand = async (text: string) => {
+  // ό,τι ειπώθηκε πριν φορτώσει ο κατάλογος
+  useEffect(() => {
+    if (!ready || !queuedRef.current) return
+    const t = queuedRef.current
+    queuedRef.current = null
+    setAnswer(null)
+    handleText(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready])
+
+  /**
+   * prev: η κάρτα που διορθώνεται («όχι, τέσσερις μαργαρίτες»)· κρατάμε το
+   * κανάλι της αν η διόρθωση δεν λέει άλλο.
+   */
+  const understand = async (text: string, pre?: Interpretation, prev?: Pending) => {
     const seq = ++seqRef.current
-    setThinking(true)
-    let interp: Interpretation
-    try {
-      interp = await interpreter.interpret(text, ctx)
-    } catch {
-      try { interp = await localInterpreter.interpret(text, ctx) } catch { interp = { text, command: { kind: 'unknown' }, confidence: 0, issues: [] } }
+    let interp = pre
+    if (!interp) {
+      setThinking(true)
+      interp = await interpretText(text)
+      if (seq !== seqRef.current) return
+      setThinking(false)
     }
-    if (seq !== seqRef.current) return
-    setThinking(false)
-    const cmd = interp.command
+    let cmd = interp.command
+    if (prev && prev.cmd.kind === 'sale_tally' && cmd.kind === 'sale_tally' && !cmd.channelHeard) {
+      cmd = { ...cmd, channel: prev.cmd.channel, channelHeard: prev.cmd.channelHeard }
+      interp = { ...interp, command: cmd }
+    }
 
     if (cmd.kind === 'help') {
       setPending(null)
@@ -266,7 +335,8 @@ export function Voice() {
       setPending(null)
       const msg = describe(interp, ctx)
       setAnswer({ text: [msg, ...interp.issues].join(' '), tone: 'warn' })
-      say(msg)
+      // η εξήγηση του parser (φύρα, παραγγελία, «κλείσε τι;») λέει περισσότερα από το γενικό
+      say(interp.issues[0] ?? msg)
       return
     }
     // ερώτηση με σίγουρες αναφορές: απάντηση αμέσως (δεν γράφει τίποτα)
@@ -278,11 +348,16 @@ export function Voice() {
 
     const p = newPending(interp)
     setPending(p)
-    setAnswer(null)
-    await say(describe(interp, ctx))
-    // επιβεβαίωση με φωνή: μία φορά ακούμε για ναι/όχι
-    if (voiceConfirm && sr.supported && pendingRef.current === p && !isQuery(cmd) && !execRef.current) {
-      window.setTimeout(() => { if (pendingRef.current === p && !execRef.current) listen(true) }, 250)
+    setAnswer(prev ? { text: 'Η προηγούμενη ακυρώθηκε. Νέα κάρτα:', tone: 'info' } : null)
+    // ό,τι εμποδίζει το «ναι» διαβάζεται κι αυτό· τότε δεν ακούμε για «ναι»
+    const why = problem(p)
+    const finished = await say(describe(interp, ctx) + notice(cmd) + (why ? ' ' + why : ''))
+    // επιβεβαίωση με φωνή: μία φορά ακούμε για ναι/όχι, μόνο αν η ανάγνωση τελείωσε
+    // κανονικά (όχι αν κόπηκε από μικρόφωνο / νέα φράση / έξοδο από τη σελίδα)
+    if (voiceConfirm && sr.supported && finished && !why && !isQuery(cmd)) {
+      window.setTimeout(() => {
+        if (mountedRef.current && pendingRef.current === p && !execRef.current && !sr.active()) listen(true)
+      }, 250)
     }
   }
 
@@ -307,7 +382,10 @@ export function Voice() {
   const lastUndoable = log.find((e) => e.undo && e.state === 'done') ?? null
 
   const undoEntry = async (entry: LogEntry) => {
-    if (!entry.undo || entry.state !== 'done') return
+    // μία αναίρεση τη φορά: διπλό πάτημα δεν αναιρεί και την προηγούμενη ενέργεια
+    if (!entry.undo || entry.state !== 'done' || undoingRef.current) return
+    undoingRef.current = true
+    setBusy(true)
     setLog((l) => l.map((e) => (e.id === entry.id ? { ...e, state: 'undoing', error: undefined } : e)))
     try {
       await entry.undo()
@@ -320,38 +398,45 @@ export function Voice() {
       setLog((l) => l.map((x) => (x.id === entry.id ? { ...x, state: 'done', error: m } : x)))
       setAnswer({ text: m, tone: 'err' })
       toast.err(m)
+    } finally {
+      undoingRef.current = false
+      setBusy(false)
     }
   }
 
+  /** Συνέπεια που πρέπει να ακουστεί πριν από το «ναι» */
+  const notice = (cmd: Command): string => (
+    cmd.kind === 'close_stocktake' && running?.stocktake?.date === today()
+      ? ' Μετά δεν θα μπαίνουν άλλες σημερινές πωλήσεις για τα είδη που μετρήθηκαν.'
+      : ''
+  )
+
   /** Σφάλμα που εμποδίζει την εκτέλεση (null = όλα καλά) */
-  const problem = (p: Pending): string | null => {
-    const c = p.cmd
-    for (const s of refSlots(c)) {
-      if (!s.ref.id) return `Διάλεξε ${s.kind === 'partner' ? 'συναλλασσόμενο' : 'είδος'} για «${s.ref.heard}».`
+  const problem = (p: Pending): string | null => cardProblem(p.cmd, {
+    itemById,
+    edited: p.edited,
+    running,
+    hasUndo: !!lastUndoable,
+    saleFallback: (id) => salePriceOf(id)?.price,
+  })
+
+  /** Ό,τι έλυσε ο χρήστης στην κάρτα (για να κρυφτούν οι αντίστοιχες προειδοποιήσεις) */
+  const solvedOf = (p: Pending): Solved => {
+    const entity = refSlots(p.cmd).filter((s) => s.ref.id && p.picked[s.path]).map((s) => s.ref.heard)
+    const qty: string[] = []
+    const price: string[] = []
+    if (hasLines(p.cmd)) {
+      p.cmd.lines.forEach((l, i) => {
+        const labels = [l.item.heard, l.item.id ? itemById.get(l.item.id)?.name ?? '' : ''].filter(Boolean)
+        if (p.edited[`lines.${i}.qty`]) qty.push(...labels)
+        if (p.edited[`lines.${i}.unitPrice`]) price.push(...labels)
+      })
     }
-    const nameOf = (r: EntityRef) => (r.id ? itemById.get(r.id)?.name : null) ?? r.heard
-    switch (c.kind) {
-      case 'sale_tally': case 'sale': case 'purchase': case 'stocktake': case 'recipe': {
-        if (c.lines.length === 0) return 'Δεν έμεινε καμία γραμμή.'
-        for (const l of c.lines) {
-          if (!okNum(l.qty) || (c.kind === 'stocktake' ? l.qty < 0 : l.qty <= 0)) return `Βάλε ποσότητα για «${nameOf(l.item)}».`
-          if ((c.kind === 'sale' || c.kind === 'purchase') && 'unitPrice' in l && l.unitPrice != null && !(l.unitPrice >= 0)) return `Λάθος τιμή για «${nameOf(l.item)}».`
-        }
-        if (c.kind === 'recipe' && !(okNum(c.outputQty) && c.outputQty > 0)) return 'Βάλε για πόσα τεμάχια είναι η συνταγή.'
-        return null
-      }
-      case 'production': return okNum(c.qty) && c.qty > 0 ? null : 'Βάλε ποσότητα παραγωγής.'
-      case 'receipt': case 'payment': return okNum(c.amount) && c.amount > 0 ? null : 'Βάλε ποσό.'
-      case 'item_price': case 'partner_price': return okNum(c.netPrice) && c.netPrice >= 0 ? null : 'Βάλε τιμή.'
-      case 'new_item': return c.name.trim() ? null : 'Βάλε όνομα.'
-      case 'new_partner':
-        if (!c.name.trim()) return 'Βάλε όνομα.'
-        return c.isCustomer || c.isSupplier ? null : 'Διάλεξε πελάτης ή προμηθευτής.'
-      case 'close_day': return running && running.tally.length > 0 ? null : 'Δεν υπάρχουν ανοιχτές πωλήσεις σήμερα.'
-      case 'close_stocktake': return running?.stocktake ? null : 'Δεν υπάρχει απογραφή σε εξέλιξη.'
-      case 'undo': return lastUndoable ? null : 'Δεν υπάρχει κάτι για αναίρεση.'
-      default: return null
-    }
+    const fields: Solved['fields'] = []
+    if (p.edited.qty) fields.push('qty')
+    if (p.edited.netPrice) fields.push('price')
+    if (p.edited.amount) fields.push('amount')
+    return { entity, qty, price, fields }
   }
 
   const rememberable = (p: Pending, s: RefSlot): boolean => {
@@ -364,7 +449,7 @@ export function Voice() {
 
   const confirm = async () => {
     const p = pendingRef.current
-    if (!p || busy || execRef.current) return
+    if (!p || busy || execRef.current || undoingRef.current) return
     const why = problem(p)
     if (why) { setAnswer({ text: why, tone: 'warn' }); say(why); return }
     cancelSpeech()
@@ -419,7 +504,7 @@ export function Voice() {
     const interp: Interpretation = { text, command: { kind }, confidence: 1, issues: [] }
     setPending(newPending(interp))
     setAnswer(null)
-    say(describe(interp, ctx))
+    say(describe(interp, ctx) + notice(interp.command))
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -437,14 +522,27 @@ export function Voice() {
   // -------------------------------------------------------------------
   // Επεξεργασία της εκκρεμούς εντολής
   // -------------------------------------------------------------------
-  const updCmd = (f: (c: Command) => Command) => setPending((p) => (p ? { ...p, cmd: f(p.cmd) } : p))
+  /** edited: το πεδίο που άλλαξε ο χρήστης (π.χ. 'netPrice') */
+  const updCmd = (f: (c: Command) => Command, edited?: string) => setPending((p) => (
+    p ? { ...p, cmd: f(p.cmd), edited: edited ? { ...p.edited, [edited]: true } : p.edited } : p
+  ))
 
   const pickRef = (path: string, ref: EntityRef, byUser: boolean) => setPending((p) => {
     if (!p) return p
     const picked = { ...p.picked, [path]: byUser }
     const remember = { ...p.remember }
     if (byUser && remember[path] === undefined) remember[path] = true
-    return { ...p, cmd: setRefAt(p.cmd, path, ref), picked, remember }
+    let cmd = setRefAt(p.cmd, path, ref)
+    // ποσότητα ξανά στη μονάδα του είδους που διαλέχτηκε ("500 γραμμάρια" → 0,5 kg)
+    const li = /^lines\.(\d+)\.item$/.exec(path)
+    if (li && hasLines(cmd) && cmd.kind !== 'sale_tally' && !p.edited[`lines.${li[1]}.qty`]) {
+      const i = Number(li[1])
+      const q = qtyForItem(cmd.lines[i]?.heardQty, ref.id ? itemById.get(ref.id) : null)
+      if (q !== null && Number.isFinite(q) && q >= 0) {
+        cmd = { ...cmd, lines: cmd.lines.map((l, j) => (j === i ? { ...l, qty: q } : l)) } as Command
+      }
+    }
+    return { ...p, cmd, picked, remember }
   })
 
   const removeLine = (i: number) => setPending((p) => {
@@ -455,12 +553,17 @@ export function Voice() {
       lineKeys: p.lineKeys.filter((_, j) => j !== i),
       picked: shiftFlags(p.picked, i),
       remember: shiftFlags(p.remember, i),
+      edited: shiftFlags(p.edited, i),
     }
   })
 
-  const setLine = (i: number, patch: Partial<QtyLine> & { unitPrice?: number | null }) => updCmd((c) => {
-    if (!hasLines(c)) return c
-    return { ...c, lines: c.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) } as Command
+  const setLine = (i: number, patch: Partial<QtyLine> & { unitPrice?: number | null }) => setPending((p) => {
+    if (!p || !hasLines(p.cmd)) return p
+    const edited = { ...p.edited }
+    for (const k of Object.keys(patch)) edited[`lines.${i}.${k}`] = true
+    // γραμμένη ποσότητα = ειπωμένη (π.χ. μέτρηση 0: όχι «δεν ακούστηκε ποσότητα»)
+    if (patch.qty !== undefined) patch = { ...patch, heardQty: numText(patch.qty) }
+    return { ...p, edited, cmd: { ...p.cmd, lines: p.cmd.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) } as Command }
   })
 
   const onCreated = (label: string, table: 'item' | 'partner', id: string) => {
@@ -470,10 +573,10 @@ export function Voice() {
   // -------------------------------------------------------------------
   // Απόδοση
   // -------------------------------------------------------------------
-  const sentence = pending ? describe({ ...pending.interp, command: pending.cmd }, ctx) : ''
   const why = pending ? problem(pending) : null
-  const resolvedHeard = pending ? refSlots(pending.cmd).filter((s) => s.ref.id && pending.picked[s.path]).map((s) => s.ref.heard) : []
-  const issues = pending ? pending.interp.issues.filter((i) => !resolvedHeard.some((h) => h && i.includes(`«${h}»`))) : []
+  const issues = pending ? visibleIssues(pending.interp.issues, solvedOf(pending)) : []
+  // με τις προειδοποιήσεις που ισχύουν ακόμα: τιμή που γράφτηκε δεν είναι πια «δεν ακούστηκε»
+  const sentence = pending ? describe({ ...pending.interp, command: pending.cmd, issues }, ctx) : ''
   const confirmLabel = !pending ? '' : isQuery(pending.cmd) ? 'Δείξε' : pending.cmd.kind === 'undo' ? 'Ναι, αναίρεσέ το' : 'Ναι, πέρασέ το'
   const live = sr.listening ? (sr.interim || 'Ακούω…') : thinking ? 'Σκέφτομαι…' : ''
 
@@ -481,10 +584,17 @@ export function Voice() {
     <div className={'max-w-2xl mx-auto ' + (pending ? 'pb-44' : 'pb-28')}>
       <div className="flex items-center justify-between gap-2 mb-3">
         <h1 className="text-xl font-semibold">Πες το</h1>
-        <button type="button" className="btn-ghost text-sm" onClick={() => { setShowHelp((v) => !v); window.setTimeout(() => helpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50) }}>
+        <button type="button" className="btn-ghost text-sm h-11" onClick={() => { setShowHelp((v) => !v); window.setTimeout(() => helpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50) }}>
           Τι μπορώ να πω;
         </button>
       </div>
+
+      {!ready && !masterLoading && (
+        <div className="mb-3 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 flex items-center gap-2">
+          <span className="flex-1">Δεν φόρτωσαν τα είδη και οι πελάτες (σύνδεση;).</span>
+          <button type="button" className="btn-secondary h-10 text-xs" onClick={() => refresh()}>Ξανά</button>
+        </div>
+      )}
 
       <RunningStrips running={running} onCloseDay={() => askClose('close_day')} onCloseStocktake={() => askClose('close_stocktake')} disabled={busy} />
 
@@ -492,7 +602,7 @@ export function Voice() {
         <div className="card p-3 sm:p-4 mb-3 border-red-200 shadow">
           <div className="text-xs text-stone-500 break-words">Άκουσα: «{pending.interp.text}»</div>
           <div className="text-lg leading-snug font-medium mt-1">{sentence}</div>
-          {pending.interp.confidence < 0.5 && !why && Object.keys(pending.picked).length === 0 && (
+          {pending.interp.confidence < 0.5 && !why && Object.keys(pending.picked).length === 0 && Object.keys(pending.edited).length === 0 && (
             <div className="text-xs text-amber-700 mt-1">Δεν είμαι σίγουρος: έλεγξε τα στοιχεία πριν πεις ναι.</div>
           )}
           {issues.length > 0 && (
@@ -506,6 +616,7 @@ export function Voice() {
               running={running}
               lastUndo={lastUndoable}
               itemById={itemById}
+              salePriceOf={salePriceOf}
               setChannel={(c) => updCmd((cmd) => (cmd.kind === 'sale_tally' ? { ...cmd, channel: c, channelHeard: true } : cmd))}
               updCmd={updCmd}
               setLine={setLine}
@@ -522,6 +633,7 @@ export function Voice() {
                     types={itemTypesFor(pending.cmd, path, itemById)}
                     role={partnerRoleFor(pending.cmd)}
                     newItemDefaults={newItemDefaults(pending.cmd, path)}
+                    needPrice={pending.cmd.kind === 'sale_tally'}
                     env={env}
                     onPick={(ref) => pickRef(path, ref, true)}
                     picked={!!pending.picked[path]}
@@ -549,6 +661,7 @@ export function Voice() {
           </button>
           <div className="mt-3 min-h-[2.75rem] px-2 text-center text-base text-stone-700 break-words max-w-full">
             {live ? <span className={sr.listening ? 'text-red-700' : ''}>{live}</span>
+              : !ready ? <span className="text-stone-500">Φορτώνω τα είδη…</span>
               : sr.supported ? <span className="text-stone-500">Πάτα και πες π.χ. «efood δύο μαργαρίτες»</span>
               : <span className="text-stone-600 text-sm">Ο browser δεν έχει αναγνώριση φωνής. Πάτα το μικρόφωνο του πληκτρολογίου και μίλα στο κουτί κάτω.</span>}
           </div>
@@ -596,7 +709,7 @@ export function Voice() {
         <div className="card mb-3">
           <div className="flex items-center justify-between px-3 py-2 border-b border-stone-200">
             <h2 className="font-semibold text-sm">Τι πέρασε</h2>
-            <button type="button" className="btn-secondary h-9 text-xs" disabled={!lastUndoable || busy} onClick={() => lastUndoable && undoEntry(lastUndoable)}>
+            <button type="button" className="btn-secondary h-10 text-xs" disabled={!lastUndoable || busy} onClick={() => lastUndoable && undoEntry(lastUndoable)}>
               ↶ Αναίρεση τελευταίου
             </button>
           </div>
@@ -613,7 +726,7 @@ export function Voice() {
                   {e.error && <div className="text-xs text-red-700 mt-0.5">{e.error}</div>}
                 </div>
                 {e.undo && e.state !== 'undone' && (
-                  <button type="button" className="btn-ghost h-9 text-xs shrink-0" disabled={e.state === 'undoing' || busy} onClick={() => undoEntry(e)}>
+                  <button type="button" className="btn-ghost h-10 text-xs shrink-0" disabled={e.state === 'undoing' || busy} onClick={() => undoEntry(e)}>
                     {e.state === 'undoing' ? '…' : 'Αναίρεση'}
                   </button>
                 )}
@@ -702,24 +815,34 @@ function RunningStrips({ running, onCloseDay, onCloseStocktake, disabled }: {
   const st = running.stocktake
   return (
     <div className="flex flex-col gap-2 mb-3">
-      <div className="card px-3 py-2 flex items-center gap-2">
-        <Link to="/daily-sales" className="flex-1 min-w-0 text-sm">
-          <span className="text-stone-500">Σήμερα: </span>
-          {running.tally.length === 0 ? <span className="text-stone-500">καμία πώληση ακόμα</span>
-            : running.tally.map((t, i) => (
-              <span key={t.channel}>{i > 0 && <span className="text-stone-400"> · </span>}<b className="font-semibold">{CHANNEL_LABEL[t.channel]}</b> {fmtQty(t.qty)}</span>
-            ))}
+      {running.older.length > 0 && (
+        <div className="card px-3 py-1 flex items-center gap-2 border-amber-200 bg-amber-50">
+          <Link to="/docs/sale" className="flex-1 min-w-0 min-h-[44px] flex items-center text-sm text-amber-900">
+            <span>Ανοιχτές από προηγούμενες μέρες: {running.older.map((t) => tallyText(t, true)).join(' · ')}</span>
+          </Link>
+          <button type="button" className="btn-secondary h-11 text-xs shrink-0" onClick={onCloseDay} disabled={disabled}>Κλείσιμο</button>
+        </div>
+      )}
+      <div className="card px-3 py-1 flex items-center gap-2">
+        <Link to="/daily-sales" className="flex-1 min-w-0 min-h-[44px] flex items-center text-sm">
+          <span>
+            <span className="text-stone-500">Σήμερα: </span>
+            {running.tally.length === 0 ? <span className="text-stone-500">καμία πώληση ακόμα</span>
+              : running.tally.map((t, i) => (
+                <span key={t.channel}>{i > 0 && <span className="text-stone-400"> · </span>}<b className="font-semibold">{CHANNEL_LABEL[t.channel]}</b> {fmtQty(t.qty)}</span>
+              ))}
+          </span>
         </Link>
         {running.tally.length > 0 && (
-          <button type="button" className="btn-secondary h-10 text-xs shrink-0" onClick={onCloseDay} disabled={disabled}>Κλείσιμο ημέρας</button>
+          <button type="button" className="btn-secondary h-11 text-xs shrink-0" onClick={onCloseDay} disabled={disabled}>Κλείσιμο ημέρας</button>
         )}
       </div>
       {st && (
-        <div className="card px-3 py-2 flex items-center gap-2 border-amber-200 bg-amber-50">
-          <Link to={`/docs/stocktake/${st.id}`} className="flex-1 min-w-0 text-sm text-amber-900">
-            Απογραφή σε εξέλιξη: <b>{st.count}</b> είδη{st.date !== today() && <> (από {fmtDate(st.date)})</>} →
+        <div className="card px-3 py-1 flex items-center gap-2 border-amber-200 bg-amber-50">
+          <Link to={`/docs/stocktake/${st.id}`} className="flex-1 min-w-0 min-h-[44px] flex items-center text-sm text-amber-900">
+            <span>Απογραφή σε εξέλιξη: <b>{st.count}</b> {plural(st.count, 'είδος', 'είδη')}{st.date !== today() && <> (από {fmtDate(st.date)})</>} →</span>
           </Link>
-          <button type="button" className="btn-secondary h-10 text-xs shrink-0" onClick={onCloseStocktake} disabled={disabled}>Τέλος απογραφής</button>
+          <button type="button" className="btn-secondary h-11 text-xs shrink-0" onClick={onCloseStocktake} disabled={disabled}>Τέλος απογραφής</button>
         </div>
       )}
     </div>
@@ -732,7 +855,7 @@ function RunningStrips({ running, onCloseDay, onCloseStocktake, disabled }: {
 function Chip({ active, onClick, children, title }: { active?: boolean; onClick: () => void; children: ReactNode; title?: string }) {
   return (
     <button type="button" title={title} onClick={onClick}
-      className={'shrink-0 rounded-full px-3.5 py-2 text-sm font-medium border transition ' +
+      className={'shrink-0 rounded-full px-3.5 h-11 inline-flex items-center text-sm font-medium border transition ' +
         (active ? 'bg-red-700 text-white border-red-700' : 'bg-white text-stone-700 border-stone-300 active:bg-stone-100')}>
       {children}
     </button>
@@ -780,15 +903,23 @@ function NumField({ value, onChange, placeholder, suffix, label, className = '' 
   )
 }
 
-/** − [ποσότητα] + για τεμάχια, απλό πεδίο για τα υπόλοιπα */
-function QtyInput({ value, onChange, unit, label }: { value: number; onChange: (v: number) => void; unit: string; label: string }) {
+/**
+ * − [ποσότητα] + για τεμάχια, απλό πεδίο για τα υπόλοιπα.
+ * allowNegative: αφαίρεση από τον μετρητή ημέρας («βγάλε μία μαργαρίτα»).
+ */
+function QtyInput({ value, onChange, unit, label, allowNegative = false, blank = false }: {
+  value: number; onChange: (v: number) => void; unit: string; label: string; allowNegative?: boolean
+  /** δεν ακούστηκε ποσότητα: κενό πεδίο (όχι «0») μέχρι να γράψει ο χρήστης */
+  blank?: boolean
+}) {
   if (unit !== 'τεμ') {
-    return <NumField value={value} onChange={(v) => onChange(v ?? 0)} suffix={unit} label={label} className="w-32" />
+    return <NumField value={blank ? null : value} onChange={(v) => onChange(v ?? 0)} suffix={unit} label={label} className="w-32" placeholder="πόσο;" />
   }
+  const dec = round((value || 0) - 1, 4)
   return (
     <div className="flex items-center gap-1">
-      <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Μείον ${label}`} onClick={() => onChange(Math.max(0, round((value || 0) - 1, 4)))}>−</button>
-      <NumField value={value} onChange={(v) => onChange(v ?? 0)} label={label} className="w-16" />
+      <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Μείον ${label}`} onClick={() => onChange(allowNegative ? dec : Math.max(0, dec))}>−</button>
+      <NumField value={blank ? null : value} onChange={(v) => onChange(v ?? 0)} label={label} className="w-16" placeholder=";" />
       <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Συν ${label}`} onClick={() => onChange(round((value || 0) + 1, 4))}>+</button>
     </div>
   )
@@ -813,8 +944,10 @@ function newItemDefaults(cmd: Command, path: string): { itemType: ItemType; unit
 // ---------------------------------------------------------------------
 // Επιλογή είδους / συναλλασσόμενου για μια φράση που ακούστηκε
 // ---------------------------------------------------------------------
-function RefField({ label, slot, types, role, newItemDefaults: nd, env, onPick, picked, remember, onRemember, onCreated }: {
+function RefField({ label, slot, types, role, newItemDefaults: nd, needPrice, env, onPick, picked, remember, onRemember, onCreated }: {
   label: string
+  /** νέο έτοιμο προϊόν χωρίς τιμή δεν επιτρέπεται (π.χ. στον μετρητή: θα γραφόταν 0 €) */
+  needPrice: boolean
   /** το διάλεξε ο χρήστης (δείχνουμε τι ακούστηκε) */
   picked: boolean
   slot: RefSlot
@@ -834,10 +967,17 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, env, onPick, 
   const [mode, setMode] = useState<'idle' | 'other' | 'new' | 'chips'>('idle')
   const [busy, setBusy] = useState(false)
   // φόρμα νέου
-  const [name, setName] = useState(capFirst(ref.heard))
+  const [name, setName] = useState(suggestName(ref.heard, kind))
   const [itemType, setItemType] = useState<ItemType>(nd.itemType)
   const [unit, setUnit] = useState(nd.unit)
   const [mto, setMto] = useState(nd.makeToOrder)
+  const [vat, setVat] = useState(13)
+  // τιμή όπως τη γράφει ο χρήστης: με ΦΠΑ για λιανική (κατά παραγγελία), χωρίς για τα άλλα
+  const [price, setPrice] = useState<number | null>(null)
+  const isFinished = kind === 'item' && itemType === 'finished'
+  const priceGross = isFinished && mto
+  const netPrice = price == null || !(price >= 0) ? null : priceGross ? round(price / (1 + vat / 100), 4) : price
+  const priceMissing = isFinished && needPrice && !(netPrice != null && netPrice > 0)
   const [isCustomer, setIsCustomer] = useState(role !== 'supplier')
   const [isSupplier, setIsSupplier] = useState(role === 'supplier')
 
@@ -852,10 +992,14 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, env, onPick, 
     setBusy(true)
     try {
       if (kind === 'item') {
-        const it = await createItem(env(), { itemType, name, unit, vatRate: 13, salePrice: null, makeToOrder: itemType !== 'raw' && mto, packName: null, packQty: null })
+        const it = await createItem(env(), {
+          itemType, name, unit, vatRate: vat, salePrice: isFinished ? netPrice : null,
+          makeToOrder: itemType !== 'raw' && mto, packName: null, packQty: null,
+        })
         onCreated(`Νέο είδος «${it.name}» (${it.code})`, 'item', it.id)
         pick(it.id)
         if (it.item_type !== 'raw' && it.make_to_order) toast.info(`Το «${it.name}» θέλει συνταγή πριν καταχωρηθεί πώληση.`)
+        else if (it.item_type === 'finished' && !(Number(it.sale_price) > 0)) toast.info(`Το «${it.name}» δεν έχει τιμή πώλησης: βάλε τιμή στα Είδη.`)
       } else {
         const p = await createPartner(env(), { name, isCustomer, isSupplier, phone: null, vatNo: null, city: null })
         onCreated(`Νέος συναλλασσόμενος «${p.name}» (${p.code})`, 'partner', p.id)
@@ -875,7 +1019,7 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, env, onPick, 
             <span className="font-semibold">{entity.name}</span>
             {picked && normText(entity.name) !== normText(ref.heard) && ref.heard && <span className="text-xs text-stone-500">(για «{ref.heard}»)</span>}
             {!showChips && mode === 'idle' && (
-              <button type="button" className="text-xs text-red-700 underline underline-offset-2 px-1 py-1" onClick={() => setMode('chips')}>αλλαγή</button>
+              <button type="button" className="text-sm text-red-700 underline underline-offset-2 px-3 min-h-[44px] -my-2" onClick={() => setMode('chips')}>αλλαγή</button>
             )}
           </>
         ) : (
@@ -901,34 +1045,49 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, env, onPick, 
 
       {mode === 'new' && (
         <div className="rounded-md border border-stone-200 bg-stone-50 p-2 flex flex-col gap-2">
-          <input className="input h-11 text-base" value={name} onChange={(e) => setName(e.target.value)} placeholder="Όνομα" />
+          <input className="input h-11 text-base" value={name} onChange={(e) => setName(e.target.value)} placeholder="Όνομα" aria-label="Όνομα"
+            autoFocus onFocus={(e) => e.target.select()} />
+          <div className="text-xs text-stone-500 -mt-1">
+            Γράψε το όνομα όπως θες να φαίνεται {kind === 'item' ? '(π.χ. «Μαργαρίτα», όχι «μαργαρίτες»)' : '(π.χ. «Γιώργος Παπαδάκης»)'}.
+          </div>
           {kind === 'item' ? (
             <div className="flex gap-2 flex-wrap items-center">
-              <select className="input h-11 w-auto" value={itemType} onChange={(e) => {
+              <select className="input h-11 w-auto" value={itemType} aria-label="Τύπος" onChange={(e) => {
                 const t = e.target.value as ItemType
                 setItemType(t); setUnit(t === 'raw' ? 'kg' : 'τεμ')
               }}>
                 {(['raw', 'semi', 'finished'] as ItemType[]).filter((t) => !types || types.includes(t)).map((t) => <option key={t} value={t}>{ITEM_TYPE_LABEL[t]}</option>)}
               </select>
-              <select className="input h-11 w-auto" value={unit} onChange={(e) => setUnit(e.target.value)}>
+              <select className="input h-11 w-auto" value={unit} aria-label="Μονάδα" onChange={(e) => setUnit(e.target.value)}>
                 {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
               </select>
               {itemType !== 'raw' && (
-                <label className="text-sm flex items-center gap-2">
+                <label className="text-sm flex items-center gap-2 min-h-[44px]">
                   <input type="checkbox" className="h-5 w-5" checked={mto} onChange={(e) => setMto(e.target.checked)} />
                   {itemType === 'finished' ? 'Κατά παραγγελία' : 'Γίνεται αυτόματα'}
                 </label>
               )}
+              {isFinished && (
+                <div className="flex gap-2 items-center flex-wrap w-full">
+                  <NumField value={price} onChange={setPrice} suffix="€" label={priceGross ? 'Τιμή με ΦΠΑ' : 'Τιμή χωρίς ΦΠΑ'}
+                    placeholder={priceGross ? 'τιμή με ΦΠΑ' : 'τιμή χ. ΦΠΑ'} className="w-36" />
+                  <select className="input h-11 w-auto" value={vat} aria-label="ΦΠΑ" onChange={(e) => setVat(Number(e.target.value))}>
+                    {VAT_RATES.map((v) => <option key={v} value={v}>ΦΠΑ {v}%</option>)}
+                  </select>
+                  {priceGross && netPrice != null && <span className="text-xs text-stone-500">= {fmtCost(netPrice)} χωρίς ΦΠΑ</span>}
+                </div>
+              )}
+              {priceMissing && <div className="text-xs text-red-700 w-full">Βάλε τιμή: αλλιώς η πώληση γράφεται 0 €.</div>}
             </div>
           ) : (
             <div className="flex gap-4 text-sm">
-              <label className="flex items-center gap-2"><input type="checkbox" className="h-5 w-5" checked={isCustomer} onChange={(e) => setIsCustomer(e.target.checked)} /> Πελάτης</label>
-              <label className="flex items-center gap-2"><input type="checkbox" className="h-5 w-5" checked={isSupplier} onChange={(e) => setIsSupplier(e.target.checked)} /> Προμηθευτής</label>
+              <label className="flex items-center gap-2 min-h-[44px]"><input type="checkbox" className="h-5 w-5" checked={isCustomer} onChange={(e) => setIsCustomer(e.target.checked)} /> Πελάτης</label>
+              <label className="flex items-center gap-2 min-h-[44px]"><input type="checkbox" className="h-5 w-5" checked={isSupplier} onChange={(e) => setIsSupplier(e.target.checked)} /> Προμηθευτής</label>
             </div>
           )}
           <div className="flex gap-2">
             <button type="button" className="btn-secondary h-11 flex-1" onClick={() => setMode('idle')} disabled={busy}>Πίσω</button>
-            <button type="button" className="btn-primary h-11 flex-[2]" onClick={create} disabled={busy || !name.trim() || (kind === 'partner' && !isCustomer && !isSupplier)}>
+            <button type="button" className="btn-primary h-11 flex-[2]" onClick={create} disabled={busy || !name.trim() || priceMissing || (kind === 'partner' && !isCustomer && !isSupplier)}>
               {busy ? 'Δημιουργία…' : 'Δημιουργία'}
             </button>
           </div>
@@ -936,7 +1095,7 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, env, onPick, 
       )}
 
       {remember !== null && (
-        <label className="text-sm flex items-center gap-2 text-stone-700">
+        <label className="text-sm flex items-center gap-2 text-stone-700 min-h-[44px]">
           <input type="checkbox" className="h-5 w-5" checked={remember} onChange={(e) => onRemember(e.target.checked)} />
           Να το θυμάμαι ως «{ref.heard}»
         </label>
@@ -948,13 +1107,15 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, env, onPick, 
 // ---------------------------------------------------------------------
 // Λεπτομέρειες ανά είδος εντολής (επεξεργάσιμες)
 // ---------------------------------------------------------------------
-function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setLine, removeLine, refField }: {
+function Editor({ pending, running, lastUndo, itemById, salePriceOf, setChannel, updCmd, setLine, removeLine, refField }: {
   pending: Pending
   running: RunningState | null
   lastUndo: LogEntry | null
   itemById: Map<string, Item>
+  /** τιμή χονδρικής (πελάτη ή γενική) για γραμμή χωρίς ειπωμένη τιμή */
+  salePriceOf: (itemId: string) => SalePrice | undefined
   setChannel: (c: TallyChannel) => void
-  updCmd: (f: (c: Command) => Command) => void
+  updCmd: (f: (c: Command) => Command, edited?: string) => void
   setLine: (i: number, patch: Partial<QtyLine> & { unitPrice?: number | null }) => void
   removeLine: (i: number) => void
   refField: (path: string, label: string) => ReactNode
@@ -963,19 +1124,31 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
   const unitOf = (r: EntityRef) => (r.id ? itemById.get(r.id)?.unit : null) ?? 'τεμ'
   const nameOf = (r: EntityRef) => (r.id ? itemById.get(r.id)?.name : null) ?? r.heard
 
-  const lines = (opts: { price?: 'sale' | 'purchase'; label: string }) => hasLines(c) && (
+  /** η τιμή που θα μπει όταν το πεδίο μείνει κενό */
+  const pricePlaceholder = (kind: 'sale' | 'purchase', it: Item | null | undefined) => {
+    if (!it) return kind === 'sale' ? 'τιμή πελάτη' : 'τιμή'
+    if (kind === 'purchase') return Number(it.avg_cost) > 0 ? `μέσο ${numText(Number(it.avg_cost))}` : 'γράψε τιμή'
+    const sp = salePriceOf(it.id)
+    if (!sp) return 'τιμή πελάτη'
+    return sp.price > 0 ? `${numText(sp.price)} (${sp.partner ? 'πελάτη' : 'γενική'})` : 'γράψε τιμή'
+  }
+
+  const lines = (opts: { price?: 'sale' | 'purchase'; label: string; negative?: boolean }) => hasLines(c) && (
     <div className="flex flex-col gap-2">
       {c.lines.map((l, i) => {
         const it = l.item.id ? itemById.get(l.item.id) : null
         const price = 'unitPrice' in l ? (l as { unitPrice: number | null }).unitPrice : null
+        const removing = !!opts.negative && l.qty < 0
         return (
-          <div key={pending.lineKeys[i] ?? i} className="rounded-md border border-stone-200 p-2 flex flex-col gap-2">
+          <div key={pending.lineKeys[i] ?? i} className={'rounded-md border p-2 flex flex-col gap-2 ' + (removing ? 'border-red-300 bg-red-50/40' : 'border-stone-200')}>
             <div className="flex items-start gap-2">
-              <div className="flex-1 min-w-0">{refField(`lines.${i}.item`, opts.label)}</div>
-              <button type="button" className="btn-ghost h-9 w-9 p-0 shrink-0" aria-label="Αφαίρεση γραμμής" onClick={() => removeLine(i)}>✕</button>
+              <div className="flex-1 min-w-0">{refField(`lines.${i}.item`, removing ? 'Αφαίρεση' : opts.label)}</div>
+              <button type="button" className="btn-ghost h-11 w-11 p-0 shrink-0" aria-label="Αφαίρεση γραμμής" onClick={() => removeLine(i)}>✕</button>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <QtyInput value={l.qty} unit={unitOf(l.item)} label={nameOf(l.item)} onChange={(v) => setLine(i, { qty: v })} />
+              <QtyInput value={l.qty} unit={unitOf(l.item)} label={nameOf(l.item)} allowNegative={opts.negative} onChange={(v) => setLine(i, { qty: v })}
+                blank={l.qty === 0 && !l.heardQty?.trim() && !pending.edited[`lines.${i}.qty`]} />
+              {removing && <span className="text-xs font-medium text-red-700">{l.qty === -1 ? 'βγαίνει' : 'βγαίνουν'} από τον μετρητή</span>}
               {/* "10 σακιά", "μισό κιλό": δείχνουμε τι ακούστηκε όταν έγινε μετατροπή */}
               {showHeardQty(l.heardQty) && <span className="text-xs text-stone-500">({l.heardQty})</span>}
               {opts.price && (
@@ -984,8 +1157,8 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
                   onChange={(v) => setLine(i, { unitPrice: v })}
                   suffix={`€/${unitOf(l.item)}`}
                   label={`Τιμή ${nameOf(l.item)}`}
-                  className="w-40"
-                  placeholder={opts.price === 'purchase' ? (it ? `μέσο ${fmtCost(it.avg_cost).replace(/\s?€/, '')}` : 'τιμή') : 'τιμή πελάτη'}
+                  className="w-44"
+                  placeholder={pricePlaceholder(opts.price, it)}
                 />
               )}
             </div>
@@ -1005,11 +1178,11 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
               {TALLY_CHANNELS.map((ch) => <Chip key={ch} active={ch === c.channel} onClick={() => setChannel(ch)}>{CHANNEL_LABEL[ch]}</Chip>)}
             </div>
           </div>
-          {lines({ label: 'Προϊόν' })}
+          {lines({ label: 'Προϊόν', negative: true })}
         </>
       )
     case 'sale':
-      return <>{refField('partner', 'Πελάτης')}{lines({ price: 'sale', label: 'Προϊόν' })}<p className="text-xs text-stone-500">Τιμές χωρίς ΦΠΑ. Κενό = τιμή πελάτη / γενική.</p></>
+      return <>{refField('partner', 'Πελάτης')}{lines({ price: 'sale', label: 'Προϊόν' })}<p className="text-xs text-stone-500">Τιμές χωρίς ΦΠΑ. Κενό = η τιμή που φαίνεται (πελάτη ή γενική).</p></>
     case 'purchase':
       return (
         <>
@@ -1026,18 +1199,27 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
       return (
         <>
           {refField('item', 'Προϊόν')}
-          <QtyInput value={c.qty} unit={unitOf(c.item)} label={nameOf(c.item)} onChange={(v) => updCmd((x) => (x.kind === 'production' ? { ...x, qty: v } : x))} />
+          <QtyInput value={c.qty} unit={unitOf(c.item)} label={nameOf(c.item)} onChange={(v) => updCmd((x) => (x.kind === 'production' ? { ...x, qty: v } : x), 'qty')} />
           <p className="text-xs text-stone-500">Τα υλικά βγαίνουν από τη συνταγή.</p>
         </>
       )
-    case 'stocktake':
-      return <>{lines({ label: 'Είδος' })}<p className="text-xs text-stone-500">Μπαίνουν στην απογραφή σε εξέλιξη της ημέρας. Καταχωρείται με «τέλος απογραφής».</p></>
+    case 'stocktake': {
+      const d = stocktakeDate(running?.stocktake ?? null, today())
+      return (
+        <>
+          {lines({ label: 'Είδος' })}
+          <p className="text-xs text-stone-500">
+            Μπαίνουν στην απογραφή σε εξέλιξη {d === today() ? 'της ημέρας' : `της ${fmtDate(d)} (συνεχίζει από χθες)`}. Καταχωρείται με «τέλος απογραφής».
+          </p>
+        </>
+      )
+    }
     case 'receipt':
     case 'payment':
       return (
         <>
           {refField('partner', c.kind === 'receipt' ? 'Από πελάτη' : 'Σε προμηθευτή')}
-          <NumField value={c.amount} onChange={(v) => updCmd((x) => (x.kind === 'receipt' || x.kind === 'payment' ? { ...x, amount: v ?? 0 } : x))} suffix="€" label="Ποσό" className="w-40" />
+          <NumField value={c.amount} onChange={(v) => updCmd((x) => (x.kind === 'receipt' || x.kind === 'payment' ? { ...x, amount: v ?? 0 } : x), 'amount')} suffix="€" label="Ποσό" className="w-40" />
         </>
       )
     case 'recipe':
@@ -1046,7 +1228,7 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
           {refField('item', 'Προϊόν')}
           <div className="flex items-center gap-2 text-sm">
             <span className="text-xs font-medium text-stone-500">Για</span>
-            <NumField value={c.outputQty} onChange={(v) => updCmd((x) => (x.kind === 'recipe' ? { ...x, outputQty: v ?? 0 } : x))} suffix={unitOf(c.item)} label="Ποσότητα συνταγής" className="w-32" />
+            <NumField value={c.outputQty} onChange={(v) => updCmd((x) => (x.kind === 'recipe' ? { ...x, outputQty: v ?? 0 } : x), 'outputQty')} suffix={unitOf(c.item)} label="Ποσότητα συνταγής" className="w-32" />
           </div>
           {lines({ label: 'Υλικό' })}
           <p className="text-xs text-stone-500">Αντικαθιστά την τωρινή συνταγή.</p>
@@ -1059,9 +1241,9 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
         <>
           {refField('item', 'Προϊόν')}
           <div className="flex items-center gap-2 flex-wrap">
-            <NumField value={c.netPrice} onChange={(v) => updCmd((x) => (x.kind === 'item_price' ? { ...x, netPrice: v ?? 0 } : x))} suffix="€" label="Χωρίς ΦΠΑ" className="w-32" />
+            <NumField value={c.netPrice} onChange={(v) => updCmd((x) => (x.kind === 'item_price' ? { ...x, netPrice: v ?? 0 } : x), 'netPrice')} suffix="€" label="Χωρίς ΦΠΑ" className="w-32" />
             <span className="text-xs text-stone-500">χωρίς ΦΠΑ =</span>
-            <NumField value={round(c.netPrice * (1 + vat / 100), 2)} onChange={(v) => updCmd((x) => (x.kind === 'item_price' ? { ...x, netPrice: round((v ?? 0) / (1 + vat / 100), 4) } : x))} suffix="€" label="Με ΦΠΑ" className="w-32" />
+            <NumField value={round(c.netPrice * (1 + vat / 100), 2)} onChange={(v) => updCmd((x) => (x.kind === 'item_price' ? { ...x, netPrice: round((v ?? 0) / (1 + vat / 100), 4) } : x), 'netPrice')} suffix="€" label="Με ΦΠΑ" className="w-32" />
             <span className="text-xs text-stone-500">με ΦΠΑ {vat}%</span>
           </div>
         </>
@@ -1073,7 +1255,7 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
           {refField('partner', 'Πελάτης')}
           {refField('item', 'Προϊόν')}
           <div className="flex items-center gap-2">
-            <NumField value={c.netPrice} onChange={(v) => updCmd((x) => (x.kind === 'partner_price' ? { ...x, netPrice: v ?? 0 } : x))} suffix="€" label="Τιμή" className="w-32" />
+            <NumField value={c.netPrice} onChange={(v) => updCmd((x) => (x.kind === 'partner_price' ? { ...x, netPrice: v ?? 0 } : x), 'netPrice')} suffix="€" label="Τιμή" className="w-32" />
             <span className="text-xs text-stone-500">χωρίς ΦΠΑ</span>
           </div>
         </>
@@ -1096,7 +1278,12 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
             {VAT_RATES.map((v) => <option key={v} value={v}>ΦΠΑ {v}%</option>)}
           </select>
           {c.itemType === 'finished' && (
-            <NumField value={c.salePrice} onChange={(v) => set({ salePrice: v })} suffix="€" label="Τιμή χωρίς ΦΠΑ" placeholder="τιμή χ. ΦΠΑ" />
+            <>
+              <NumField value={c.salePrice} onChange={(v) => set({ salePrice: v })} suffix="€" label="Τιμή χωρίς ΦΠΑ" placeholder="τιμή χ. ΦΠΑ" />
+              <NumField value={c.salePrice == null ? null : round(c.salePrice * (1 + c.vatRate / 100), 2)}
+                onChange={(v) => set({ salePrice: v == null ? null : round(v / (1 + c.vatRate / 100), 4) })}
+                suffix="€" label="Τιμή με ΦΠΑ" placeholder="με ΦΠΑ" />
+            </>
           )}
           {c.itemType !== 'raw' && (
             <label className="col-span-2 text-sm flex items-center gap-2">
@@ -1110,8 +1297,10 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
               <NumField value={c.packQty} onChange={(v) => set({ packQty: v })} suffix={c.unit} label="Ποσότητα συσκευασίας" placeholder="ανά συσκ." />
             </>
           )}
-          {c.itemType === 'finished' && c.salePrice != null && (
-            <div className="col-span-2 text-xs text-stone-500">= {fmtMoney(c.salePrice * (1 + c.vatRate / 100))} με ΦΠΑ</div>
+          {c.itemType === 'finished' && !(c.salePrice != null && c.salePrice > 0) && (
+            <div className="col-span-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+              Χωρίς τιμή πώλησης: δεν θα μπορεί να μπει στις πωλήσεις ημέρας μέχρι να βάλεις τιμή.
+            </div>
           )}
         </div>
       )
@@ -1129,26 +1318,38 @@ function Editor({ pending, running, lastUndo, itemById, setChannel, updCmd, setL
         </div>
       )
     }
-    case 'close_day':
-      return running && running.tally.length > 0 ? (
+    case 'close_day': {
+      const all = running ? [...running.older, ...running.tally] : []
+      return all.length > 0 ? (
         <div className="text-sm">
-          Θα καταχωρηθούν: {running.tally.map((t) => `${CHANNEL_LABEL[t.channel]} ${fmtQty(t.qty)} τεμ (${fmtMoney(t.gross)})`).join(', ')}.
+          Θα καταχωρηθούν: {all.map((t) => `${tallyText(t, t.date !== today())} τεμ (${fmtMoney(t.gross)})`).join(', ')}.
           <div className="text-xs text-stone-500 mt-1">Οι πίτσες κατεβαίνουν από την αποθήκη μαζί με τα υλικά τους. Δεν αναιρείται από εδώ.</div>
         </div>
       ) : null
-    case 'close_stocktake':
-      return running?.stocktake ? (
+    }
+    case 'close_stocktake': {
+      const st = running?.stocktake
+      if (!running || !st) return null
+      const before = [...running.older, ...running.tally].filter((t) => t.date <= st.date)
+      return (
         <div className="text-sm">
-          Απογραφή {docCode('stocktake', running.stocktake.docNo)}: {running.stocktake.count} είδη ({fmtDate(running.stocktake.date)}).
+          Απογραφή {docCode('stocktake', st.docNo)}: {st.count} {plural(st.count, 'είδος', 'είδη')} ({fmtDate(st.date)}).
           <div className="text-xs text-stone-500 mt-1">Μετά την καταχώρηση ανοίγει η σελίδα της με τις διαφορές. Δεν αναιρείται από εδώ.</div>
-          {running.tally.length > 0 && (
+          {before.length > 0 && (
             <div className="mt-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-xs px-2 py-1.5">
-              Υπάρχουν ανοιχτές πωλήσεις σήμερα ({running.tally.map((t) => `${CHANNEL_LABEL[t.channel]} ${fmtQty(t.qty)}`).join(', ')}).
-              Η απογραφή «κλειδώνει» τη μέρα: κλείσε πρώτα τη μέρα, αλλιώς οι σημερινές πωλήσεις δεν θα μπορούν να καταχωρηθούν.
+              Πρώτα θα καταχωρηθούν οι ανοιχτές πωλήσεις ημέρας έως {fmtDate(st.date)} ({before.map((t) => tallyText(t, t.date !== today())).join(', ')}):
+              η απογραφή «κλειδώνει» τις μέρες έως τότε.
+            </div>
+          )}
+          {st.date === today() && (
+            <div className="mt-2 rounded-md bg-red-50 border border-red-200 text-red-800 text-xs px-2 py-1.5">
+              Η απογραφή είναι με σημερινή ημερομηνία: μετά την καταχώρηση δεν θα μπαίνουν άλλες σημερινές πωλήσεις
+              για ό,τι περιέχει τα είδη που μετρήθηκαν. Πες «τέλος απογραφής» όταν κλείσει η βάρδια.
             </div>
           )}
         </div>
-      ) : null
+      )
+    }
     case 'undo':
       return lastUndo ? <div className="text-sm">Θα αναιρεθεί: <b>{lastUndo.message}</b></div> : null
     case 'query_stock':

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { useMaster } from '../../context/MasterData'
 import { supabase } from '../../lib/supabase'
 import type { Doc, ItemType, StockBalance } from '../../lib/types'
 import { ITEM_TYPE_LABEL } from '../../lib/labels'
-import { fmtMoney, fmtQty, toNum, today } from '../../lib/format'
+import { fmtDate, fmtMoney, fmtQty, toNum, today } from '../../lib/format'
 import { ErrorBox, Field, NumInput, Spinner } from '../../components/ui'
 import type { LineInput } from '../../lib/docs'
 import { useDocEditor } from './useDocEditor'
@@ -44,7 +44,7 @@ export function StocktakeDoc() {
     setDate(doc.doc_date); setNotes(doc.notes ?? '')
     setRows(new Map(lines.map((l) => [l.item_id, { item_id: l.item_id, counted: String(l.qty), include: true }])))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc?.id, doc?.status])
+  }, [doc?.id, doc?.status, ed.ver])
 
   const activeItems = useMemo(() => items.filter((i) => i.is_active && (!typeFilter || i.item_type === typeFilter)), [items, typeFilter])
 
@@ -75,6 +75,43 @@ export function StocktakeDoc() {
   const buildLines = (): LineInput[] => countedRows.map((r, i) => ({ line_no: i + 1, role: 'item', item_id: r.item_id, qty: toNum(r.counted) }))
 
   if (loading) return <Spinner />
+
+  // Απογραφή σε εξέλιξη: γεμίζει από το «Πες το» (και από άλλες συσκευές), άρα
+  // μόνο προβολή· καταχώρηση όπως είναι στη βάση, όχι με τις γραμμές της οθόνης
+  if (ed.runningOpen && doc) {
+    return (
+      <DocShell docType="stocktake" doc={doc} isNew={false} saving={saving} posting={posting} canSave={false}
+        onSave={() => {}} onPost={() => {}} onUnpost={ed.unpost} onDelete={ed.remove}
+        running={{ what: `οι μετρήσεις της απογραφής ${fmtDate(doc.doc_date)}`, onPost: ed.postRunning, onDetach: ed.detachRunning }}>
+        <ErrorBox text={ed.error} />
+        <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
+          Απογραφή σε εξέλιξη ({fmtDate(doc.doc_date)}): γεμίζει από το <Link className="underline" to="/voice">Πες το</Link>{' '}
+          (π.χ. «μέτρησα μοτσαρέλα έξι κιλά»), γι' αυτό εδώ μόνο φαίνεται. Για αλλαγές με το χέρι: «Χειροκίνητη επεξεργασία».
+        </div>
+        <LockNote date={doc.doc_date} />
+        <div className="card overflow-x-auto">
+          <table className="tbl">
+            <thead><tr><th>Είδος</th><th>Τύπος</th><th>Μον.</th><th className="num">Υπόλοιπο τώρα</th><th className="num">Μετρημένο</th></tr></thead>
+            <tbody>
+              {lines.map((l) => {
+                const it = itemById.get(l.item_id)
+                return (
+                  <tr key={l.id}>
+                    <td>{it?.name}</td>
+                    <td>{it && ITEM_TYPE_LABEL[it.item_type]}</td>
+                    <td>{it?.unit}</td>
+                    <td className="num text-stone-500">{fmtQty(expected.get(l.item_id) ?? 0)}</td>
+                    <td className="num font-semibold">{fmtQty(l.qty)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-xs text-stone-500 mt-2">{lines.length} {lines.length === 1 ? 'είδος' : 'είδη'} μετρημένα μέχρι τώρα.</p>
+      </DocShell>
+    )
+  }
 
   // Καταχωρημένη προβολή: από τις γραμμές
   if (posted) {
@@ -125,6 +162,8 @@ export function StocktakeDoc() {
         <button className="btn-secondary" onClick={fillAllExpected}>Συμπλήρωση με αναμενόμενα</button>
       </div>
 
+      <LockNote date={date} />
+
       <p className="text-sm text-stone-600 mb-2">Γράψε τη μετρημένη ποσότητα σε όσα είδη μέτρησες. Τα κενά αγνοούνται. Για σωστή κοστολόγηση, μία φορά τον μήνα μέτρα τα πάντα.</p>
 
       <div className="card overflow-x-auto">
@@ -153,5 +192,21 @@ export function StocktakeDoc() {
         <Field label="Σημειώσεις"><textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
       </div>
     </DocShell>
+  )
+}
+
+/**
+ * Τι κάνει η καταχώρηση: καταχωρεί πρώτα τις ανοιχτές πωλήσεις ημέρας έως
+ * την ημερομηνία της που κινούν τα μετρημένα είδη, και μετά «κλειδώνει» τις
+ * μέρες έως τότε (σημερινή ημερομηνία = όχι άλλες σημερινές πωλήσεις γι' αυτά).
+ */
+function LockNote({ date }: { date: string }) {
+  const isToday = date === today()
+  return (
+    <div className={'rounded-md border text-sm px-3 py-2 mb-3 ' + (isToday ? 'bg-red-50 border-red-200 text-red-800' : 'bg-stone-50 border-stone-200 text-stone-600')}>
+      Η καταχώρηση καταχωρεί πρώτα τις ανοιχτές πωλήσεις ημέρας έως {fmtDate(date)} που κινούν τα μετρημένα είδη
+      και «κλειδώνει» τις μέρες έως τότε.
+      {isToday && <> Με σημερινή ημερομηνία δεν θα μπαίνουν άλλες σημερινές πωλήσεις γι' αυτά: καταχώρησέ την στο κλείσιμο της βάρδιας. Αν μέτρησες πριν ανοίξετε, βάλε τη χθεσινή ημερομηνία.</>}
+    </div>
   )
 }
