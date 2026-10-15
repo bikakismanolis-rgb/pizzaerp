@@ -44,6 +44,8 @@ export const docCode = (t: DocType, no: number) => `${DOC_PREFIX[t]}-${no}`
 export const CHANNEL_LABEL: Record<Channel, string> = {
   wholesale: 'Χονδρική',
   efood: 'efood',
+  wolt: 'Wolt',
+  box: 'box',
   phone: 'Τηλέφωνο',
   store: 'Κατάστημα',
 }
