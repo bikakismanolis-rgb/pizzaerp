@@ -1298,8 +1298,14 @@ grant select on public.v_stock_balance, public.v_item_ledger, public.v_partner_b
 -- Άλλα ονόματα (aliases), κανάλια wolt/box, ανοιχτά πρόχειρα (μετρητής
 -- ημέρας, απογραφή σε εξέλιξη), αυτόματο ζυμάρι (backflush δύο επιπέδων,
 -- μόνο όσο λείπει από το απόθεμα), επιμερισμός απογραφής με αυτόματα
--- ημιέτοιμα, απογραφή που κλείνει πρώτα τις πωλήσεις ημέρας, έλεγχοι
--- εταιρείας σε συνταγές/τιμές, source_doc_id/is_auto μόνο από τον server.
+-- ημιέτοιμα, έλεγχοι εταιρείας σε συνταγές/τιμές, source_doc_id/is_auto
+-- μόνο από τον server, δικές τους λέξεις/φράσεις (voice_phrase).
+-- Απογραφή "τη στιγμή της μέτρησης": κάθε γραμμή απογραφής κρατά τη
+-- στιγμή που μετρήθηκε το είδος (doc_line.stock_cut = θέση του μετρητή
+-- των stock_move.id εκείνη τη στιγμή). Κίνηση m είναι "πριν" από τη μέτρηση
+-- (D, cut) αν (m.move_date, m.id) <= (D, cut): ό,τι γράφτηκε αργότερα την
+-- ίδια μέρα μετράει για μετά, άρα η μέρα δεν κλειδώνει· ό,τι ήταν ήδη
+-- μέσα στη μέτρηση δεν ακυρώνεται (ούτε όσο η απογραφή είναι σε εξέλιξη).
 -- Ξανατρέχει χωρίς σφάλμα (if not exists / create or replace).
 -- =====================================================================
 
@@ -1326,6 +1332,69 @@ alter table public.doc add constraint doc_running_check
 create unique index if not exists doc_one_running_draft
   on public.doc (company_id, doc_type, doc_date, (coalesce(channel, '')))
   where is_running and status = 'draft';
+
+-- ---------------------------------------------------------------------
+-- Στιγμή μέτρησης ανά γραμμή απογραφής: η θέση του μετρητή των
+-- stock_move.id τη στιγμή που μετρήθηκε το είδος (_move_mark: ό,τι
+-- γράφτηκε ως τότε έχει id <= στιγμή, ό,τι γραφτεί μετά έχει μεγαλύτερο).
+-- Η φωνή (stocktake_count) τη γράφει στην πρώτη μέτρηση του είδους· όσες
+-- μένουν κενές (απογραφή με το χέρι) παίρνουν τη στιγμή της καταχώρησης.
+-- ---------------------------------------------------------------------
+alter table public.doc_line add column if not exists stock_cut bigint;
+alter table public.doc_line drop constraint if exists doc_line_stock_cut_check;
+alter table public.doc_line add constraint doc_line_stock_cut_check check (stock_cut is null or stock_cut >= 0);
+
+-- παλιές καταχωρημένες απογραφές: μετρήθηκαν λίγο πριν από τις δικές τους
+-- διορθώσεις (το παλιό κλείδωμα δεν άφηνε κίνηση με ημερομηνία <= της
+-- απογραφής μετά από αυτήν). Χωρίς διορθώσεις: ό,τι γράφτηκε ως τώρα.
+-- Στιγμή >= από δική τους διόρθωση δεν γίνεται με τη νέα λογική (η διόρθωση
+-- γράφεται πάντα μετά τη μέτρηση): διορθώνεται κι αυτή (παλιότερη εκδοχή).
+update public.doc_line dl
+   set stock_cut = coalesce((select min(m.id) - 1 from public.stock_move m where m.doc_id = s.id),
+                            (select case when q.is_called then q.last_value else 0 end from public.stock_move_id_seq q))
+  from public.doc s
+ where s.id = dl.doc_id and s.doc_type = 'stocktake' and s.status = 'posted'
+   and (dl.stock_cut is null
+        or dl.stock_cut >= (select min(m.id) from public.stock_move m where m.doc_id = s.id));
+
+-- ---------------------------------------------------------------------
+-- Δικές τους λέξεις και φράσεις: "όταν λέω «οικογενειακή» εννοώ «μεγάλη
+-- μαργαρίτα»". Τις εφαρμόζει ο τοπικός κατανοητής πριν από όλα.
+-- ---------------------------------------------------------------------
+create table if not exists public.voice_phrase (
+  id          uuid primary key default gen_random_uuid(),
+  company_id  uuid not null references public.company(id) on delete cascade,
+  phrase      text not null,
+  meaning     text not null,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  constraint voice_phrase_phrase_check  check (char_length(btrim(phrase)) between 1 and 200),
+  constraint voice_phrase_meaning_check check (char_length(btrim(meaning)) between 1 and 200)
+);
+-- μία φορά η κάθε φράση ανά εταιρεία (χωρίς διάκριση πεζών/κεφαλαίων)
+create unique index if not exists voice_phrase_company_phrase on public.voice_phrase (company_id, lower(phrase));
+
+-- κενά στην αρχή/στο τέλος και διπλά κενά φεύγουν
+create or replace function public.voice_phrase_clean()
+returns trigger language plpgsql as $$
+begin
+  new.phrase  := btrim(regexp_replace(new.phrase, '\s+', ' ', 'g'));
+  new.meaning := btrim(regexp_replace(new.meaning, '\s+', ' ', 'g'));
+  return new;
+end $$;
+drop trigger if exists voice_phrase_clean on public.voice_phrase;
+create trigger voice_phrase_clean before insert or update on public.voice_phrase
+  for each row execute function public.voice_phrase_clean();
+drop trigger if exists voice_phrase_updated_at on public.voice_phrase;
+create trigger voice_phrase_updated_at before update on public.voice_phrase
+  for each row execute function public.set_updated_at();
+
+alter table public.voice_phrase enable row level security;
+drop policy if exists voice_phrase_all on public.voice_phrase;
+create policy voice_phrase_all on public.voice_phrase for all to authenticated
+  using (public.is_member(company_id)) with check (public.is_member(company_id));
+grant select, insert, update, delete on public.voice_phrase to authenticated;
+revoke all on public.voice_phrase from anon;
 
 -- ---------------------------------------------------------------------
 -- Κανάλια: + wolt, box. Ο αρχικός περιορισμός έχει αυτόματο όνομα, οπότε
@@ -1480,8 +1549,22 @@ as $$
   select distinct item_id from t;
 $$;
 
--- Καταχωρημένη απογραφή που κλειδώνει την ημέρα p_date για κάποιο από τα
--- είδη p_items (καμία γραμμή = ανοιχτή ημέρα)
+-- Στιγμή τώρα: η θέση του μετρητή των stock_move.id. Δεν πάει ποτέ πίσω
+-- (το max(id) πάει, όταν ακυρώνεται η τελευταία κίνηση), άρα μέτρηση που
+-- γίνεται αργότερα έχει πάντα μεγαλύτερη στιγμή. Με το _lock_postings:
+-- κάθε κίνηση της εταιρείας που υπάρχει έχει id <= στιγμή, κάθε επόμενη >.
+create or replace function public._move_mark()
+returns bigint
+language sql volatile
+set search_path = public
+as $$
+  select case when q.is_called then q.last_value else 0 end from public.stock_move_id_seq q;
+$$;
+
+-- Καταχωρημένη απογραφή με μεταγενέστερη ημερομηνία που κλειδώνει την
+-- ημέρα p_date για κάποιο από τα είδη p_items (καμία γραμμή = ανοιχτή
+-- ημέρα). Μέτρηση της ίδιας ημέρας δεν κλειδώνει: νέα κίνηση μετράει για
+-- μετά από αυτήν.
 create or replace function public._stocktake_lock(p_company uuid, p_date date, p_items uuid[])
 returns table(doc_no int, doc_date date, item_name text)
 language sql stable
@@ -1492,10 +1575,72 @@ as $$
     join public.doc_line sl on sl.doc_id = s.id
     join public.item i on i.id = sl.item_id
    where s.company_id = p_company and s.doc_type = 'stocktake' and s.status = 'posted'
-     and s.doc_date >= p_date and sl.item_id = any(p_items)
+     and s.doc_date > p_date and sl.item_id = any(p_items)
    order by s.doc_date desc, s.doc_no desc
    limit 1;
 $$;
+
+-- ---------------------------------------------------------------------
+-- Κλείδωμα: δεν καταχωρείται / ακυρώνεται παραστατικό που κινεί είδος
+-- (α) με ημερομηνία πριν από καταχωρημένη απογραφή του είδους, ή
+-- (β) (ακύρωση) με κίνηση που υπήρχε ήδη όταν μετρήθηκε το είδος: θα
+--     άλλαζε το "αναμενόμενο" της μέτρησης. Ισχύει και για απογραφή σε
+--     εξέλιξη / πρόχειρη (η στιγμή της μέτρησης μένει ως την καταχώρηση):
+--     ξανακαταχωρημένο, το παραστατικό θα έπαιρνε νέα id και θα μετρούσε
+--     για μετά, ενώ είναι ήδη μέσα στη μέτρηση. Στην πρόχειρη μόνο κινήσεις
+--     της ίδιας μέρας (οι παλιότερων ημερών μένουν "πριν" ό,τι κι αν γίνει).
+-- Νέο παραστατικό της ημέρας μιας μέτρησης καταχωρείται κανονικά (μετράει
+-- για μετά), και ακυρώνεται όσο δεν το περιλαμβάνει κάποια μέτρηση.
+-- ---------------------------------------------------------------------
+create or replace function public._assert_open(p_doc uuid)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  d       public.doc%rowtype;
+  v_found record;
+begin
+  select * into d from public.doc where id = p_doc;
+  select s.doc_no, s.doc_date, i.name as item_name into v_found
+    from public.doc s
+    join public.doc_line sl on sl.doc_id = s.id
+    join public.item i on i.id = sl.item_id
+   where s.company_id = d.company_id
+     and s.doc_type = 'stocktake'
+     and s.status = 'posted'
+     and s.id <> d.id
+     and s.doc_date > d.doc_date
+     and sl.item_id in (select dl.item_id from public.doc_line dl where dl.doc_id = p_doc)
+   order by s.doc_date desc, s.doc_no desc
+   limit 1;
+  if found then
+    raise exception 'Κλειδωμένη περίοδος: υπάρχει απογραφή ΑΠ-% (%) που περιλαμβάνει το είδος "%". Χρησιμοποιήστε μεταγενέστερη ημερομηνία.',
+      v_found.doc_no, v_found.doc_date, v_found.item_name;
+  end if;
+
+  select s.doc_no, s.doc_date, s.status, s.is_running, i.name as item_name into v_found
+    from public.stock_move m
+    join public.doc_line sl on sl.item_id = m.item_id
+    join public.doc s on s.id = sl.doc_id
+    join public.item i on i.id = m.item_id
+   where m.doc_id = p_doc
+     and s.company_id = d.company_id
+     and s.doc_type = 'stocktake'
+     and s.id <> d.id
+     and (s.status = 'posted' or (sl.stock_cut is not null and m.move_date = s.doc_date))
+     and (m.move_date, m.id) <= (s.doc_date, coalesce(sl.stock_cut, 9223372036854775807))
+   order by (s.status = 'posted') desc, s.doc_date desc, s.doc_no desc
+   limit 1;
+  if found and v_found.status = 'posted' then
+    raise exception 'Κλειδωμένη περίοδος: το είδος "%" μετρήθηκε στην απογραφή ΑΠ-% (%) μετά από αυτή την κίνηση, άρα η κίνηση μετράει ήδη στη μέτρηση. Για διόρθωση: ακυρώστε την απογραφή, βγάλτε το είδος από αυτήν και, μετά τη διόρθωση, γράψτε ξανά τη μέτρησή του.',
+      v_found.item_name, v_found.doc_no, v_found.doc_date;
+  elsif found then
+    raise exception 'Κλειδωμένη περίοδος: το είδος "%" μετρήθηκε στην % ΑΠ-% (%) μετά από αυτή την κίνηση, άρα η κίνηση μετράει ήδη στη μέτρηση. Για διόρθωση: βγάλτε πρώτα το είδος από εκείνη την απογραφή (ή διαγράψτε την) και, μετά τη διόρθωση, μετρήστε το ξανά.',
+      v_found.item_name, case when v_found.is_running then 'απογραφή σε εξέλιξη' else 'πρόχειρη απογραφή' end,
+      v_found.doc_no, v_found.doc_date;
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- Ανάπτυξη συνταγής: μόνο συνταγές της εταιρείας· συστατικό που
@@ -1700,53 +1845,48 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- Απογραφή: οι ανοιχτές πωλήσεις ημέρας μέχρι και την ημέρα της
--- απογραφής που κινούν είδη της καταχωρούνται πρώτα. Αλλιώς η κατανάλωσή
--- τους θα έβγαινε έλλειμμα, και μετά δεν θα καταχωρούνταν ποτέ
--- (κλειδωμένη περίοδος).
+-- Πωλήσεις ημέρας πριν από μέτρηση: καταχωρούνται οι πρόχειρες πωλήσεις
+-- ημέρας της εταιρείας (ανοιχτές, ή που έγιναν απλό πρόχειρο με
+-- «Χειροκίνητη επεξεργασία» / ακύρωση) που κινούν (και μέσω αυτόματων
+-- παραγωγών) κάποιο από τα p_items με ημερομηνία πριν από p_date, ή κάποιο
+-- από τα p_same_day με ημερομηνία ίση με p_date. Είναι πωλήσεις που έγιναν
+-- ήδη: αλλιώς η κατανάλωσή τους θα έβγαινε έλλειμμα στη μέτρηση και, όταν
+-- καταχωρούνταν αργότερα, θα μετρούσε δεύτερη φορά (μετά τη μέτρηση)· οι
+-- παλιότερων ημερών δεν θα καταχωρούνταν ποτέ (κλειδωμένη περίοδος). Αν
+-- κάποια αποτύχει, αποτυγχάνει και η μέτρηση με καθαρό μήνυμα.
 -- ---------------------------------------------------------------------
-create or replace function public._post_stocktake(d public.doc)
+create or replace function public._post_day_tallies(p_company uuid, p_date date, p_items uuid[], p_same_day uuid[])
 returns void
 language plpgsql
 set search_path = public
 as $$
 declare
-  l          record;
-  r          record;
-  v_ids      uuid[];
-  v_id       uuid;
-  v_expected numeric;
-  v_diff     numeric;
-  v_avg      numeric;
+  r     record;
+  v_ids uuid[];
+  v_id  uuid;
 begin
-  if not exists (select 1 from public.doc_line where doc_id = d.id) then
-    raise exception 'Η απογραφή δεν έχει γραμμές';
-  end if;
-  if exists (select 1 from public.doc_line where doc_id = d.id group by item_id having count(*) > 1) then
-    raise exception 'Το ίδιο είδος εμφανίζεται δύο φορές στην απογραφή';
-  end if;
-  perform public._assert_open(d.id);
-
   -- κλείδωμα όλων μαζί πριν από κάθε καταχώρηση (ίδια σειρά με το close_running)
   select array_agg(z.id order by z.doc_date, z.channel, z.doc_no) into v_ids
     from (select x.id, x.doc_date, x.channel, x.doc_no
             from public.doc x
-           where x.company_id = d.company_id and x.doc_type = 'sale' and x.is_running
-             and x.status = 'draft' and not x.is_auto and x.doc_date <= d.doc_date
+           where x.company_id = p_company and x.doc_type = 'sale'
+             and (x.is_running or (x.notes = 'Πωλήσεις ημέρας' and x.channel in ('efood','wolt','box','phone','store')))
+             and x.status = 'draft' and not x.is_auto and x.doc_date <= p_date
              and exists (select 1
                            from public.doc_line xl
                            cross join lateral public._item_tree(xl.item_id) t(item_id)
-                           join public.doc_line sl on sl.doc_id = d.id and sl.item_id = t.item_id
-                          where xl.doc_id = x.id)
+                          where xl.doc_id = x.id
+                            and t.item_id = any(case when x.doc_date < p_date then p_items else p_same_day end))
+           order by x.doc_date, x.channel, x.doc_no
              for update of x) z;
 
   foreach v_id in array coalesce(v_ids, '{}'::uuid[]) loop
-    select x.id, x.doc_no, x.doc_date, x.channel, x.status, x.is_running into r from public.doc x where x.id = v_id;
-    if r.status <> 'draft' or not r.is_running then
+    select x.id, x.doc_no, x.doc_date, x.channel, x.status into r from public.doc x where x.id = v_id;
+    if r.status <> 'draft' then
       continue;
     end if;
-    -- ήδη κλειδωμένη από προηγούμενη απογραφή: μένει ως έχει (την αναφέρει το close_running)
-    if exists (select 1 from public._stocktake_lock(d.company_id, r.doc_date,
+    -- ήδη κλειδωμένη από μεταγενέστερη απογραφή: μένει ως έχει (την αναφέρει το close_running)
+    if exists (select 1 from public._stocktake_lock(p_company, r.doc_date,
                  array(select t.item_id from public.doc_line xl
                          cross join lateral public._item_tree(xl.item_id) t(item_id)
                         where xl.doc_id = r.id))) then
@@ -1759,30 +1899,216 @@ begin
         r.doc_no, to_char(r.doc_date, 'DD/MM'), r.channel, sqlerrm;
     end;
   end loop;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Απογραφή: κάθε είδος μετράει τη στιγμή που μετρήθηκε (stock_cut).
+-- Αναμενόμενο = κινήσεις με (ημερομηνία, id) <= (D, cut) + οι διορθώσεις
+-- των προηγούμενων μετρήσεων. Ό,τι γράφτηκε την ίδια μέρα μετά τη μέτρηση
+-- μένει για μετά: υπόλοιπο μετά τη διόρθωση = μέτρηση + κινήσεις μετά.
+-- Γραμμή χωρίς στιγμή (απογραφή με το χέρι) = "μετρήθηκε τώρα": πρώτα
+-- καταχωρούνται οι πρόχειρες πωλήσεις ημέρας που κινούν το είδος. Για
+-- γραμμή που έχει ήδη στιγμή, οι ανοιχτές πωλήσεις της ίδιας μέρας είναι
+-- πωλήσεις μετά τη μέτρηση και μένουν ανοιχτές· οι παλιότερων ημερών
+-- καταχωρούνται (είναι πριν από τη μέτρηση).
+-- Αξία διαφοράς: με το μέσο κόστος τη στιγμή της μέτρησης, όχι του
+-- κλεισίματος (αγορά μετά τη μέτρηση αλλάζει το σημερινό μέσο κόστος).
+-- ---------------------------------------------------------------------
+create or replace function public._post_stocktake(d public.doc)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  l          record;
+  v_found    record;
+  v_items    uuid[];
+  v_now      uuid[];
+  v_expected numeric;
+  v_onhand   numeric;
+  v_after_val numeric;
+  v_after_in boolean;
+  v_diff     numeric;
+  v_avg      numeric;
+  v_unit     numeric;
+begin
+  if not exists (select 1 from public.doc_line where doc_id = d.id) then
+    raise exception 'Η απογραφή δεν έχει γραμμές';
+  end if;
+  if exists (select 1 from public.doc_line where doc_id = d.id group by item_id having count(*) > 1) then
+    raise exception 'Το ίδιο είδος εμφανίζεται δύο φορές στην απογραφή';
+  end if;
+  for l in select line_no from public.doc_line where doc_id = d.id and qty < 0 order by line_no limit 1 loop
+    raise exception 'Αρνητική μέτρηση στη γραμμή %', l.line_no;
+  end loop;
+  perform public._assert_open(d.id);
+
+  -- στιγμή που δεν έχει έρθει ακόμα (γραμμένη με το χέρι): "μετρήθηκε τώρα"
+  update public.doc_line set stock_cut = null where doc_id = d.id and stock_cut > public._move_mark();
+
+  select array_agg(item_id), coalesce(array_agg(item_id) filter (where stock_cut is null), '{}')
+    into v_items, v_now
+    from public.doc_line where doc_id = d.id;
+  perform public._post_day_tallies(d.company_id, d.doc_date, v_items, v_now);
+
+  update public.doc_line set stock_cut = public._move_mark()
+   where doc_id = d.id and stock_cut is null;
+
+  -- σειρά μετρήσεων ανά είδος: (ημερομηνία, στιγμή). Μέτρηση παλιότερη από
+  -- άλλη καταχωρημένη (ή από τη διόρθωσή της) δεν καταχωρείται μετά από αυτήν.
+  select i.name as item_name, s.doc_no, s.doc_date into v_found
+    from public.doc_line dl
+    join public.doc_line sl on sl.item_id = dl.item_id and sl.doc_id <> dl.doc_id
+    join public.doc s on s.id = sl.doc_id
+    join public.item i on i.id = dl.item_id
+   where dl.doc_id = d.id
+     and s.company_id = d.company_id and s.doc_type = 'stocktake' and s.status = 'posted'
+     and ((s.doc_date, coalesce(sl.stock_cut, 9223372036854775807)) > (d.doc_date, dl.stock_cut)
+          or ((s.doc_date, coalesce(sl.stock_cut, 9223372036854775807)) = (d.doc_date, dl.stock_cut)
+              and exists (select 1 from public.stock_move m where m.doc_id = s.id and m.item_id = dl.item_id)))
+   order by s.doc_date desc, sl.stock_cut desc
+   limit 1;
+  if found then
+    raise exception 'Το είδος "%" μετρήθηκε ξανά μετά από αυτή τη μέτρηση, στην απογραφή ΑΠ-% (%). Ακυρώστε πρώτα εκείνη, ή βγάλτε το είδος από αυτή την απογραφή και μετρήστε το ξανά.',
+      v_found.item_name, v_found.doc_no, v_found.doc_date;
+  end if;
 
   for l in select * from public.doc_line where doc_id = d.id order by line_no loop
-    if l.qty < 0 then
-      raise exception 'Αρνητική μέτρηση στη γραμμή %', l.line_no;
+    -- οι διορθώσεις άλλων απογραφών είναι όλες πριν από αυτή τη μέτρηση (βλ. παραπάνω)
+    select coalesce(sum(z.qty) filter (where z.before), 0),
+           coalesce(sum(z.qty), 0),
+           coalesce(sum(z.total_cost) filter (where not z.before), 0),
+           coalesce(bool_or(not z.before and z.qty > 0), false)
+      into v_expected, v_onhand, v_after_val, v_after_in
+      from (select m.qty, m.total_cost,
+                   (m.move_type = 'stocktake_adj' or (m.move_date, m.id) <= (d.doc_date, l.stock_cut)) as before
+              from public.stock_move m
+             where m.company_id = d.company_id and m.item_id = l.item_id) z;
+    v_diff := l.qty - v_expected;
+    select avg_cost into v_avg from public.item where id = l.item_id for update;
+
+    -- μέσο κόστος τη στιγμή της μέτρησης: αν μετά από αυτήν μπήκε απόθεμα
+    -- (π.χ. αγορά σε άλλη τιμή), το σημερινό χωρίς τις κινήσεις μετά· αλλιώς
+    -- το σημερινό (οι εξαγωγές δεν αλλάζουν το μέσο κόστος)
+    v_unit := v_avg;
+    if v_after_in and v_expected > 0 then
+      v_unit := round((v_onhand * v_avg - v_after_val) / v_expected, 6);
+      if v_unit < 0 then
+        v_unit := v_avg;
+      end if;
     end if;
-    v_expected := public.item_on_hand(l.item_id, d.doc_date);
-    v_diff     := l.qty - v_expected;
-    select avg_cost into v_avg from public.item where id = l.item_id;
 
     update public.doc_line
        set expected_qty = v_expected,
            diff_qty     = v_diff,
-           unit_cost    = v_avg,
-           total_cost   = round(v_diff * v_avg, 4),
-           diff_value   = round(-v_diff * v_avg, 4)   -- θετικό = έλλειμμα = επιβάρυνση κόστους
+           unit_cost    = v_unit,
+           total_cost   = round(v_diff * v_unit, 4),
+           diff_value   = round(-v_diff * v_unit, 4)   -- θετικό = έλλειμμα = επιβάρυνση κόστους
      where id = l.id;
 
     if v_diff <> 0 then
       insert into public.stock_move (company_id, doc_id, doc_line_id, item_id, move_date, move_type, qty, unit_cost, total_cost)
-      values (d.company_id, d.id, l.id, l.item_id, d.doc_date, 'stocktake_adj', v_diff, v_avg, round(v_diff * v_avg, 4));
+      values (d.company_id, d.id, l.id, l.item_id, d.doc_date, 'stocktake_adj', v_diff, v_unit, round(v_diff * v_unit, 4));
+      -- διόρθωση σε άλλο κόστος από το σημερινό: νέο μέσο κόστος (όπως στο _stock_in)
+      if v_unit <> v_avg and v_onhand > 0 and v_onhand + v_diff > 0 then
+        update public.item set avg_cost = (v_onhand * v_avg + v_diff * v_unit) / (v_onhand + v_diff)
+         where id = l.item_id;
+      end if;
     end if;
   end loop;
 
   perform public._allocate_stocktake(d);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Επιμερισμός απογραφής ανά περίοδο μέτρησης. Η περίοδος μιας μέτρησης
+-- (D, cut) ενός είδους είναι οι κινήσεις με
+--   (προηγούμενη D, προηγούμενο cut) < (ημερομηνία, id) <= (D, cut),
+-- όπου προηγούμενη = η τελευταία καταχωρημένη μέτρηση του ίδιου είδους
+-- (χωρίς προηγούμενη: από την αρχή). Ό,τι αναλώθηκε την ίδια μέρα μετά
+-- τη μέτρηση πέφτει στην επόμενη περίοδο, δεν χάνεται.
+-- Αλλάζουν οι υπογραφές: οι παλιές (μόνο ημερομηνίες) σβήνονται.
+-- ---------------------------------------------------------------------
+drop function if exists public._prev_stocktake_date(public.doc, uuid);
+drop function if exists public._allocate_item(public.doc, uuid, numeric, numeric, date, int, text);
+drop function if exists public._semi_stock_use(uuid, uuid, date, date);
+drop function if exists public._allocate_cascade(public.doc, uuid, numeric, numeric, date);
+
+-- Προηγούμενη καταχωρημένη μέτρηση του είδους πριν από τη (d.doc_date, p_cut)
+create or replace function public._prev_stocktake(
+  d public.doc, p_item uuid, p_cut bigint, out prev_date date, out prev_cut bigint)
+language sql stable
+set search_path = public
+as $$
+  select s.doc_date, coalesce(sl.stock_cut, 9223372036854775807)
+    from public.doc s
+    join public.doc_line sl on sl.doc_id = s.id
+   where s.company_id = d.company_id
+     and s.doc_type = 'stocktake'
+     and s.status = 'posted'
+     and s.id <> d.id
+     and sl.item_id = p_item
+     and (s.doc_date, coalesce(sl.stock_cut, 9223372036854775807)) < (d.doc_date, coalesce(p_cut, 9223372036854775807))
+   order by s.doc_date desc, coalesce(sl.stock_cut, 9223372036854775807) desc
+   limit 1;
+$$;
+
+-- Επιμερισμός μιας διαφοράς (αξία p_value, ποσότητα p_qty, θετικό = έλλειμμα)
+-- ενός είδους στις παραγωγές που το ανάλωσαν στην περίοδο
+-- ((p_from_date, p_from_cut), (d.doc_date, p_to_cut)]
+create or replace function public._allocate_item(
+  d public.doc, p_item uuid, p_value numeric, p_qty numeric,
+  p_from_date date, p_from_cut bigint, p_to_cut bigint, p_level int, p_source text)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_total numeric;
+  v_resid numeric;
+begin
+  select coalesce(sum(-m.qty), 0) into v_total
+    from public.stock_move m
+   where m.company_id = d.company_id
+     and m.item_id = p_item
+     and m.move_type = 'prod_consume'
+     and (p_from_date is null or (m.move_date, m.id) > (p_from_date, coalesce(p_from_cut, 9223372036854775807)))
+     and (m.move_date, m.id) <= (d.doc_date, coalesce(p_to_cut, 9223372036854775807));
+
+  if v_total <= 0 then
+    -- καμία παραγωγή δεν κατανάλωσε το είδος: ανεπιμέριστο (φύρα)
+    insert into public.cost_alloc (company_id, stocktake_doc_id, production_doc_id, component_item_id, produced_item_id, level, source, qty_alloc, cost_alloc)
+    values (d.company_id, d.id, null, p_item, null, p_level, p_source, p_qty, p_value);
+    return;
+  end if;
+
+  insert into public.cost_alloc (company_id, stocktake_doc_id, production_doc_id, component_item_id, produced_item_id, level, source, qty_alloc, cost_alloc)
+  select d.company_id, d.id, c.doc_id, p_item, o.item_id, p_level, p_source,
+         round(p_qty * c.q / v_total, 4), round(p_value * c.q / v_total, 4)
+    from (
+      select m.doc_id, sum(-m.qty) as q
+        from public.stock_move m
+       where m.company_id = d.company_id
+         and m.item_id = p_item
+         and m.move_type = 'prod_consume'
+         and (p_from_date is null or (m.move_date, m.id) > (p_from_date, coalesce(p_from_cut, 9223372036854775807)))
+         and (m.move_date, m.id) <= (d.doc_date, coalesce(p_to_cut, 9223372036854775807))
+       group by m.doc_id
+    ) c
+    join public.doc_line o on o.doc_id = c.doc_id and o.role = 'output';
+
+  -- υπόλοιπο στρογγυλοποίησης στη μεγαλύτερη κατανομή
+  select p_value - coalesce(sum(cost_alloc), 0) into v_resid
+    from public.cost_alloc
+   where stocktake_doc_id = d.id and component_item_id = p_item and level = p_level and source = p_source
+     and production_doc_id is not null;
+  if v_resid <> 0 then
+    update public.cost_alloc set cost_alloc = cost_alloc + v_resid
+     where id = (select id from public.cost_alloc
+                  where stocktake_doc_id = d.id and component_item_id = p_item and level = p_level and source = p_source
+                    and production_doc_id is not null
+                  order by abs(cost_alloc) desc, id limit 1);
+  end if;
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -1791,15 +2117,22 @@ end $$;
 -- (α) αυτόματη παραγωγή μέσα σε άλλη παραγωγή: όλο στη γονική, που την
 --     ανάλωσε ολόκληρη (ακριβές· δεν χρειάζεται περίοδος).
 -- (β) χειροκίνητη παραγωγή: στις παραγωγές που ανάλωσαν το ημιέτοιμο από
---     απόθεμα (όχι από δικές τους αυτόματες) στην ίδια περίοδο με την
---     πρώτη ύλη. (Παλιά η περίοδος ήταν από την τελευταία μέτρηση του ίδιου
---     του ημιετοίμου, που για αυτόματο ζυμάρι δεν μετριέται ποτέ, άρα από
---     την αρχή: το έλλειμμα του μήνα έπεφτε και σε πίτσες κλεισμένων μηνών.)
+--     απόθεμα (όχι από δικές τους αυτόματες) από την προηγούμενη μέτρηση
+--     της πρώτης ύλης ως το τέλος της ημέρας της απογραφής. Όχι ως τη
+--     στιγμή της μέτρησης: ζυμάρι που ζυμώθηκε πριν από μέτρηση στη μέση
+--     της μέρας αναλώνεται κυρίως μετά, και τότε όλο το έλλειμμα θα έπεφτε
+--     στις λίγες πίτσες του πρωινού. (Παλιά η αρχή ήταν η τελευταία μέτρηση
+--     του ίδιου του ημιετοίμου, που για αυτόματο ζυμάρι δεν μετριέται ποτέ,
+--     άρα από την αρχή: το έλλειμμα του μήνα έπεφτε και σε πίτσες
+--     κλεισμένων μηνών.)
 -- (γ) αυτόματη παραγωγή από πώληση του ίδιου του ημιετοίμου: μένει εκεί.
 -- ---------------------------------------------------------------------
 
--- Αναλώσεις ημιετοίμου από απόθεμα ανά παραγωγή στην περίοδο (p_start, p_end]
-create or replace function public._semi_stock_use(p_company uuid, p_semi uuid, p_start date, p_end date)
+-- Αναλώσεις ημιετοίμου από απόθεμα ανά παραγωγή στην περίοδο
+-- ((p_from_date, p_from_cut), (p_to_date, p_to_cut)] (κενό p_to_cut = ως
+-- το τέλος της p_to_date)
+create or replace function public._semi_stock_use(
+  p_company uuid, p_semi uuid, p_from_date date, p_from_cut bigint, p_to_date date, p_to_cut bigint)
 returns table(doc_id uuid, qty numeric)
 language sql stable
 set search_path = public
@@ -1808,7 +2141,8 @@ as $$
     from (select m.doc_id, sum(-m.qty) as q
             from public.stock_move m
            where m.company_id = p_company and m.item_id = p_semi and m.move_type = 'prod_consume'
-             and (p_start is null or m.move_date > p_start) and m.move_date <= p_end
+             and (p_from_date is null or (m.move_date, m.id) > (p_from_date, coalesce(p_from_cut, 9223372036854775807)))
+             and (m.move_date, m.id) <= (p_to_date, coalesce(p_to_cut, 9223372036854775807))
            group by m.doc_id) c
     left join lateral (
       select sum(ao.qty) as q
@@ -1819,7 +2153,8 @@ as $$
 $$;
 
 create or replace function public._allocate_cascade(
-  d public.doc, p_semi uuid, p_value numeric, p_qty numeric, p_start date)
+  d public.doc, p_semi uuid, p_value numeric, p_qty numeric,
+  p_from_date date, p_from_cut bigint, p_to_cut bigint)
 returns void
 language plpgsql
 set search_path = public
@@ -1830,7 +2165,7 @@ declare
   v_resid numeric;
 begin
   select coalesce(sum(u.qty), 0) into v_total
-    from public._semi_stock_use(d.company_id, p_semi, p_start, d.doc_date) u;
+    from public._semi_stock_use(d.company_id, p_semi, p_from_date, p_from_cut, d.doc_date, p_to_cut) u;
 
   if v_total <= 0 then
     -- το ημιέτοιμο δεν αναλώθηκε από απόθεμα στην περίοδο: ανεπιμέριστο
@@ -1844,7 +2179,7 @@ begin
     insert into public.cost_alloc (company_id, stocktake_doc_id, production_doc_id, component_item_id, produced_item_id, level, source, qty_alloc, cost_alloc)
     select d.company_id, d.id, u.doc_id, p_semi, o.item_id, 2, 'cascade',
            round(p_qty * u.qty / v_total, 4), round(p_value * u.qty / v_total, 4)
-      from public._semi_stock_use(d.company_id, p_semi, p_start, d.doc_date) u
+      from public._semi_stock_use(d.company_id, p_semi, p_from_date, p_from_cut, d.doc_date, p_to_cut) u
       join public.doc_line o on o.doc_id = u.doc_id and o.role = 'output'
     returning id, cost_alloc
   )
@@ -1867,15 +2202,19 @@ declare
   w       record;
   v_val   numeric;
   v_qty   numeric;
+  v_cut   bigint;
+  v_pd    date;
+  v_pc    bigint;
 begin
   -- Επίπεδο 1: πρώτες ύλες -> παραγωγές (ημιετοίμων και ετοίμων)
   for l in
-    select dl.item_id, dl.diff_qty, dl.diff_value
+    select dl.item_id, dl.diff_qty, dl.diff_value, dl.stock_cut
       from public.doc_line dl join public.item i on i.id = dl.item_id
      where dl.doc_id = d.id and i.item_type = 'raw' and dl.diff_qty <> 0
+     order by dl.line_no
   loop
-    perform public._allocate_item(d, l.item_id, l.diff_value, -l.diff_qty,
-                                  public._prev_stocktake_date(d, l.item_id), 1, 'count');
+    select p.prev_date, p.prev_cut into v_pd, v_pc from public._prev_stocktake(d, l.item_id, l.stock_cut) p;
+    perform public._allocate_item(d, l.item_id, l.diff_value, -l.diff_qty, v_pd, v_pc, l.stock_cut, 1, 'count');
   end loop;
 
   -- Επίπεδο 2: ημιέτοιμα -> παραγωγές ετοίμων
@@ -1886,13 +2225,14 @@ begin
      where i.company_id = d.company_id and i.item_type = 'semi'
        and (exists (select 1 from public.doc_line dl where dl.doc_id = d.id and dl.item_id = i.id and dl.diff_qty <> 0)
          or exists (select 1 from public.cost_alloc ca where ca.stocktake_doc_id = d.id and ca.produced_item_id = i.id and ca.level = 1))
+     order by i.code, i.id
   loop
     -- δική του διαφορά απογραφής
-    select diff_value, -diff_qty into v_val, v_qty
+    select diff_value, -diff_qty, stock_cut into v_val, v_qty, v_cut
       from public.doc_line where doc_id = d.id and item_id = s.item_id;
     if found and v_val <> 0 then
-      perform public._allocate_item(d, s.item_id, v_val, v_qty,
-                                    public._prev_stocktake_date(d, s.item_id), 2, 'count');
+      select p.prev_date, p.prev_cut into v_pd, v_pc from public._prev_stocktake(d, s.item_id, v_cut) p;
+      perform public._allocate_item(d, s.item_id, v_val, v_qty, v_pd, v_pc, v_cut, 2, 'count');
     end if;
 
     -- (α) αυτόματες παραγωγές του μέσα σε άλλη παραγωγή -> στη γονική
@@ -1907,17 +2247,22 @@ begin
      group by p.id, po.item_id
     having sum(ca.cost_alloc) <> 0;
 
-    -- (β) χειροκίνητες παραγωγές του -> αναλώσεις από απόθεμα, ανά περίοδο πρώτης ύλης
+    -- (β) χειροκίνητες παραγωγές του -> αναλώσεις από απόθεμα, από την
+    --     προηγούμενη μέτρηση της κάθε πρώτης ύλης ως το τέλος της ημέρας
     for w in
-      select public._prev_stocktake_date(d, ca.component_item_id) as p_start, sum(ca.cost_alloc) as v
+      select ca.component_item_id as comp, cl.stock_cut as to_cut, sum(ca.cost_alloc) as v
         from public.cost_alloc ca
         join public.doc a on a.id = ca.production_doc_id and not a.is_auto
+        join public.doc_line cl on cl.doc_id = d.id and cl.item_id = ca.component_item_id
        where ca.stocktake_doc_id = d.id and ca.level = 1 and ca.produced_item_id = s.item_id
-       group by 1
+       group by ca.component_item_id, cl.stock_cut
+       order by ca.component_item_id
     loop
       if w.v <> 0 then
+        select p.prev_date, p.prev_cut into v_pd, v_pc from public._prev_stocktake(d, w.comp, w.to_cut) p;
         perform public._allocate_cascade(d, s.item_id, w.v,
-                                         case when s.avg_cost > 0 then round(w.v / s.avg_cost, 4) end, w.p_start);
+                                         case when s.avg_cost > 0 then round(w.v / s.avg_cost, 4) end,
+                                         v_pd, v_pc, null);
       end if;
     end loop;
   end loop;
@@ -1930,8 +2275,20 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- Καταχώρηση: κλείνει και το ανοιχτό πρόχειρο (is_running = false)
+-- Καταχώρηση: κλείνει και το ανοιχτό πρόχειρο (is_running = false).
+-- Καταχωρήσεις / ακυρώσεις / μετρήσεις της ίδιας εταιρείας γίνονται μία
+-- τη φορά (_lock_postings, πρώτο κλείδωμα κάθε RPC που γράφει κινήσεις):
+-- έτσι η "στιγμή" μιας μέτρησης (_move_mark) δεν προσπερνά κίνηση άλλης
+-- συσκευής που δεν έχει ολοκληρωθεί ακόμα.
 -- ---------------------------------------------------------------------
+create or replace function public._lock_postings(p_company uuid)
+returns void
+language sql
+set search_path = public
+as $$
+  select pg_advisory_xact_lock(hashtextextended(format('post|%s', p_company), 0));
+$$;
+
 create or replace function public._post_internal(p_doc uuid)
 returns void
 language plpgsql
@@ -1981,6 +2338,7 @@ begin
   if d.is_auto then
     raise exception 'Η αυτόματη παραγωγή καταχωρείται μαζί με το παραστατικό που τη δημιουργεί';
   end if;
+  perform public._lock_postings(d.company_id);
   perform public._post_internal(p_doc);
 end $$;
 
@@ -1988,6 +2346,11 @@ end $$;
 -- Ακύρωση: οι αυτόματες παραγωγές (πώλησης ή παραγωγής) ακυρώνονται
 -- αναδρομικά και διαγράφονται. Παραγωγή που έχει επιμερισμούς από
 -- καταχωρημένη απογραφή δεν ακυρώνεται (θα χάνονταν οι επιμερισμοί).
+-- Απογραφή ακυρώνεται μόνο αν δεν υπάρχει μεταγενέστερη μέτρηση
+-- (ημερομηνία, στιγμή) κάποιου είδους της· κρατά τις στιγμές μέτρησης,
+-- άρα ξανακαταχώρηση χωρίς αλλαγές δίνει το ίδιο αναμενόμενο, την ίδια
+-- διαφορά και αξία (όσο η στιγμή μένει στην απογραφή, ό,τι ήταν μέσα στη
+-- μέτρηση δεν ακυρώνεται: _assert_open).
 -- Οι πωλήσεις ημέρας ξαναγίνονται ανοιχτό πρόχειρο (αν δεν άνοιξε άλλο
 -- στο μεταξύ), ώστε να φαίνονται στις «Πωλήσεις ημέρας», να δέχονται
 -- ποσότητες και να κλείνουν όπως πριν.
@@ -2003,6 +2366,7 @@ declare
   v_it    uuid;
   v_auto  record;
   v_st    int;
+  v_found record;
   v_run   boolean := false;
 begin
   select * into d from public.doc where id = p_doc for update;
@@ -2011,13 +2375,20 @@ begin
   end if;
 
   if d.doc_type = 'stocktake' then
-    if exists (
-      select 1 from public.doc s join public.doc_line sl on sl.doc_id = s.id
-       where s.company_id = d.company_id and s.doc_type = 'stocktake' and s.status = 'posted'
-         and s.id <> d.id and s.doc_date > d.doc_date
-         and sl.item_id in (select item_id from public.doc_line where doc_id = d.id)
-    ) then
-      raise exception 'Υπάρχει μεταγενέστερη απογραφή για είδη αυτής της απογραφής. Ακυρώστε πρώτα εκείνη.';
+    select s.doc_no, i.name as item_name into v_found
+      from public.doc_line dl
+      join public.doc_line sl on sl.item_id = dl.item_id and sl.doc_id <> dl.doc_id
+      join public.doc s on s.id = sl.doc_id
+      join public.item i on i.id = dl.item_id
+     where dl.doc_id = d.id
+       and s.company_id = d.company_id and s.doc_type = 'stocktake' and s.status = 'posted'
+       and (s.doc_date, coalesce(sl.stock_cut, 9223372036854775807))
+         > (d.doc_date, coalesce(dl.stock_cut, 9223372036854775807))
+     order by s.doc_date, sl.stock_cut
+     limit 1;
+    if found then
+      raise exception 'Υπάρχει μεταγενέστερη απογραφή ΑΠ-% για το είδος "%" αυτής της απογραφής. Ακυρώστε πρώτα εκείνη.',
+        v_found.doc_no, v_found.item_name;
     end if;
     delete from public.cost_alloc where stocktake_doc_id = d.id;
     update public.doc_line set expected_qty = null, diff_qty = null, diff_value = null where doc_id = d.id;
@@ -2088,15 +2459,19 @@ begin
   if d.is_auto then
     raise exception 'Η αυτόματη παραγωγή ακυρώνεται μαζί με το παραστατικό που τη δημιούργησε';
   end if;
+  perform public._lock_postings(d.company_id);
   perform public._unpost_internal(p_doc);
 end $$;
 
 -- ---------------------------------------------------------------------
 -- Μετρητής ημέρας: +/- ποσότητα ενός ετοίμου στην ανοιχτή πώληση της
 -- ημέρας για ένα κανάλι λιανικής. Επιστρέφει το id της πώλησης ή null αν
--- άδειασε (και διαγράφηκε). Αύξηση σε ημέρα κλειδωμένη από απογραφή (για
--- είδος που θα κινούσε η πώληση) απορρίπτεται εδώ, αντί να μείνει
--- πρόχειρο που δεν καταχωρείται ποτέ· η μείωση επιτρέπεται (καθάρισμα).
+-- άδειασε (και διαγράφηκε). Αύξηση σε ημέρα κλειδωμένη από απογραφή με
+-- μεταγενέστερη ημερομηνία (για είδος που θα κινούσε η πώληση)
+-- απορρίπτεται εδώ, αντί να μείνει πρόχειρο που δεν καταχωρείται ποτέ· η
+-- μείωση επιτρέπεται (καθάρισμα). Μέτρηση της ίδιας μέρας δεν εμποδίζει:
+-- η πρώτη μέτρηση ενός είδους καταχωρεί τις πωλήσεις ως εκείνη τη στιγμή,
+-- και οι επόμενες μπαίνουν σε νέο ανοιχτό πρόχειρο (μετρούν για μετά).
 -- ---------------------------------------------------------------------
 create or replace function public.tally_add(
   p_company uuid, p_date date, p_channel text, p_item uuid, p_delta numeric)
@@ -2133,7 +2508,9 @@ begin
     raise exception 'Στις πωλήσεις ημέρας μπαίνουν μόνο έτοιμα προϊόντα ("%")', v_item.name;
   end if;
 
-  -- σειριοποίηση ανά εταιρεία / ημέρα / κανάλι (πολλές συσκευές ταυτόχρονα)
+  -- σειριοποίηση με καταχωρήσεις/μετρήσεις της εταιρείας και ανά ημέρα /
+  -- κανάλι (πολλές συσκευές ταυτόχρονα)· πάντα με αυτή τη σειρά
+  perform public._lock_postings(p_company);
   perform pg_advisory_xact_lock(hashtextextended(format('tally|%s|%s|%s', p_company, p_date, p_channel), 0));
 
   select x.id into v_doc
@@ -2192,8 +2569,12 @@ end $$;
 
 -- ---------------------------------------------------------------------
 -- Απογραφή σε εξέλιξη: μέτρηση ενός είδους στην ανοιχτή απογραφή της
--- ημέρας (p_add: πρόσθεση στη μέτρηση, p_qty null: αφαίρεση γραμμής).
--- Επιστρέφει το id της απογραφής ή null αν άδειασε (και διαγράφηκε).
+-- ημέρας (p_add: πρόσθεση στη μέτρηση, π.χ. «αλεύρι άλλα 5» στο επόμενο
+-- δωμάτιο· p_qty null: αφαίρεση γραμμής). Η πρώτη μέτρηση του είδους
+-- κρατά τη στιγμή (stock_cut), αφού πρώτα καταχωρήσει τις πρόχειρες
+-- πωλήσεις ημέρας ως σήμερα που το κινούν· οι επόμενες προσθέσεις /
+-- διορθώσεις κρατούν την ίδια στιγμή. Επιστρέφει το id της απογραφής ή
+-- null αν άδειασε (και διαγράφηκε).
 -- ---------------------------------------------------------------------
 create or replace function public.stocktake_count(
   p_company uuid, p_date date, p_item uuid, p_qty numeric, p_add boolean default false)
@@ -2207,6 +2588,8 @@ declare
   v_line  uuid;
   v_old   numeric;
   v_qty   numeric;
+  v_cut   bigint;
+  v_lock  record;
 begin
   if p_company is null or not public.is_member(p_company) then
     raise exception 'Δεν έχετε πρόσβαση στην εταιρεία';
@@ -2222,6 +2605,7 @@ begin
     raise exception 'Δεν βρέθηκε το είδος';
   end if;
 
+  perform public._lock_postings(p_company);
   perform pg_advisory_xact_lock(hashtextextended(format('stocktake|%s|%s', p_company, p_date), 0));
 
   select x.id into v_doc
@@ -2238,8 +2622,14 @@ begin
     end if;
     delete from public.doc_line where doc_id = v_doc and item_id = p_item;
   else
-    select coalesce(sum(dl.qty), 0), (array_agg(dl.id order by dl.line_no, dl.id))[1]
-      into v_old, v_line
+    -- απογραφή με μεταγενέστερη ημερομηνία: αυτή η μέτρηση δεν θα καταχωρούνταν ποτέ
+    select * into v_lock from public._stocktake_lock(p_company, p_date, array[p_item]);
+    if found then
+      raise exception 'Κλειδωμένη περίοδος: υπάρχει απογραφή ΑΠ-% (%) που περιλαμβάνει το είδος "%". Χρησιμοποιήστε μεταγενέστερη ημερομηνία.',
+        v_lock.doc_no, v_lock.doc_date, v_lock.item_name;
+    end if;
+    select coalesce(sum(dl.qty), 0), (array_agg(dl.id order by dl.line_no, dl.id))[1], min(dl.stock_cut)
+      into v_old, v_line, v_cut
       from public.doc_line dl
      where dl.doc_id = v_doc and dl.item_id = p_item;
     v_qty := round(case when coalesce(p_add, false) then v_old + p_qty else p_qty end, 4);
@@ -2249,17 +2639,23 @@ begin
     if v_qty >= 100000000 then
       raise exception 'Μη έγκυρη ποσότητα';
     end if;
+    if v_line is null then
+      -- πρώτη μέτρηση του είδους: ό,τι πουλήθηκε ως τώρα είναι πριν από αυτήν
+      perform public._post_day_tallies(p_company, p_date, array[p_item], array[p_item]);
+      v_cut := public._move_mark();
+    end if;
     if v_doc is null then
       insert into public.doc (company_id, doc_type, doc_date, status, is_running, notes)
       values (p_company, 'stocktake', p_date, 'draft', true, 'Απογραφή σε εξέλιξη')
       returning id into v_doc;
     end if;
     if v_line is null then
-      insert into public.doc_line (doc_id, line_no, role, item_id, qty)
-      select v_doc, coalesce(max(dl.line_no), 0) + 1, 'item', p_item, v_qty
+      insert into public.doc_line (doc_id, line_no, role, item_id, qty, stock_cut)
+      select v_doc, coalesce(max(dl.line_no), 0) + 1, 'item', p_item, v_qty, v_cut
         from public.doc_line dl where dl.doc_id = v_doc;
     else
-      update public.doc_line set qty = v_qty where id = v_line;
+      -- ίδια στιγμή με την πρώτη μέτρηση (κενή = γραμμή με το χέρι: "στην καταχώρηση")
+      update public.doc_line set qty = v_qty, stock_cut = v_cut where id = v_line;
       -- η απογραφή δέχεται μία γραμμή ανά είδος
       delete from public.doc_line where doc_id = v_doc and item_id = p_item and id <> v_line;
     end if;
@@ -2291,6 +2687,7 @@ begin
   if p_before is null then
     raise exception 'Χρειάζεται ημερομηνία';
   end if;
+  perform public._lock_postings(p_company);
 
   -- skip locked: όποια επεξεργάζεται αυτή τη στιγμή άλλη συσκευή, μένει για την επόμενη φορά
   for r in
@@ -2338,20 +2735,27 @@ grant select on public.v_doc_list to authenticated;
 -- Δικαιώματα
 -- ---------------------------------------------------------------------
 revoke execute on function public._available_qty(uuid,date) from public, anon, authenticated;
+revoke execute on function public._move_mark() from public, anon, authenticated;
 revoke execute on function public._item_tree(uuid) from public, anon, authenticated;
 revoke execute on function public._stocktake_lock(uuid,date,uuid[]) from public, anon, authenticated;
 revoke execute on function public._explode_bom(uuid) from public, anon, authenticated;
 revoke execute on function public._post_sale(public.doc) from public, anon, authenticated;
 revoke execute on function public._post_production(public.doc) from public, anon, authenticated;
+revoke execute on function public._assert_open(uuid) from public, anon, authenticated;
+revoke execute on function public._post_day_tallies(uuid,date,uuid[],uuid[]) from public, anon, authenticated;
 revoke execute on function public._post_stocktake(public.doc) from public, anon, authenticated;
-revoke execute on function public._semi_stock_use(uuid,uuid,date,date) from public, anon, authenticated;
-revoke execute on function public._allocate_cascade(public.doc,uuid,numeric,numeric,date) from public, anon, authenticated;
+revoke execute on function public._prev_stocktake(public.doc,uuid,bigint) from public, anon, authenticated;
+revoke execute on function public._allocate_item(public.doc,uuid,numeric,numeric,date,bigint,bigint,int,text) from public, anon, authenticated;
+revoke execute on function public._semi_stock_use(uuid,uuid,date,bigint,date,bigint) from public, anon, authenticated;
+revoke execute on function public._allocate_cascade(public.doc,uuid,numeric,numeric,date,bigint,bigint) from public, anon, authenticated;
 revoke execute on function public._allocate_stocktake(public.doc) from public, anon, authenticated;
+revoke execute on function public._lock_postings(uuid) from public, anon, authenticated;
 revoke execute on function public._post_internal(uuid) from public, anon, authenticated;
 revoke execute on function public._unpost_internal(uuid) from public, anon, authenticated;
 -- trigger functions (δεν καλούνται απευθείας)
 revoke execute on function public.bom_check_company() from public, anon, authenticated;
 revoke execute on function public.partner_price_check_company() from public, anon, authenticated;
+revoke execute on function public.voice_phrase_clean() from public, anon, authenticated;
 
 revoke execute on function public.post_document(uuid) from public, anon;
 revoke execute on function public.unpost_document(uuid) from public, anon;
@@ -2361,4 +2765,3 @@ revoke execute on function public.close_running(uuid,date) from public, anon;
 grant execute on function public.post_document(uuid), public.unpost_document(uuid),
   public.tally_add(uuid,date,text,uuid,numeric), public.stocktake_count(uuid,date,uuid,numeric,boolean),
   public.close_running(uuid,date) to authenticated;
-

@@ -39,6 +39,8 @@ export interface LineInput {
   discount_pct?: number
   vat_rate?: number
   notes?: string | null
+  /** απογραφή: η στιγμή που μετρήθηκε το είδος (κρατιέται σε αλλαγή με το χέρι) */
+  stock_cut?: number | null
 }
 
 /** Αντικαθιστά όλες τις γραμμές ενός πρόχειρου παραστατικού */
@@ -58,6 +60,8 @@ export async function replaceLines(companyId: string, docId: string, lines: Line
       discount_pct: l.discount_pct ?? 0,
       vat_rate: l.vat_rate ?? 0,
       notes: l.notes ?? null,
+      // μόνο όταν υπάρχει (βάση χωρίς 0004 δεν έχει τη στήλη)
+      ...(l.stock_cut != null ? { stock_cut: l.stock_cut } : {}),
     })),
   )
   if (ei) throw ei

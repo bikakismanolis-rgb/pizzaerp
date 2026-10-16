@@ -790,10 +790,15 @@ describe('ποσότητες σε δύο μονάδες / θέσεις', () => {
     expect(priced(c.lines)).toEqual([[F, 55, null]])
     expect(c.lines[0].heardQty).toBe('2 σακιά και 5 κιλά')
   })
-  it('"κι άλλα" στην απογραφή: προειδοποίηση (η απογραφή δεν προσθέτει)', () => {
+  it('"κι άλλα" στην απογραφή: πρόσθεση (mode add), χωρίς προειδοποίηση', () => {
     const r = run('μέτρησα κι άλλα 2 κιλά μοτσαρέλα')
-    expect(r.issues.join(' ')).toContain('δεν προσθέτει')
-    expect(run('Έχουμε ακόμα 2 κιλά μοτσαρέλα').issues).toEqual([])
+    expect(r.issues).toEqual([])
+    expect((r.command as Extract<Command, { kind: 'stocktake' }>).lines).toMatchObject([{ item: { id: MZ }, qty: 2, mode: 'add' }])
+    expect(r.confidence).toBeGreaterThan(0.85)
+    // "έχουμε ακόμα" = ακόμη υπάρχουν: όχι πρόσθεση
+    const s = run('Έχουμε ακόμα 2 κιλά μοτσαρέλα')
+    expect(s.issues).toEqual([])
+    expect((s.command as Extract<Command, { kind: 'stocktake' }>).lines[0].mode).toBeUndefined()
   })
 })
 

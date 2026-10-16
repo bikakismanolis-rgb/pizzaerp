@@ -31,6 +31,7 @@ const NAV: NavGroup[] = [
     items: [
       { to: '/items', label: 'Είδη & συνταγές' },
       { to: '/partners', label: 'Πελάτες & προμηθευτές' },
+      { to: '/voice/words', label: 'Λέξεις & φράσεις' },
     ],
   },
   {
@@ -121,7 +122,7 @@ export function Layout() {
   useAutoCloseRunning(company?.id)
   // το στρογγυλό μικρόφωνο: όχι στο «Πες το» και όχι στις Πωλήσεις ημέρας (έχουν
   // δικό τους «Πες το» και τα +/− θα κρύβονταν από κάτω του)
-  const showMic = !pathname.startsWith('/voice') && !pathname.startsWith('/daily-sales')
+  const showMic = !/^\/voice\/?$/.test(pathname) && !pathname.startsWith('/daily-sales')
 
   const nav = (
     <nav className="flex flex-col gap-4 p-3 text-sm">
@@ -132,7 +133,7 @@ export function Layout() {
             <NavLink
               key={it.to}
               to={it.to}
-              end={it.to === '/'}
+              end={it.to === '/' || it.to === '/voice'}
               onClick={() => setOpen(false)}
               className={({ isActive }) =>
                 'block rounded-md px-2 py-1.5 ' + (isActive ? 'bg-red-700 text-white' : 'text-stone-700 hover:bg-stone-200')

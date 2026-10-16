@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { useMaster } from '../../context/MasterData'
 import { supabase } from '../../lib/supabase'
 import type { Doc, ItemType, StockBalance } from '../../lib/types'
-import { ITEM_TYPE_LABEL } from '../../lib/labels'
+import { COUNT_MOMENT, ITEM_TYPE_LABEL } from '../../lib/labels'
 import { fmtDate, fmtMoney, fmtQty, toNum, today } from '../../lib/format'
 import { ErrorBox, Field, NumInput, Spinner } from '../../components/ui'
 import type { LineInput } from '../../lib/docs'
@@ -11,6 +11,9 @@ import { useDocEditor } from './useDocEditor'
 import { DocShell } from './DocShell'
 
 interface Row { item_id: string; counted: string; include: boolean }
+
+/** doc_line.stock_cut (0004): η στιγμή που μετρήθηκε το είδος από το «Πες το» */
+type CutLine = { item_id: string; stock_cut?: number | null }
 
 /**
  * Απογραφή: λίστα ειδών με μετρημένη ποσότητα. Στα καταχωρημένα δείχνει
@@ -72,7 +75,12 @@ export function StocktakeDoc() {
   const canSave = countedRows.length > 0
 
   const buildFields = (): Partial<Doc> => ({ doc_date: date, notes: notes.trim() || null })
-  const buildLines = (): LineInput[] => countedRows.map((r, i) => ({ line_no: i + 1, role: 'item', item_id: r.item_id, qty: toNum(r.counted) }))
+  // είδη που μετρήθηκαν από το «Πες το»: κρατούν τη στιγμή της μέτρησης και μετά από αλλαγή με το χέρι
+  const cuts = new Map((lines as CutLine[]).filter((l) => l.stock_cut != null).map((l) => [l.item_id, Number(l.stock_cut)]))
+  const buildLines = (): LineInput[] => countedRows.map((r, i) => ({
+    line_no: i + 1, role: 'item', item_id: r.item_id, qty: toNum(r.counted),
+    ...(cuts.has(r.item_id) ? { stock_cut: cuts.get(r.item_id)! } : {}),
+  }))
 
   if (loading) return <Spinner />
 
@@ -88,7 +96,7 @@ export function StocktakeDoc() {
           Απογραφή σε εξέλιξη ({fmtDate(doc.doc_date)}): γεμίζει από το <Link className="underline" to="/voice">Πες το</Link>{' '}
           (π.χ. «μέτρησα μοτσαρέλα έξι κιλά»), γι' αυτό εδώ μόνο φαίνεται. Για αλλαγές με το χέρι: «Χειροκίνητη επεξεργασία».
         </div>
-        <LockNote date={doc.doc_date} />
+        <CountNote running />
         <div className="card overflow-x-auto">
           <table className="tbl">
             <thead><tr><th>Είδος</th><th>Τύπος</th><th>Μον.</th><th className="num">Υπόλοιπο τώρα</th><th className="num">Μετρημένο</th></tr></thead>
@@ -162,7 +170,7 @@ export function StocktakeDoc() {
         <button className="btn-secondary" onClick={fillAllExpected}>Συμπλήρωση με αναμενόμενα</button>
       </div>
 
-      <LockNote date={date} />
+      <CountNote date={date} />
 
       <p className="text-sm text-stone-600 mb-2">Γράψε τη μετρημένη ποσότητα σε όσα είδη μέτρησες. Τα κενά αγνοούνται. Για σωστή κοστολόγηση, μία φορά τον μήνα μέτρα τα πάντα.</p>
 
@@ -196,17 +204,21 @@ export function StocktakeDoc() {
 }
 
 /**
- * Τι κάνει η καταχώρηση: καταχωρεί πρώτα τις ανοιχτές πωλήσεις ημέρας έως
- * την ημερομηνία της που κινούν τα μετρημένα είδη, και μετά «κλειδώνει» τις
- * μέρες έως τότε (σημερινή ημερομηνία = όχι άλλες σημερινές πωλήσεις γι' αυτά).
+ * Η μέτρηση μετράει «τη στιγμή που γίνεται»: από το «Πες το» τη στιγμή που
+ * ειπώθηκε κάθε είδος, από εδώ (με το χέρι) τη στιγμή της καταχώρησης. Ό,τι
+ * πουληθεί ή φτιαχτεί μετά μετράει για μετά· κλειδώνουν μόνο όσα ήταν πριν.
  */
-function LockNote({ date }: { date: string }) {
-  const isToday = date === today()
+function CountNote({ date, running }: { date?: string; running?: boolean }) {
   return (
-    <div className={'rounded-md border text-sm px-3 py-2 mb-3 ' + (isToday ? 'bg-red-50 border-red-200 text-red-800' : 'bg-stone-50 border-stone-200 text-stone-600')}>
-      Η καταχώρηση καταχωρεί πρώτα τις ανοιχτές πωλήσεις ημέρας έως {fmtDate(date)} που κινούν τα μετρημένα είδη
-      και «κλειδώνει» τις μέρες έως τότε.
-      {isToday && <> Με σημερινή ημερομηνία δεν θα μπαίνουν άλλες σημερινές πωλήσεις γι' αυτά: καταχώρησέ την στο κλείσιμο της βάρδιας. Αν μέτρησες πριν ανοίξετε, βάλε τη χθεσινή ημερομηνία.</>}
+    <div className="rounded-md border text-sm px-3 py-2 mb-3 bg-stone-50 border-stone-200 text-stone-600">
+      {running ? COUNT_MOMENT : (
+        <>
+          Η μέτρηση μετράει τη στιγμή της καταχώρησης: πρώτα καταχωρούνται οι ανοιχτές πωλήσεις ημέρας ως τότε που κινούν τα
+          μετρημένα είδη. Ό,τι πουληθεί ή φτιαχτεί μετά, μετράει για μετά.
+          {date && date < today() && <> Με παλιότερη ημερομηνία ({fmtDate(date)}) μετράει στο τέλος εκείνης της μέρας.</>}
+          {' '}Κινήσεις πριν από τη μέτρηση δεν αλλάζουν μετά (κλειδώνουν).
+        </>
+      )}
     </div>
   )
 }

@@ -6,11 +6,15 @@ import { supabase, errMsg } from '../lib/supabase'
 import { tallyMessage } from '../lib/errors'
 import { postDoc } from '../lib/docs'
 import type { TallyChannel } from '../lib/voice/types'
-import { CHANNEL_LABEL, TALLY_CHANNELS, docCode } from '../lib/labels'
+import { CHANNEL_LABEL, TALLY_CHANNELS, TALLY_NOTES, docCode } from '../lib/labels'
 import { fmtDate, fmtMoney, fmtQty, round, toNum, today } from '../lib/format'
 import { Confirm, ErrorBox, Field, PageTitle, Spinner, useToast } from '../components/ui'
 
 const LS_CHANNEL = 'pizza-erp.channel'
+
+interface SaleDoc { id: string; doc_no: number; status: string; is_running: boolean; notes: string | null; partner_id: string | null; doc_line: { item_id: string; qty: number; gross?: number }[] }
+/** Καταχωρημένη «Πώληση ημέρας» (από τον μετρητή), όχι άλλη πώληση με το ίδιο κανάλι (π.χ. τιμολόγιο σε πελάτη efood) */
+const isPostedTally = (d: SaleDoc) => d.status === 'posted' && d.notes === TALLY_NOTES && !d.partner_id
 
 /** Η οθόνη (κανάλι/ημέρα) όπου έγινε μια αλλαγή */
 interface At { gen: number; date: string; channel: TallyChannel }
@@ -19,6 +23,8 @@ interface At { gen: number; date: string; channel: TallyChannel }
  * Πωλήσεις ημέρας = μετρητής: κάθε +/− (ή πληκτρολόγηση) γράφεται αμέσως στο
  * ανοιχτό πρόχειρο της ημέρας/καναλιού (tally_add), ώστε να το βλέπουν όλες
  * οι συσκευές. Το «Κλείσιμο ημέρας» το καταχωρεί (με backflush).
+ * Οι αριθμοί είναι σύνολα ημέρας: καταχωρημένες (π.χ. από την πρώτη μέτρηση
+ * απογραφής ενός είδους) + ανοιχτές. Τα +/− αλλάζουν μόνο τις ανοιχτές.
  */
 export function DailySales() {
   const companyId = useCompanyId()
@@ -62,6 +68,11 @@ export function DailySales() {
   }
   const [running, setRunning] = useState<string | null>(null)
   const [posted, setPosted] = useState<{ id: string; doc_no: number }[]>([])
+  // άλλες καταχωρημένες πωλήσεις του καναλιού (με παραστατικό): δεν μετράνε εδώ
+  const [others, setOthers] = useState<{ id: string; doc_no: number; qty: number }[]>([])
+  // καταχωρημένες ποσότητες ανά είδος και αξία (με ΦΠΑ) για την οθόνη (ημέρα, κανάλι)
+  const [postedQty, setPostedQty] = useState<Map<string, number>>(new Map())
+  const [postedGross, setPostedGross] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
@@ -73,7 +84,8 @@ export function DailySales() {
 
   const retail = useMemo(() => items.filter((i) => i.item_type === 'finished' && i.is_active && i.make_to_order), [items])
   // + ό,τι άλλο έτοιμο έχει ήδη μπει (π.χ. από το «Πες το»)
-  const products = [...retail, ...items.filter((i) => i.item_type === 'finished' && !retail.includes(i) && (base.get(i.id) ?? 0) > 0)]
+  const products = [...retail, ...items.filter((i) => i.item_type === 'finished' && !retail.includes(i) && ((base.get(i.id) ?? 0) > 0 || (postedQty.get(i.id) ?? 0) > 0))]
+  const postedOf = (id: string) => postedQty.get(id) ?? 0
 
   /** Φόρτωση του ανοιχτού πρόχειρου (date, channel) */
   const load = useCallback(async (quiet = false) => {
@@ -83,13 +95,13 @@ export function DailySales() {
     if (!quiet) setLoading(true)
     try {
       const { data, error: e } = await supabase.from('doc')
-        .select('id, doc_no, status, is_running, doc_line(item_id, qty)')
+        .select('id, doc_no, status, is_running, notes, partner_id, doc_line(item_id, qty, gross)')
         .eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', date).eq('channel', channel).eq('is_auto', false)
         .order('doc_no')
       if (e) throw e
       // στο μεταξύ άλλαξε κανάλι ή ημέρα: η απάντηση δεν αφορά την οθόνη
       if (genRef.current !== gen) return
-      const docs = (data ?? []) as unknown as { id: string; doc_no: number; status: string; is_running: boolean; doc_line: { item_id: string; qty: number }[] }[]
+      const docs = (data ?? []) as unknown as SaleDoc[]
       const run = docs.find((d) => d.is_running && d.status === 'draft')
       const fresh = new Map<string, number>()
       for (const l of run?.doc_line ?? []) fresh.set(l.item_id, round((fresh.get(l.item_id) ?? 0) + Number(l.qty), 4))
@@ -100,7 +112,15 @@ export function DailySales() {
       for (const [id, q] of fresh) if (!keep(id)) m.set(id, q)
       baseRef.current = m
       if (run || epochRef.current === startEpoch) setRunning(run ? run.id : null)
-      setPosted(docs.filter((d) => d.status === 'posted').map((d) => ({ id: d.id, doc_no: d.doc_no })))
+      const done = docs.filter(isPostedTally)
+      setPosted(done.map((d) => ({ id: d.id, doc_no: d.doc_no })))
+      setOthers(docs.filter((d) => d.status === 'posted' && !isPostedTally(d))
+        .map((d) => ({ id: d.id, doc_no: d.doc_no, qty: round(d.doc_line.reduce((a, l) => a + Number(l.qty), 0), 4) })))
+      const pq = new Map<string, number>()
+      let pg = 0
+      for (const d of done) for (const l of d.doc_line) { pq.set(l.item_id, round((pq.get(l.item_id) ?? 0) + Number(l.qty), 4)); pg += Number(l.gross) }
+      setPostedQty(pq)
+      setPostedGross(round(pg))
       setError(null)
       rerender()
     } catch (e) {
@@ -118,7 +138,7 @@ export function DailySales() {
     for (const [id, w] of waiting) { window.clearTimeout(w.t); commitTyped(id, w.v, w.at) }
     baseRef.current = new Map(); inflightRef.current = new Map(); touchedRef.current = new Map()
     setEdit(() => new Map())
-    setRunning(null); setPosted([])
+    setRunning(null); setPosted([]); setOthers([]); setPostedQty(new Map()); setPostedGross(0)
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load, date, channel])
@@ -175,52 +195,60 @@ export function DailySales() {
     }
   }
 
-  /** Ποσότητα του είδους στην ανοιχτή πώληση (date, channel) όπως είναι στη βάση τώρα */
-  const serverQty = async (itemId: string, where: At): Promise<number | null> => {
-    const { data, error: e } = await supabase.from('doc').select('id, doc_line(item_id, qty)')
+  /** Ποσότητα του είδους (date, channel) όπως είναι στη βάση τώρα: ανοιχτή και καταχωρημένη */
+  const serverQty = async (itemId: string, where: At): Promise<{ open: number; posted: number } | null> => {
+    const { data, error: e } = await supabase.from('doc').select('id, doc_no, status, is_running, notes, partner_id, doc_line(item_id, qty)')
       .eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', where.date).eq('channel', where.channel)
-      .eq('is_running', true).eq('status', 'draft').eq('is_auto', false)
+      .eq('is_auto', false)
     if (e) return null
-    let q = 0
-    for (const d of (data ?? []) as unknown as { doc_line: { item_id: string; qty: number }[] }[]) {
-      for (const l of d.doc_line) if (l.item_id === itemId) q += Number(l.qty)
+    let open = 0, done = 0
+    for (const d of (data ?? []) as unknown as SaleDoc[]) {
+      const isOpen = d.is_running && d.status === 'draft'
+      if (!isOpen && !isPostedTally(d)) continue
+      for (const l of d.doc_line) if (l.item_id === itemId) { if (isOpen) open += Number(l.qty); else done += Number(l.qty) }
     }
-    return round(q, 4)
+    return { open: round(open, 4), posted: round(done, 4) }
   }
 
   const bump = (itemId: string, d: number) => {
     const w = timers.current.get(itemId)
     if (w) { window.clearTimeout(w.t); timers.current.delete(itemId) }
     const typed = editRef.current.get(itemId)
-    const cur = typed !== undefined ? Math.max(0, toNum(typed)) : confirmed(itemId)
+    // μόνο οι ανοιχτές: οι καταχωρημένες δεν αλλάζουν από εδώ
+    const cur = typed !== undefined ? Math.max(0, toNum(typed) - postedOf(itemId)) : confirmed(itemId)
     const next = Math.max(0, round(cur + d, 4))
     setEdit((m) => { const n = new Map(m); n.delete(itemId); return n })
     send(itemId, next - confirmed(itemId), at())
   }
 
   /**
-   * Πληκτρολογημένη ποσότητα = απόλυτη τιμή: διαφορά από ό,τι υπάρχει στη βάση
-   * τώρα (φρέσκια ανάγνωση: μπορεί να πρόσθεσε άλλη συσκευή). Αν στο μεταξύ
+   * Πληκτρολογημένη ποσότητα = σύνολο ημέρας: οι ανοιχτές γίνονται όσες λείπουν
+   * πάνω από τις καταχωρημένες (φρέσκια ανάγνωση: μπορεί να πρόσθεσε άλλη
+   * συσκευή). Κάτω από τις καταχωρημένες δεν γίνεται από εδώ. Αν στο μεταξύ
    * άλλαξε κανάλι/ημέρα, η τιμή πάει εκεί που γράφτηκε.
    */
   const commitTyped = async (itemId: string, v: string, where: At) => {
     timers.current.delete(itemId)
     const here = () => genRef.current === where.gen
-    const target = Math.max(0, round(toNum(v), 4))
+    const total = Math.max(0, round(toNum(v), 4))
     const fresh = here() && inflightRef.current.has(itemId) ? null : await serverQty(itemId, where)
+    const done = fresh ? fresh.posted : here() ? postedOf(itemId) : 0
+    const target = Math.max(0, round(total - done, 4))
+    if (total < done) toast.info(`Έχουν ήδη καταχωρηθεί ${fmtQty(done)}: δεν αφαιρούνται από εδώ (ακύρωση καταχώρησης από τις Πωλήσεις).`)
     if (here()) {
       // ξαναγράφτηκε άλλη τιμή ή πατήθηκε +/− στο μεταξύ
       if (editRef.current.get(itemId) !== v) return
       if (fresh !== null && !inflightRef.current.has(itemId)) {
-        baseRef.current.set(itemId, fresh)
+        baseRef.current.set(itemId, fresh.open)
         touchedRef.current.set(itemId, ++epochRef.current)
+        if (fresh.posted !== postedOf(itemId)) setPostedQty((m) => new Map(m).set(itemId, fresh.posted))
       }
       setEdit((m) => { const n = new Map(m); n.delete(itemId); return n })
       send(itemId, target - confirmed(itemId), where)
     } else if (fresh !== null) {
-      send(itemId, target - fresh, where)
+      send(itemId, target - fresh.open, where)
     } else {
-      toast.err(`Δεν αποθηκεύτηκε η ποσότητα ${target} (${CHANNEL_LABEL[where.channel]}). Γράψ' την ξανά.`)
+      toast.err(`Δεν αποθηκεύτηκε η ποσότητα ${total} (${CHANNEL_LABEL[where.channel]}). Γράψ' την ξανά.`)
     }
   }
 
@@ -237,10 +265,15 @@ export function DailySales() {
     if (w) { window.clearTimeout(w.t); commitTyped(itemId, w.v, w.at) }
   }
 
-  const shown = (id: string) => edit.get(id) ?? (confirmed(id) ? String(confirmed(id)) : '')
-  const lineQty = (id: string) => (edit.has(id) ? Math.max(0, toNum(edit.get(id))) : confirmed(id))
-  const totalQty = products.reduce((s, p) => s + lineQty(p.id), 0)
-  const total = round(products.reduce((s, p) => s + lineQty(p.id) * Number(p.sale_price) * (1 + Number(p.vat_rate) / 100), 0))
+  /** ό,τι δείχνει το πεδίο: σύνολο ημέρας (καταχωρημένες + ανοιχτές) ή ό,τι γράφεται */
+  const shown = (id: string) => { const t = round(postedOf(id) + confirmed(id), 4); return edit.get(id) ?? (t ? String(t) : '') }
+  /** ανοιχτές (αυτές αλλάζουν από εδώ) */
+  const lineQty = (id: string) => (edit.has(id) ? Math.max(0, round(toNum(edit.get(id)) - postedOf(id), 4)) : confirmed(id))
+  const openQty = products.reduce((s, p) => s + lineQty(p.id), 0)
+  const openGross = round(products.reduce((s, p) => s + lineQty(p.id) * Number(p.sale_price) * (1 + Number(p.vat_rate) / 100), 0))
+  const postedTotal = [...postedQty.values()].reduce((s, q) => s + q, 0)
+  const totalQty = round(postedTotal + openQty, 4)
+  const total = round(postedGross + openGross)
   const pending = inflight.size > 0 || edit.size > 0
 
   const closeDay = async () => {
@@ -285,12 +318,20 @@ export function DailySales() {
           </div>
         )}
         {posted.length > 0 && (
-          <div className="text-xs text-stone-600">
-            Ήδη καταχωρημένες για {CHANNEL_LABEL[channel]} {fmtDate(date)}:{' '}
+          <div className="text-xs text-stone-600 bg-stone-50 border border-stone-200 rounded-md px-2 py-1">
+            Ήδη καταχωρημένες για {CHANNEL_LABEL[channel]} {fmtDate(date)} ({fmtQty(postedTotal)} τεμ):{' '}
             {posted.map((p, i) => (
               <span key={p.id}>{i > 0 && ', '}<Link className="text-red-700 hover:underline" to={`/docs/sale/${p.id}`}>{docCode('sale', p.doc_no)}</Link></span>
             ))}
-            . Ό,τι προσθέσεις τώρα μπαίνει σε νέα.
+            . Μετράνε στα σύνολα. Τα +/− αλλάζουν μόνο όσες είναι ακόμα ανοιχτές (π.χ. όσες πουλήθηκαν μετά από μια μέτρηση απογραφής).
+          </div>
+        )}
+        {others.length > 0 && (
+          <div className="text-xs text-stone-600 bg-stone-50 border border-stone-200 rounded-md px-2 py-1">
+            Άλλες πωλήσεις {CHANNEL_LABEL[channel]} {fmtDate(date)} με δικό τους παραστατικό (δεν μετράνε εδώ):{' '}
+            {others.map((p, i) => (
+              <span key={p.id}>{i > 0 && ', '}<Link className="text-red-700 hover:underline" to={`/docs/sale/${p.id}`}>{docCode('sale', p.doc_no)}</Link> ({fmtQty(p.qty)} τεμ)</span>
+            ))}.
           </div>
         )}
       </div>
@@ -303,15 +344,17 @@ export function DailySales() {
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {products.map((p) => {
             const q = lineQty(p.id)
+            const done = postedOf(p.id)
             const busy = inflight.has(p.id)
             const noPrice = !(Number(p.sale_price) > 0)
             return (
-              <div key={p.id} className={'card p-2 pl-3 flex items-center gap-2 ' + (q > 0 ? 'border-red-200' : '')}>
+              <div key={p.id} className={'card p-2 pl-3 flex items-center gap-2 ' + (q + done > 0 ? 'border-red-200' : '')}>
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{p.name}</div>
                   <div className={'text-xs ' + (noPrice ? 'text-red-700' : 'text-stone-500')}>
                     {noPrice ? 'Χωρίς τιμή: γράφεται 0 € (βάλε τιμή στα Είδη)' : `${fmtMoney(Number(p.sale_price) * (1 + Number(p.vat_rate) / 100))} με ΦΠΑ`}{busy && ' · αποθήκευση…'}
                   </div>
+                  {done > 0 && <div className="text-xs text-stone-500">{fmtQty(done)} καταχωρημένες{q > 0 ? ` + ${fmtQty(q)} ανοιχτές` : ''}</div>}
                 </div>
                 <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Μείον ${p.name}`}
                   onClick={() => bump(p.id, -1)} disabled={q <= 0}>−</button>
@@ -334,10 +377,10 @@ export function DailySales() {
 
       <div className="fixed bottom-0 left-0 right-0 md:left-60 z-20 bg-white border-t border-stone-200 shadow-[0_-2px_8px_rgba(0,0,0,0.06)] px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] flex items-center gap-3">
         <div className="text-sm flex-1 min-w-0">
-          <div className="truncate">{CHANNEL_LABEL[channel]} · {fmtQty(totalQty)} τεμ</div>
+          <div className="truncate">{CHANNEL_LABEL[channel]} · {fmtQty(totalQty)} τεμ{postedTotal > 0 && <span className="text-stone-500"> ({fmtQty(openQty)} ανοιχτές)</span>}</div>
           <div className="text-xs text-stone-500 truncate">Σύνολο με ΦΠΑ <b className="tabular-nums text-stone-800">{fmtMoney(total)}</b>{pending && ' · αποθήκευση…'}</div>
         </div>
-        <button className="btn-primary h-11 px-4" onClick={() => setAskClose(true)} disabled={closing || pending || !running || totalQty <= 0}>
+        <button className="btn-primary h-11 px-4" onClick={() => setAskClose(true)} disabled={closing || pending || !running || openQty <= 0}>
           {closing ? 'Κλείσιμο…' : 'Κλείσιμο ημέρας'}
         </button>
       </div>
@@ -345,7 +388,7 @@ export function DailySales() {
       <Confirm
         open={askClose}
         title="Κλείσιμο ημέρας"
-        text={`Να καταχωρηθούν οι πωλήσεις ${CHANNEL_LABEL[channel]} της ${fmtDate(date)} (${fmtQty(totalQty)} τεμ, ${fmtMoney(total)}); Μετά δεν αλλάζουν από εδώ.`}
+        text={`Να καταχωρηθούν οι ανοιχτές πωλήσεις ${CHANNEL_LABEL[channel]} της ${fmtDate(date)} (${fmtQty(openQty)} τεμ, ${fmtMoney(openGross)}); Μετά δεν αλλάζουν από εδώ.`}
         onYes={closeDay}
         onNo={() => setAskClose(false)}
       />

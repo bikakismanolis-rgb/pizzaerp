@@ -14,7 +14,8 @@ import { genericPack, unitWord } from './lexicon'
 const UNKNOWN = 'Δεν κατάλαβα. Πες π.χ. «efood δύο μαργαρίτες».'
 const HELP =
   'Πες π.χ. «efood δύο μαργαρίτες», «ήρθαν δέκα σακιά αλεύρι από τον μύλο, 0,62 το κιλό», ' +
-  '«μέτρησα μοτσαρέλα έξι κιλά», «έφτιαξα ογδόντα ζυμάρια» ή «πόση μοτσαρέλα έχουμε».'
+  '«μέτρησα μοτσαρέλα έξι κιλά» (και από άλλον χώρο «αλεύρι άλλα πέντε κιλά»), «έφτιαξα ογδόντα ζυμάρια» ' +
+  'ή «πόση μοτσαρέλα έχουμε». Μάθε μου δικές σου λέξεις: «όταν λέω οικογενειακή εννοώ μεγάλη μαργαρίτα».'
 
 function findItem(ctx: InterpretContext, id: string | null): Item | null {
   return id ? (ctx?.items ?? []).find((i) => i.id === id) ?? null : null
@@ -42,18 +43,31 @@ function qtyText(qty: number, unit: string | null): string {
   return `${fmtQty(qty)} ${unit}`
 }
 
-function lineText(ctx: InterpretContext, l: QtyLine, abs = false): string {
+/** Ποσότητα γραμμής με μονάδα, ή null όταν δεν ειπώθηκε */
+function qtyPart(ctx: InterpretContext, l: QtyLine, abs = false): string | null {
   const it = findItem(ctx, l.item?.id ?? null)
-  const name = refText(ctx, l.item, 'item')
   const q = abs ? Math.abs(Number(l.qty) || 0) : Number(l.qty) || 0
   // 0 χωρίς heardQty = δεν ειπώθηκε ποσότητα (όχι "0 kg")
-  if (q === 0 && !l.heardQty?.trim()) return `${name} (δεν ακούστηκε ποσότητα)`
+  if (q === 0 && !l.heardQty?.trim()) return null
   // άγνωστο είδος: η μονάδα όπως ακούστηκε ("10 σακιά «σιμιγδάλι»")
   if (!it && l.heardQty) {
     const last = normText(l.heardQty).split(' ').pop() ?? ''
-    if (unitWord(last) || genericPack(last)) return `${l.heardQty} ${name}`
+    if (unitWord(last) || genericPack(last)) return l.heardQty
   }
-  return `${qtyText(q, it ? it.unit : null)} ${name}`
+  return qtyText(q, it ? it.unit : null)
+}
+
+function lineText(ctx: InterpretContext, l: QtyLine, abs = false): string {
+  const name = refText(ctx, l.item, 'item')
+  const q = qtyPart(ctx, l, abs)
+  return q === null ? `${name} (δεν ακούστηκε ποσότητα)` : `${q} ${name}`
+}
+
+/** Απογραφή: "Αλεύρι άλλα 5 kg" (πρόσθεση), "Αλεύρι σύνολο 40 kg" (αντικατάσταση) */
+function stockText(ctx: InterpretContext, l: QtyLine): string {
+  const q = qtyPart(ctx, l)
+  if (!l.mode || q === null) return lineText(ctx, l)
+  return `${refText(ctx, l.item, 'item')} ${l.mode === 'add' ? 'άλλα' : 'σύνολο'} ${q}`
 }
 
 /** Με τιμή μονάδας και σύνολο γραμμής ("250 kg Αλεύρι προς 0,62 € (σύνολο 155,00 €)") */
@@ -115,7 +129,7 @@ function describeInner(interp: Interpretation, ctx: InterpretContext): string {
     case 'production':
       return sentence(`Παραγωγή: ${lineText(ctx, { item: c.item, qty: c.qty })}`, ASK)
     case 'stocktake':
-      return sentence(`Απογραφή: ${list(c.lines.map((l) => lineText(ctx, l)))}`, ASK)
+      return sentence(`Απογραφή: ${list(c.lines.map((l) => stockText(ctx, l)))}`, ASK)
     case 'receipt':
       if (unheard(c.amount, NO_AMOUNT)) return sentence(`Είσπραξη από ${refText(ctx, c.partner, 'partner')}: δεν ακούστηκε ποσό`)
       return sentence(`Είσπραξη ${fmtMoney(c.amount)} από ${refText(ctx, c.partner, 'partner')}`, ASK)
@@ -169,6 +183,8 @@ function describeInner(interp: Interpretation, ctx: InterpretContext): string {
         `Τιμή για ${refText(ctx, c.partner, 'partner')}: ${refText(ctx, c.item, 'item')} ${fmtMoney(c.netPrice)} χωρίς ΦΠΑ`,
         'Να την περάσω;',
       )
+    case 'new_phrase':
+      return `Νέα φράση: όταν λες «${c.phrase || '?'}» θα καταλαβαίνω «${c.meaning || '?'}». Να τη θυμάμαι;`
     case 'close_day':
       return 'Κλείσιμο ημέρας: θα καταχωρηθούν οι ανοιχτές πωλήσεις ημέρας. Να προχωρήσω;'
     case 'close_stocktake':

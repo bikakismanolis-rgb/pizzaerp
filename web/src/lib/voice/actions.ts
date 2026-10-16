@@ -1,13 +1,17 @@
 import { supabase, errMsg } from '../supabase'
 import { createDraft, deleteDraft, postDoc, replaceLines, unpostDoc, type LineInput } from '../docs'
-import type { Doc, DocType, Item, ItemType, Partner } from '../types'
+import type { Doc, DocType, Item, ItemType, Partner, VoicePhrase } from '../types'
 import type { Command, EntityRef, TallyChannel } from './types'
-import { CHANNEL_LABEL, ITEM_TYPE_LABEL, docCode } from '../labels'
+import { phraseKey } from './normalize'
+import { CHANNEL_LABEL, ITEM_TYPE_LABEL, TALLY_NOTES, docCode } from '../labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round } from '../format'
 import { NET_MSG, isNetworkMessage, tallyMessage } from '../errors'
-import { addDays, plural, stocktakeDate, tallySteps, type RunningState, type TallyRow } from '../voiceRules'
+import {
+  addDays, localHour, phraseProblem, plural, removalNote, stockOps, stockTarget, stocktakeList, tallySteps,
+  type ChannelTotal, type PostedQty, type RunningState, type RunningStocktake, type StockOp, type TallyRow,
+} from '../voiceRules'
 
-export type { RunningState, RunningStocktake, TallyRow } from '../voiceRules'
+export type { ChannelTotal, RunningState, RunningStocktake, TallyRow } from '../voiceRules'
 
 /**
  * Εκτέλεση μιας επιβεβαιωμένης εντολής πάνω στη βάση. Καλείται ΜΟΝΟ μετά
@@ -21,12 +25,18 @@ export interface ExecEnv {
   items: Item[]
   partners: Partner[]
   refreshMaster: () => Promise<void>
+  /** μετά από νέα / αλλαγμένη δική τους φράση */
+  refreshPhrases?: () => Promise<void>
+  /** τοπική ώρα τώρα (0–23)· για τους ελέγχους */
+  hour?: number
 }
 
 export interface ExecResult {
   message: string
   undo?: () => Promise<void>
   navigateTo?: string
+  /** σύντομο κείμενο για ανάγνωση (αλλιώς «Έγινε.») */
+  spoken?: string
 }
 
 // ---------------------------------------------------------------------
@@ -39,7 +49,9 @@ export function voiceError(e: unknown): Error {
   if (code === '23505') return new Error('Υπάρχει ήδη εγγραφή με τον ίδιο κωδικό.')
   if (code === '23503') return new Error('Χρησιμοποιείται ήδη αλλού και δεν διαγράφεται.')
   if (code === '42501') return new Error('Δεν έχετε δικαίωμα για αυτή την ενέργεια.')
-  if (code === 'PGRST202' || code === '42883') return new Error('Η βάση δεν έχει την ενημέρωση για τις φωνητικές εντολές (0004_voice.sql).')
+  if (code === 'PGRST202' || code === '42883' || code === 'PGRST205' || code === '42P01' || code === 'PGRST204' || code === '42703') {
+    return new Error('Η βάση δεν έχει την ενημέρωση για τις φωνητικές εντολές (0004_voice.sql).')
+  }
   if (e instanceof Error) return isNetworkMessage(e.message) ? new Error(NET_MSG) : e
   return new Error(errMsg(e))
 }
@@ -130,21 +142,64 @@ interface DocWithLines { id: string; doc_no: number; doc_date: string; channel: 
 const TALLY_ORDER: TallyChannel[] = ['efood', 'wolt', 'box', 'phone', 'store']
 const dayLabel = (date: string, today: string) => (date === today ? '' : fmtDate(date).slice(0, 5) + ' ')
 
+/** Καταχωρημένες «Πωλήσεις ημέρας» (όχι άλλες πωλήσεις με κανάλι λιανικής, π.χ. τιμολόγιο σε πελάτη efood) */
+const postedTallies = (companyId: string, date: string) => supabase.from('doc')
+  .select('id, doc_no, doc_date, channel, doc_line(item_id, qty, gross)')
+  .eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', date)
+  .eq('status', 'posted').eq('is_auto', false).in('channel', TALLY_ORDER)
+  .eq('notes', TALLY_NOTES).is('partner_id', null)
+
+/** Ποσότητες ανά είδος μιας πώλησης / απογραφής */
+function byItem(lines: { item_id: string; qty: number }[]): Record<string, number> {
+  const m: Record<string, number> = {}
+  for (const l of lines) m[l.item_id] = round((m[l.item_id] ?? 0) + Number(l.qty), 4)
+  return m
+}
+
+/** Απογραφές σε εξέλιξη έως date, η παλιότερη πρώτη */
+async function runningStocktakes(companyId: string, date: string): Promise<RunningStocktake[]> {
+  const { data, error } = await supabase.from('doc').select('id, doc_no, doc_date, channel, doc_line(item_id, qty, gross)')
+    .eq('company_id', companyId).eq('doc_type', 'stocktake').eq('is_running', true).eq('status', 'draft')
+    .lte('doc_date', date).order('doc_date').order('doc_no')
+  if (error) fail(error)
+  return ((data ?? []) as unknown as DocWithLines[]).map((st) => {
+    const counted = byItem(st.doc_line)
+    return { id: st.id, docNo: st.doc_no, date: st.doc_date, count: Object.keys(counted).length, counted }
+  })
+}
+
+/** Υπάρχει κίνηση αποθήκης ή ανοιχτή πώληση ημέρας με ημερομηνία date; */
+async function movedOn(companyId: string, date: string): Promise<boolean> {
+  const [m, s] = await Promise.all([
+    supabase.from('stock_move').select('id').eq('company_id', companyId).eq('move_date', date).limit(1),
+    supabase.from('doc').select('id, doc_line(item_id)').eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', date)
+      .eq('is_running', true).eq('status', 'draft').eq('is_auto', false),
+  ])
+  if (m.error) fail(m.error)
+  if (s.error) fail(s.error)
+  return (m.data ?? []).length > 0 || ((s.data ?? []) as unknown as { doc_line: unknown[] }[]).some((d) => d.doc_line.length > 0)
+}
+
+/** Χρειάζεται ο έλεγχος σημερινών κινήσεων; Μόνο αν μπορεί να συνεχίσει η χθεσινή απογραφή. */
+const needMoved = (sts: { date: string }[], date: string) => !sts.some((s) => s.date === date) && sts.some((s) => s.date === addDays(date, -1))
+
 /**
  * Ανοιχτές πωλήσεις ημέρας ανά κανάλι (σημερινές και όσες έμειναν ανοιχτές
- * από προηγούμενες μέρες) + η πιο πρόσφατη απογραφή σε εξέλιξη.
+ * από προηγούμενες μέρες), τα σημερινά σύνολα ανά κανάλι (καταχωρημένες
+ * «Πωλήσεις ημέρας» + ανοιχτές: η πρώτη μέτρηση ενός είδους καταχωρεί όσες
+ * πουλήθηκαν ως τότε) + οι απογραφές σε εξέλιξη.
  */
 export async function loadRunning(companyId: string, date: string): Promise<RunningState> {
-  const [s, t] = await Promise.all([
+  const [s, p, stocktakes] = await Promise.all([
     supabase.from('doc').select('id, doc_no, doc_date, channel, doc_line(item_id, qty, gross)')
       .eq('company_id', companyId).eq('doc_type', 'sale').lte('doc_date', date)
       .eq('is_running', true).eq('status', 'draft').eq('is_auto', false),
-    supabase.from('doc').select('id, doc_no, doc_date, channel, doc_line(item_id, qty, gross)')
-      .eq('company_id', companyId).eq('doc_type', 'stocktake').eq('is_running', true).eq('status', 'draft')
-      .lte('doc_date', date).order('doc_date', { ascending: false }).limit(1),
+    postedTallies(companyId, date),
+    runningStocktakes(companyId, date),
   ])
   if (s.error) fail(s.error)
-  if (t.error) fail(t.error)
+  if (p.error) fail(p.error)
+  const sum = (d: DocWithLines, k: 'qty' | 'gross') => d.doc_line.reduce((a, l) => a + Number(l[k]), 0)
   const rows: TallyRow[] = ((s.data ?? []) as unknown as DocWithLines[])
     .filter((d) => d.channel && TALLY_ORDER.includes(d.channel as TallyChannel) && d.doc_line.length > 0)
     .map((d) => ({
@@ -152,16 +207,50 @@ export async function loadRunning(companyId: string, date: string): Promise<Runn
       date: d.doc_date,
       docId: d.id,
       docNo: d.doc_no,
-      qty: round(d.doc_line.reduce((a, l) => a + Number(l.qty), 0), 4),
-      gross: round(d.doc_line.reduce((a, l) => a + Number(l.gross), 0)),
+      qty: round(sum(d, 'qty'), 4),
+      gross: round(sum(d, 'gross')),
+      items: byItem(d.doc_line),
     }))
     .sort((a, b) => a.date.localeCompare(b.date) || TALLY_ORDER.indexOf(a.channel) - TALLY_ORDER.indexOf(b.channel))
-  const st = ((t.data ?? []) as unknown as DocWithLines[])[0]
-  return {
-    tally: rows.filter((r) => r.date === date),
-    older: rows.filter((r) => r.date < date),
-    stocktake: st ? { id: st.id, docNo: st.doc_no, date: st.doc_date, count: st.doc_line.length } : null,
+  const tally = rows.filter((r) => r.date === date)
+  // σύνολα ημέρας ανά κανάλι
+  const tot = new Map<TallyChannel, ChannelTotal>()
+  const at = (ch: TallyChannel) => tot.get(ch) ?? tot.set(ch, { channel: ch, qty: 0, gross: 0, postedQty: 0, postedItems: {} }).get(ch)!
+  for (const r of tally) { const x = at(r.channel); x.qty += r.qty; x.gross += r.gross }
+  for (const d of (p.data ?? []) as unknown as DocWithLines[]) {
+    if (!d.channel || !TALLY_ORDER.includes(d.channel as TallyChannel)) continue
+    const x = at(d.channel as TallyChannel)
+    const q = sum(d, 'qty')
+    x.qty += q; x.postedQty += q; x.gross += sum(d, 'gross')
+    for (const [id, n] of Object.entries(byItem(d.doc_line))) {
+      const cur = x.postedItems[id] ?? (x.postedItems[id] = { qty: 0, docs: [] })
+      cur.qty = round(cur.qty + n, 4)
+      if (!cur.docs.includes(d.doc_no)) cur.docs.push(d.doc_no)
+    }
   }
+  const totals = [...tot.values()]
+    .map((x) => ({ ...x, qty: round(x.qty, 4), gross: round(x.gross), postedQty: round(x.postedQty, 4) }))
+    .filter((x) => x.qty > 0)
+    .sort((a, b) => TALLY_ORDER.indexOf(a.channel) - TALLY_ORDER.indexOf(b.channel))
+  // συνεχίζει η χθεσινή απογραφή; (μετά τα μεσάνυχτα, αν δεν έχει γραφτεί τίποτα σήμερα)
+  const movedToday = !needMoved(stocktakes, date) ? null : tally.length > 0 ? true : await movedOn(companyId, date)
+  return { tally, older: rows.filter((r) => r.date < date), totals, stocktakes, movedToday }
+}
+
+/** Καταχωρημένες «Πωλήσεις ημέρας» (date, κανάλι) ανά είδος */
+async function postedTallyItems(env: ExecEnv, channel: TallyChannel, date: string): Promise<Map<string, PostedQty>> {
+  const m = new Map<string, PostedQty>()
+  const { data, error } = await postedTallies(env.companyId, date).eq('channel', channel)
+  if (error) return m
+  for (const d of (data ?? []) as unknown as DocWithLines[]) {
+    for (const [id, n] of Object.entries(byItem(d.doc_line))) {
+      const cur = m.get(id) ?? { qty: 0, docs: [] }
+      cur.qty = round(cur.qty + n, 4)
+      if (!cur.docs.includes(d.doc_no)) cur.docs.push(d.doc_no)
+      m.set(id, cur)
+    }
+  }
+  return m
 }
 
 export interface SalePrice { price: number; partner: boolean }
@@ -187,8 +276,9 @@ async function tallyAdd(env: ExecEnv, channel: TallyChannel, date: string, itemI
   return rpc<string | null>('tally_add', { p_company: env.companyId, p_date: date, p_channel: channel, p_item: itemId, p_delta: delta })
 }
 
-async function stocktakeCount(env: ExecEnv, date: string, itemId: string, qty: number | null): Promise<string | null> {
-  return rpc<string | null>('stocktake_count', { p_company: env.companyId, p_date: date, p_item: itemId, p_qty: qty, p_add: false })
+/** add: πρόσθεση στη μέτρηση που υπάρχει (άλλος χώρος)· qty null: βγαίνει το είδος από την απογραφή */
+async function stocktakeCount(env: ExecEnv, date: string, itemId: string, qty: number | null, add = false): Promise<string | null> {
+  return rpc<string | null>('stocktake_count', { p_company: env.companyId, p_date: date, p_item: itemId, p_qty: qty, p_add: add })
 }
 
 /** Αναίρεση σε ανοιχτό πρόχειρο: μόνο αν δεν έχει καταχωρηθεί στο μεταξύ */
@@ -329,6 +419,103 @@ export async function addAlias(table: 'item' | 'partner', id: string, phrase: st
   return true
 }
 
+/** Βγάζει ένα "άλλο όνομα" (χωρίς διάκριση τόνων / πεζών)· false αν δεν υπήρχε */
+export async function removeAlias(table: 'item' | 'partner', id: string, alias: string): Promise<boolean> {
+  const { data, error } = await supabase.from(table).select('aliases').eq('id', id).single()
+  if (error) fail(error)
+  const cur = (data as { aliases: string[] | null }).aliases ?? []
+  const next = cur.filter((a) => normName(a) !== normName(alias))
+  if (next.length === cur.length) return false
+  const { error: eu } = await supabase.from(table).update({ aliases: next }).eq('id', id)
+  if (eu) fail(eu)
+  return true
+}
+
+// ---------------------------------------------------------------------
+// Δικές τους φράσεις ("όταν λέω Χ εννοώ Υ")
+// ---------------------------------------------------------------------
+const cleanText = (s: string) => s.trim().replace(/\s+/g, ' ')
+const PHRASE_COLS = 'id, company_id, phrase, meaning'
+
+export interface PhraseSaved {
+  row: VoicePhrase
+  /** η φράση όπως ήταν πριν (αλλαγή υπάρχουσας), null = νέα */
+  old: { phrase: string; meaning: string } | null
+}
+
+async function listPhrases(companyId: string): Promise<VoicePhrase[]> {
+  const { data, error } = await supabase.from('voice_phrase').select(PHRASE_COLS).eq('company_id', companyId)
+  if (error) fail(error)
+  return (data ?? []) as VoicePhrase[]
+}
+
+async function updatePhrase(id: string, phrase: string, meaning: string): Promise<VoicePhrase> {
+  const { data, error } = await supabase.from('voice_phrase').update({ phrase, meaning }).eq('id', id).select(PHRASE_COLS).single()
+  if (error) {
+    if (error.code === '23505') throw new Error(`Υπάρχει ήδη η φράση «${phrase}».`)
+    fail(error)
+  }
+  return data as VoicePhrase
+}
+
+/**
+ * Νέα φράση ή αλλαγή υπάρχουσας (id). Ίδια φράση με άλλη γραφή (τόνοι,
+ * κεφαλαία) = η ίδια: αλλάζει η σημασία της αντί να γίνει δεύτερη.
+ */
+export async function savePhrase(companyId: string, phrase: string, meaning: string, id?: string): Promise<PhraseSaved> {
+  const p = cleanText(phrase)
+  const m = cleanText(meaning)
+  const why = phraseProblem(p, m)
+  if (why) throw new Error(why)
+  const rows = await listPhrases(companyId)
+  const key = phraseKey(p)
+  const same = rows.find((r) => r.id !== id && phraseKey(r.phrase) === key)
+  if (id) {
+    if (same) throw new Error(`Υπάρχει ήδη η φράση «${same.phrase}» (εννοεί «${same.meaning}»).`)
+    const cur = rows.find((r) => r.id === id)
+    return { row: await updatePhrase(id, p, m), old: cur ? { phrase: cur.phrase, meaning: cur.meaning } : null }
+  }
+  if (same) return { row: await updatePhrase(same.id, same.phrase, m), old: { phrase: same.phrase, meaning: same.meaning } }
+  const { data, error } = await supabase.from('voice_phrase').insert({ company_id: companyId, phrase: p, meaning: m }).select(PHRASE_COLS).single()
+  if (error) {
+    // ταυτόχρονα από άλλη συσκευή: αλλαγή της σημασίας της
+    if (error.code === '23505') {
+      const again = (await listPhrases(companyId)).find((r) => phraseKey(r.phrase) === key)
+      if (again) return { row: await updatePhrase(again.id, again.phrase, m), old: { phrase: again.phrase, meaning: again.meaning } }
+    }
+    fail(error)
+  }
+  return { row: data as VoicePhrase, old: null }
+}
+
+export async function deletePhrase(id: string): Promise<void> {
+  const { error } = await supabase.from('voice_phrase').delete().eq('id', id)
+  if (error) fail(error)
+}
+
+/** Αναίρεση αποθήκευσης: σβήσιμο της νέας ή επαναφορά της παλιάς σημασίας */
+export async function undoPhrase(saved: PhraseSaved): Promise<void> {
+  if (saved.old) await updatePhrase(saved.row.id, saved.old.phrase, saved.old.meaning)
+  else await deletePhrase(saved.row.id)
+}
+
+async function newPhrase(cmd: Cmd<'new_phrase'>, env: ExecEnv): Promise<ExecResult> {
+  const saved = await savePhrase(env.companyId, cmd.phrase, cmd.meaning)
+  await env.refreshPhrases?.()
+  const { row, old } = saved
+  if (old && old.meaning === row.meaning) return { message: `Το ξέρω ήδη: όταν λες «${row.phrase}» καταλαβαίνω «${row.meaning}».` }
+  return {
+    message: old
+      ? `Άλλαξε η φράση «${row.phrase}»: πριν καταλάβαινα «${old.meaning}», τώρα «${row.meaning}».`
+      : `Έμαθα: όταν λες «${row.phrase}» θα καταλαβαίνω «${row.meaning}». Όλες οι φράσεις: «Λέξεις & φράσεις».`,
+    spoken: 'Έγινε, το έμαθα.',
+    undo: async () => {
+      await undoPhrase(saved)
+      await env.refreshPhrases?.()
+    },
+  }
+}
+
 // ---------------------------------------------------------------------
 // Εκτέλεση
 // ---------------------------------------------------------------------
@@ -362,7 +549,8 @@ export async function execute(cmd: Command, env: ExecEnv): Promise<ExecResult> {
     case 'query_stock': return queryStock(cmd, env)
     case 'query_balance': return queryBalance(cmd, env)
     case 'query_today': return { message: await todaySummary(env) }
-    case 'help': return { message: 'Πες π.χ. «efood δύο μαργαρίτες», «αγόρασα από τον μύλο δέκα σακιά αλεύρι», «μέτρησα μοτσαρέλα έξι κιλά».' }
+    case 'new_phrase': return newPhrase(cmd, env)
+    case 'help': return { message: 'Πες π.χ. «efood δύο μαργαρίτες», «αγόρασα από τον μύλο δέκα σακιά αλεύρι», «μέτρησα μοτσαρέλα έξι κιλά», «όταν λέω οικογενειακή εννοώ μεγάλη μαργαρίτα».' }
     case 'undo': throw new Error('Η αναίρεση γίνεται από τη λίστα ενεργειών.')
     case 'unknown': throw new Error('Δεν κατάλαβα την εντολή.')
   }
@@ -400,9 +588,12 @@ async function saleTally(cmd: Cmd<'sale_tally'>, env: ExecEnv): Promise<ExecResu
   const current = lines.some((l) => l.qty < 0) ? await tallyQtys(env, cmd.channel, date) : new Map<string, number>()
   const steps = tallySteps(lines, current)
   const todo = steps.filter((s) => s.delta !== 0)
-  if (todo.length === 0) {
-    throw new Error(`Δεν υπάρχει ${steps.map((s) => `«${itemOf(env, s.id).name}»`).join(', ')} στο ${ch} σήμερα για αφαίρεση.`)
-  }
+  // αφαιρέσεις που δεν γίνονται (όλες): οι καταχωρημένες δεν αλλάζουν από εδώ
+  const short = steps.filter((s) => s.asked < 0 && s.delta !== s.asked)
+  const posted = short.length ? await postedTallyItems(env, cmd.channel, date) : new Map<string, PostedQty>()
+  const shortNote = (s: (typeof steps)[number]) =>
+    removalNote(itemOf(env, s.id).name, cmd.channel, s.asked, -s.delta, posted.get(s.id)) ?? ''
+  if (todo.length === 0) throw new Error(short.map(shortNote).filter(Boolean).join(' ') || 'Δεν υπάρχει κάτι για αφαίρεση.')
   const done: typeof todo = []
   let docId: string | null = null
   try {
@@ -418,10 +609,7 @@ async function saleTally(cmd: Cmd<'sale_tally'>, env: ExecEnv): Promise<ExecResu
   const list = (xs: typeof todo) => xs.map((s) => qtyText(itemOf(env, s.id), Math.abs(s.delta))).join(', ')
   const added = todo.filter((s) => s.delta > 0)
   const removed = todo.filter((s) => s.delta < 0)
-  const notes = steps.filter((s) => s.asked < 0 && s.delta !== s.asked).map((s) => {
-    const name = itemOf(env, s.id).name
-    return s.delta === 0 ? `«${name}»: δεν υπήρχε στο ${ch}.` : `«${name}»: υπήρχαν μόνο ${fmtQty(-s.delta)}.`
-  })
+  const notes = short.map(shortNote).filter(Boolean)
   const parts = [
     added.length ? `Μπήκαν στο ${ch}: ${list(added)}.` : '',
     removed.length ? `Αφαιρέθηκαν από ${ch}: ${list(removed)}.` : '',
@@ -506,50 +694,128 @@ async function production(cmd: Cmd<'production'>, env: ExecEnv): Promise<ExecRes
   }
 }
 
+/**
+ * Η απογραφή σε εξέλιξη όπου γράφονται τώρα οι μετρήσεις (σημερινή, ή η
+ * χθεσινή σε μέτρημα που πέρασε τα μεσάνυχτα: βλ. stockTarget) και όσες
+ * παλιότερες έμειναν ανοιχτές.
+ */
+async function stocktakeTarget(env: ExecEnv) {
+  const open = await runningStocktakes(env.companyId, env.today)
+  const hour = env.hour ?? localHour()
+  const moved = needMoved(open, env.today) ? await movedOn(env.companyId, env.today) : null
+  return stockTarget(open, env.today, { hour, movedToday: moved })
+}
+
+/** Μετρήσεις ανά είδος μιας απογραφής (όπως είναι τώρα στη βάση) */
+async function countsOf(docId: string | null): Promise<Map<string, number>> {
+  const m = new Map<string, number>()
+  if (!docId) return m
+  const { data, error } = await supabase.from('doc_line').select('item_id, qty').eq('doc_id', docId)
+  if (error) fail(error)
+  for (const l of (data ?? []) as { item_id: string; qty: number }[]) m.set(l.item_id, round((m.get(l.item_id) ?? 0) + Number(l.qty), 4))
+  return m
+}
+
+type RunningSale = { id: string; doc_no: number; doc_date: string; channel: TallyChannel | null }
+
+/** Ανοιχτές πωλήσεις ημέρας έως date (για να πούμε ποιες καταχώρησε η πρώτη μέτρηση) */
+async function runningSales(env: ExecEnv, date: string): Promise<RunningSale[]> {
+  const { data, error } = await supabase.from('doc').select('id, doc_no, doc_date, channel')
+    .eq('company_id', env.companyId).eq('doc_type', 'sale').eq('is_running', true).eq('status', 'draft')
+    .eq('is_auto', false).lte('doc_date', date)
+  if (error) return []
+  return (data ?? []) as RunningSale[]
+}
+
+/** Από αυτές, όσες έχουν πια καταχωρηθεί */
+async function nowPosted(sales: RunningSale[]): Promise<RunningSale[]> {
+  if (!sales.length) return []
+  const { data, error } = await supabase.from('doc').select('id, status').in('id', sales.map((s) => s.id))
+  if (error) return []
+  const posted = new Set(((data ?? []) as { id: string; status: string }[]).filter((d) => d.status === 'posted').map((d) => d.id))
+  return sales.filter((s) => posted.has(s.id))
+}
+
+const saleLabel = (s: { doc_date: string; channel: TallyChannel | null }, today: string) =>
+  dayLabel(s.doc_date, today) + (s.channel ? CHANNEL_LABEL[s.channel] : '—')
+
+/** "10 kg" / "3" (τεμάχια χωρίς μονάδα) */
+const amount = (it: Item, q: number) => (it.unit === 'τεμ' ? fmtQty(q) : `${fmtQty(q)} ${it.unit}`)
+
+/**
+ * Μετρήσεις στην ανοιχτή απογραφή. Κάθε γραμμή: πρόσθεση («άλλα 5»: άλλος
+ * χώρος) ή αντικατάσταση («σύνολο 40»)· χωρίς λέξη = πρόσθεση (σε είδος
+ * χωρίς μέτρηση είναι απλή μέτρηση). Η πρώτη μέτρηση ενός είδους κρατά τη
+ * στιγμή: ό,τι πουληθεί ή φτιαχτεί μετά μετράει για μετά.
+ */
 async function stocktake(cmd: Cmd<'stocktake'>, env: ExecEnv): Promise<ExecResult> {
-  const lines = cmd.lines.map((l) => ({ id: need(l.item, 'είδος'), qty: round(l.qty, 4) }))
+  const lines = cmd.lines.map((l) => ({ id: need(l.item, 'είδος'), qty: round(l.qty, 4), mode: l.mode }))
   if (lines.length === 0) throw new Error('Δεν υπάρχουν μετρήσεις.')
   for (const l of lines) if (!(Number.isFinite(l.qty) && l.qty >= 0)) throw new Error(`Λάθος μέτρηση για «${itemOf(env, l.id).name}».`)
-  // τελευταία μέτρηση μετράει (ίδιο είδος δύο φορές = διόρθωση)
-  const last = new Map(lines.map((l) => [l.id, l.qty]))
-  // η ανοιχτή απογραφή (σημερινή ή χθεσινή, αν το μέτρημα πέρασε τα μεσάνυχτα)
-  // και οι προηγούμενες μετρήσεις της, για αναίρεση
-  const { data: od, error: oe } = await supabase.from('doc').select('id, doc_date, doc_line(item_id, qty)')
-    .eq('company_id', env.companyId).eq('doc_type', 'stocktake').eq('is_running', true).eq('status', 'draft')
-    .lte('doc_date', env.today).order('doc_date', { ascending: false }).limit(1)
-  if (oe) fail(oe)
-  const open = ((od ?? []) as unknown as { id: string; doc_date: string; doc_line: { item_id: string; qty: number }[] }[])[0] ?? null
-  const date = stocktakeDate(open ? { date: open.doc_date } : null, env.today)
-  const prev = new Map<string, number>()
-  if (open && open.doc_date === date) for (const l of open.doc_line) prev.set(l.item_id, Number(l.qty))
+  const ops = stockOps(lines)
+  // η απογραφή όπου μπαίνουν (σημερινή, ή χθεσινή μόνο σε μέτρημα που πέρασε
+  // τα μεσάνυχτα) και οι μετρήσεις της πριν από αυτή τη φράση (για το μήνυμα
+  // και την αναίρεση)
+  const target = await stocktakeTarget(env)
+  const date = target.date
+  const prev = new Map<string, number>(Object.entries(target.doc?.counted ?? {}))
+  // πρώτη μέτρηση είδους: ο server καταχωρεί πρώτα τις ανοιχτές πωλήσεις ημέρας που το κινούν
+  const salesBefore = ops.some((o) => !prev.has(o.id)) ? await runningSales(env, date) : []
 
-  const done: string[] = []
+  const done: StockOp[] = []
   let docId: string | null = null
   try {
-    for (const [id, qty] of last) {
-      docId = (await stocktakeCount(env, date, id, qty)) ?? docId
-      done.push(id)
+    for (const op of ops) {
+      docId = (await stocktakeCount(env, date, op.id, op.qty, op.add)) ?? docId
+      done.push(op)
     }
   } catch (e) {
-    for (const id of done) await stocktakeCount(env, date, id, prev.get(id) ?? null).catch(() => { /* ignore */ })
+    // επαναφορά όσων πρόλαβαν να γίνουν
+    for (const op of done.reverse()) await stocktakeCount(env, date, op.id, prev.get(op.id) ?? null).catch(() => { /* ignore */ })
     fail(e)
   }
-  let count = 0
-  if (docId) {
-    const { count: c } = await supabase.from('doc_line').select('id', { count: 'exact', head: true }).eq('doc_id', docId)
-    count = c ?? 0
-  }
-  const list = [...last].map(([id, q]) => qtyText(itemOf(env, id), q)).join(', ')
-  const when = date !== env.today ? ` (της ${fmtDate(date)})` : ''
+  const after = await countsOf(docId).catch(() => new Map<string, number>())
+  const postedSales = await nowPosted(salesBefore)
+
+  const parts = ops.map((op) => {
+    const it = itemOf(env, op.id)
+    const was = prev.get(op.id)
+    const now = after.get(op.id) ?? (op.add ? round((was ?? 0) + op.qty, 4) : op.qty)
+    if (was === undefined) return qtyText(it, now)
+    if (op.add) return `${it.name} ${fmtQty(was)} + ${fmtQty(op.qty)} = ${amount(it, now)}`
+    return `${it.name} ${amount(it, now)} (αντί για ${fmtQty(was)})`
+  })
+  const totals = ops.filter((op) => prev.has(op.id) && after.has(op.id))
+    .map((op) => { const it = itemOf(env, op.id); return `${it.name} ${amount(it, after.get(op.id)!)}` })
+  const count = after.size
+  const when = date !== env.today ? ` (της ${fmtDate(date)}: το μέτρημα συνεχίζει μετά τα μεσάνυχτα)` : ''
+  const sold = postedSales.length
+    ? ` Οι πωλήσεις ημέρας ως τώρα (${postedSales.map((s) => saleLabel(s, env.today)).join(', ')}) καταχωρήθηκαν: μετράνε πριν από τη μέτρηση.`
+    : ''
+  // ξεχασμένη ανοιχτή απογραφή παλιότερης μέρας: δεν συνεχίζει, κλείνει μαζί με αυτή
+  const stale = target.stale.length
+    ? ` Είναι ανοιχτή και η απογραφή ${stocktakeList(target.stale)}: το «τέλος απογραφής» καταχωρεί και αυτή.`
+    : ''
   const reverted = new Set<string>()
   return {
-    message: `Απογραφή σε εξέλιξη${when}: ${list}. Μετρημένα μέχρι τώρα: ${count} ${plural(count, 'είδος', 'είδη')}. Στο τέλος πες «τέλος απογραφής».`,
+    message: `Απογραφή σε εξέλιξη${when}: ${parts.join(', ')}. Μετρημένα μέχρι τώρα: ${count} ${plural(count, 'είδος', 'είδη')}.${sold}${stale} Στο τέλος πες «τέλος απογραφής».`,
+    spoken: totals.length ? `Έγινε. Σύνολο: ${totals.join(', ')}.` : 'Έγινε.',
     undo: async () => {
       await assertStillOpen(docId, 'Η απογραφή')
-      for (const id of last.keys()) {
-        if (reverted.has(id)) continue
-        await stocktakeCount(env, date, id, prev.get(id) ?? null)
-        reverted.add(id)
+      const cur = await countsOf(docId)
+      for (const op of [...ops].reverse()) {
+        if (reverted.has(op.id)) continue
+        const was = prev.get(op.id) ?? null
+        const left = after.get(op.id)
+        const now = cur.get(op.id)
+        let target: number | null = was
+        // στο μεταξύ πρόσθεσε κι άλλη συσκευή: βγαίνει μόνο ό,τι προσθέσαμε εμείς
+        if (op.add && left !== undefined && now !== undefined && now !== left) {
+          const back = round(now - (left - (was ?? 0)), 4)
+          target = was === null && back <= 0 ? null : Math.max(0, back)
+        }
+        await stocktakeCount(env, date, op.id, target)
+        reverted.add(op.id)
       }
     },
   }
@@ -734,33 +1000,46 @@ async function closeDay(env: ExecEnv): Promise<ExecResult> {
   }
 }
 
-interface CloseRow { doc_id: string; doc_no: number; doc_date: string; channel: TallyChannel | null; ok: boolean; message: string }
-
 /**
- * Καταχωρεί την απογραφή σε εξέλιξη και ανοίγει τη σελίδα της (διαφορές).
- * Η απογραφή «κλειδώνει» τις μέρες έως την ημερομηνία της: πρώτα κλείνουν
- * οι ανοιχτές πωλήσεις ημέρας έως τότε, αλλιώς δεν θα καταχωρούνταν ποτέ.
+ * Καταχωρεί τις απογραφές σε εξέλιξη (την παλιότερη πρώτη: και ξεχασμένη
+ * από προηγούμενη μέρα) και ανοίγει τη σελίδα της τελευταίας (διαφορές).
+ * Κάθε είδος μετράει τη στιγμή που μετρήθηκε: οι πωλήσεις της ημέρας μετά
+ * τη μέτρηση μένουν ανοιχτές και μετράνε για μετά. Ό,τι ήταν πριν (π.χ.
+ * ανοιχτές πωλήσεις προηγούμενης μέρας) το καταχωρεί πρώτα ο server. Αν
+ * μία αποτύχει, οι επόμενες μένουν ανοιχτές (η σειρά μετρήσεων μετράει).
  */
 async function closeStocktake(env: ExecEnv): Promise<ExecResult> {
-  const { stocktake: st } = await loadRunning(env.companyId, env.today)
-  if (!st) throw new Error('Δεν υπάρχει απογραφή σε εξέλιξη.')
-  const rows = (await rpc<CloseRow[] | null>('close_running', { p_company: env.companyId, p_before: addDays(st.date, 1) })) ?? []
-  const label = (r: CloseRow) => dayLabel(r.doc_date, env.today) + (r.channel ? CHANNEL_LABEL[r.channel] : '—')
-  const closed = rows.filter((r) => r.ok)
-  const failed = rows.filter((r) => !r.ok)
-  if (failed.length) {
-    if (closed.length) await env.refreshMaster()
-    throw new Error(
-      `Η απογραφή δεν καταχωρήθηκε: πρώτα πρέπει να κλείσουν οι πωλήσεις ημέρας ${failed.map(label).join(', ')} (${failed[0].message}).` +
-      (closed.length ? ` Έκλεισαν: ${closed.map(label).join(', ')}.` : ''),
-    )
+  const before = await loadRunning(env.companyId, env.today)
+  const sts = before.stocktakes
+  if (!sts.length) throw new Error('Δεν υπάρχει απογραφή σε εξέλιξη.')
+  const done: RunningStocktake[] = []
+  let failed: { st: RunningStocktake; msg: string } | null = null
+  for (const st of sts) {
+    try { await postDoc(st.id); done.push(st) } catch (e) { failed = { st, msg: voiceError(e).message }; break }
   }
-  try { await postDoc(st.id) } catch (e) { fail(e) }
+  const code = (st: RunningStocktake) => docCode('stocktake', st.docNo)
+  if (!done.length) {
+    if (sts.length === 1) throw new Error(failed!.msg)
+    throw new Error(`Δεν καταχωρήθηκε η απογραφή ${code(failed!.st)} (${fmtDate(failed!.st.date)}): ${failed!.msg}`)
+  }
+  // ποιες ανοιχτές πωλήσεις καταχωρήθηκαν μαζί τους
+  let closed: TallyRow[] = []
+  try {
+    const after = await loadRunning(env.companyId, env.today)
+    const still = new Set([...after.older, ...after.tally].map((t) => t.docId))
+    closed = [...before.older, ...before.tally].filter((t) => !still.has(t.docId))
+  } catch { /* μόνο για το μήνυμα */ }
   await env.refreshMaster()
+  const label = (t: TallyRow) => dayLabel(t.date, env.today) + CHANNEL_LABEL[t.channel]
+  const what = (st: RunningStocktake) => `${code(st)} (${st.count} ${plural(st.count, 'είδος', 'είδη')}, ${fmtDate(st.date)})`
+  const rest = sts.slice(done.length + 1)
   return {
-    message: `Καταχωρήθηκε η απογραφή ${docCode('stocktake', st.docNo)} (${st.count} ${plural(st.count, 'είδος', 'είδη')}, ${fmtDate(st.date)}).` +
-      (closed.length ? ` Πρώτα έκλεισαν οι πωλήσεις ημέρας: ${closed.map(label).join(', ')}.` : '') + ' Δεν αναιρείται από εδώ.',
-    navigateTo: `/docs/stocktake/${st.id}`,
+    message: `${done.length > 1 ? 'Καταχωρήθηκαν οι απογραφές' : 'Καταχωρήθηκε η απογραφή'} ${done.map(what).join(', ')}.` +
+      (closed.length ? ` Καταχωρήθηκαν και οι ανοιχτές πωλήσεις ${closed.map(label).join(', ')}: ήταν πριν από τη μέτρηση.` : '') +
+      (failed ? ` Δεν καταχωρήθηκε η ${code(failed.st)} (${fmtDate(failed.st.date)}): ${failed.msg}` +
+        (rest.length ? ` Έμειναν ανοιχτές: ${rest.map(code).join(', ')}.` : '') : '') +
+      ' Ό,τι πουλήθηκε ή φτιάχτηκε μετά από κάθε μέτρηση μετράει για μετά. Δεν αναιρείται από εδώ.',
+    navigateTo: `/docs/stocktake/${done[done.length - 1].id}`,
   }
 }
 
@@ -793,10 +1072,12 @@ async function queryBalance(cmd: Cmd<'query_balance'>, env: ExecEnv): Promise<Ex
 
 /** Σύνοψη πωλήσεων ημέρας (ανοιχτές + καταχωρημένες) ανά κανάλι και είδος */
 export async function todaySummary(env: Pick<ExecEnv, 'companyId' | 'today' | 'items'>): Promise<string> {
-  const { data, error } = await supabase.from('doc').select('id, channel, status, doc_line(item_id, qty, gross)')
+  const { data, error } = await supabase.from('doc').select('id, channel, status, is_running, doc_line(item_id, qty, gross)')
     .eq('company_id', env.companyId).eq('doc_type', 'sale').eq('doc_date', env.today).eq('is_auto', false)
   if (error) fail(error)
-  const docs = (data ?? []) as unknown as { channel: string | null; doc_line: { item_id: string; qty: number; gross: number }[] }[]
+  // καταχωρημένες + ο μετρητής ημέρας (όχι πρόχειρα που δεν πέρασαν ακόμα)
+  const docs = ((data ?? []) as unknown as { channel: string | null; status: string; is_running: boolean; doc_line: { item_id: string; qty: number; gross: number }[] }[])
+    .filter((d) => d.status === 'posted' || d.is_running)
   const byCh = new Map<string, number>()
   const byItem = new Map<string, number>()
   let qty = 0, gross = 0

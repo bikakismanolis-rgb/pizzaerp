@@ -3,19 +3,22 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useCompanyId } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import type { Item, ItemType } from '../lib/types'
-import type { Command, EntityRef, InterpretContext, Interpretation, Interpreter, QtyLine, TallyChannel } from '../lib/voice/types'
-import { localInterpreter, qtyForItem, warmUp } from '../lib/voice/interpret'
+import type { Command, EntityRef, InterpretContext, Interpretation, Interpreter, QtyLine, TallyChannel, VoicePhraseRule } from '../lib/voice/types'
+import { interpret, localInterpreter, qtyForItem, warmUp } from '../lib/voice/interpret'
 import { describe } from '../lib/voice/describe'
+import { EXAMPLES } from '../lib/voice/examples'
+import { phraseKey } from '../lib/voice/normalize'
 import { cancelSpeech, speak, useSpeechRecognition } from '../lib/voice/speech'
 import {
-  addAlias, createItem, createPartner, execute, loadRunning, resolveSalePrices, undoCreate, voiceError,
+  addAlias, createItem, createPartner, execute, loadRunning, resolveSalePrices, savePhrase, undoCreate, undoPhrase, voiceError,
   type ExecEnv, type RunningState, type SalePrice,
 } from '../lib/voice/actions'
 import {
-  answerTo, cardProblem, hasLines, plural, refSlots, setRefAt, shiftFlags, stocktakeDate, suggestName, visibleIssues,
-  type RefSlot, type Solved, type TallyRow,
+  answerTo, beforeQuestion, cardProblem, countedFor, hasLines, localHour, phrasesMatchPlural, plural, pluralOffer, refSlots, removalNotes,
+  setRefAt, shiftFlags, staleCount, stockLineViews, stockResultText, stockTotalsText, stocktakeList, suggestName, targetOf,
+  visibleIssues, type RefSlot, type Solved, type StockLineView, type TallyRow,
 } from '../lib/voiceRules'
-import { CHANNEL_LABEL, ITEM_TYPE_LABEL, TALLY_CHANNELS, UNITS, VAT_RATES, docCode } from '../lib/labels'
+import { CHANNEL_LABEL, COUNT_MOMENT, ITEM_TYPE_LABEL, TALLY_CHANNELS, UNITS, VAT_RATES, docCode } from '../lib/labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round, today } from '../lib/format'
 import { MicIcon, useToast } from '../components/ui'
 import { ItemPicker, PartnerPicker } from '../components/Pickers'
@@ -66,6 +69,14 @@ function partnerRoleFor(cmd: Command): 'customer' | 'supplier' | 'any' {
 
 const isQuery = (c: Command) => c.kind === 'query_stock' || c.kind === 'query_balance' || c.kind === 'query_today'
 
+/** Πώς πιάνονται οι δικές τους φράσεις (ο πληθυντικός θέλει δική του, αν δεν τον πιάνει ο interpreter) */
+const PHRASE_HINT = phrasesMatchPlural()
+  ? 'Πιάνει ολόκληρες λέξεις και τον πληθυντικό τους, με ή χωρίς τόνους και κεφαλαία.'
+  : 'Πιάνει ολόκληρες λέξεις όπως τις γράφεις, με ή χωρίς τόνους και κεφαλαία· ο πληθυντικός («οικογενειακές») μαθαίνεται χωριστά.'
+
+/** «κι άλλα 2 κιλά» χωρίς είδος συνεχίζει την τελευταία μέτρηση ως τόσο μετά */
+const COUNT_CONTINUE_MS = 2 * 60 * 60 * 1000
+
 // ---------------------------------------------------------------------
 // Κατάσταση οθόνης
 // ---------------------------------------------------------------------
@@ -82,6 +93,8 @@ interface Pending {
   remember: Record<string, boolean>
   /** πεδία που έγραψε ο χρήστης ('lines.0.qty', 'netPrice', ...) */
   edited: Record<string, boolean>
+  /** νέα φράση: να μάθει και τον πληθυντικό («οικογενειακές»), όταν προτείνεται */
+  plural: boolean
 }
 
 interface LogEntry {
@@ -97,24 +110,23 @@ interface LogEntry {
 type Tone = 'ok' | 'info' | 'warn' | 'err'
 interface Answer { text: string; tone: Tone }
 
-const EXAMPLES: { title: string; items: string[] }[] = [
-  { title: 'Πωλήσεις', items: ['efood τρεις μαργαρίτες και δύο σπέσιαλ', 'τηλέφωνο μία πεπερόνι', 'βγάλε μία μαργαρίτα από το efood', 'πούλησα στο ξενοδοχείο Αστέρια εξήντα σπέσιαλ κατεψυγμένες'] },
-  { title: 'Αγορές', items: ['πήρα από τον μύλο δέκα σακιά αλεύρι 0,62 το κιλό', 'τιμολόγιο 1234 από το τυροκομείο μοτσαρέλα 20 κιλά 7 ευρώ το κιλό'] },
-  { title: 'Παραγωγή', items: ['έφτιαξα ογδόντα ζυμάρια'] },
-  { title: 'Απογραφή', items: ['μέτρησα μοτσαρέλα έξι κιλά και αλεύρι σαράντα επτά κιλά', 'τέλος απογραφής'] },
-  { title: 'Χρήματα', items: ['το ξενοδοχείο Αστέρια πλήρωσε 300 ευρώ', 'πλήρωσα τον μύλο 500 ευρώ'] },
-  { title: 'Νέα είδη & πελάτες', items: ['νέα πρώτη ύλη ρίγανη σε γραμμάρια', 'νέα πίτσα καρμπονάρα 10 ευρώ', 'νέος πελάτης ξενοδοχείο Αστέρια τηλέφωνο 2810 123 456'] },
-  { title: 'Συνταγές & τιμές', items: ['η μαργαρίτα έχει ένα ζυμάρι, ογδόντα γραμμάρια σάλτσα και εκατόν είκοσι γραμμάρια μοτσαρέλα', 'η μαργαρίτα κάνει οκτώ ευρώ', 'το ξενοδοχείο Αστέρια παίρνει τη σπέσιαλ τέσσερα και είκοσι'] },
-  { title: 'Ερωτήσεις', items: ['πόση μοτσαρέλα έχουμε', 'πόσα μας χρωστάει το ξενοδοχείο Αστέρια', 'τι πουλήσαμε σήμερα'] },
-  { title: 'Κλείσιμο & αναίρεση', items: ['κλείσε τη μέρα', 'ακύρωσε το τελευταίο'] },
-]
+/**
+ * Απογραφή: τι θα γίνει σε κάθε γραμμή με τις μετρήσεις που υπάρχουν, και η
+ * εντολή όπως θα την πει η κάρτα (χωρίς λέξη σε είδος με μέτρηση = «άλλα»).
+ */
+function stockView(cmd: Command, counted: Record<string, number>): { views: StockLineView[]; shown: Command } | null {
+  if (cmd.kind !== 'stocktake') return null
+  const views = stockLineViews(cmd.lines.map((l) => ({ id: l.item.id, qty: l.qty, mode: l.mode })), counted)
+  const lines = cmd.lines.map((l, i) => (views[i].mode && !l.mode ? { ...l, mode: views[i].mode! } : l))
+  return { views, shown: { ...cmd, lines } }
+}
 
 // ---------------------------------------------------------------------
 // Σελίδα
 // ---------------------------------------------------------------------
 export function Voice() {
   const companyId = useCompanyId()
-  const { items, partners, itemById, partnerById, refresh, ready, loading: masterLoading } = useMaster()
+  const { items, partners, phrases, itemById, partnerById, refresh, refreshPhrases, ready, loading: masterLoading } = useMaster()
   const toast = useToast()
   const nav = useNavigate()
   const location = useLocation()
@@ -132,7 +144,9 @@ export function Voice() {
   const [thinking, setThinking] = useState(false)
   const [busy, setBusy] = useState(false)
   const [log, setLog] = useState<LogEntry[]>([])
-  const [running, setRunning] = useState<RunningState | null>(null)
+  const [running, setRunningState] = useState<RunningState | null>(null)
+  const runningRef = useRef<RunningState | null>(null)
+  const setRunning = (r: RunningState) => { runningRef.current = r; setRunningState(r) }
   const [showHelp, setShowHelp] = useState(false)
   // τιμές χονδρικής (πελάτη ή γενική) για γραμμές χωρίς ειπωμένη τιμή: "πελάτης|είδος"
   const [salePrices, setSalePrices] = useState<Map<string, SalePrice>>(new Map())
@@ -147,13 +161,15 @@ export function Voice() {
   // φράση που ήρθε πριν φορτώσει ο κατάλογος
   const queuedRef = useRef<string | null>(null)
   const logSeq = useRef(0)
+  // το είδος της τελευταίας μέτρησης (για «κι άλλα 2 κιλά» χωρίς είδος)
+  const lastCountRef = useRef<{ itemId: string; at: number } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const helpRef = useRef<HTMLDivElement>(null)
 
   const newPending = (interp: Interpretation): Pending => ({
     id: ++pendSeq.current,
     lineKeys: hasLines(interp.command) ? interp.command.lines.map((_, i) => i) : [],
-    interp, cmd: interp.command, picked: {}, remember: {}, edited: {},
+    interp, cmd: interp.command, picked: {}, remember: {}, edited: {}, plural: true,
   })
 
   const setPending = (p: Pending | null | ((cur: Pending | null) => Pending | null)) => {
@@ -162,8 +178,10 @@ export function Voice() {
     setPendingState(next)
   }
 
-  const ctx: InterpretContext = useMemo(() => ({ items, partners, defaultChannel: channel }), [items, partners, channel])
-  const env = (): ExecEnv => ({ companyId, today: today(), items, partners, refreshMaster: refresh })
+  // ίδιος πίνακας όσο δεν αλλάζουν οι φράσεις (ο parser κρατά τους κανόνες του ανά πίνακα)
+  const rules: VoicePhraseRule[] = useMemo(() => phrases.map((p) => ({ phrase: p.phrase, meaning: p.meaning })), [phrases])
+  const ctx: InterpretContext = useMemo(() => ({ items, partners, defaultChannel: channel, phrases: rules }), [items, partners, channel, rules])
+  const env = (): ExecEnv => ({ companyId, today: today(), items, partners, refreshMaster: refresh, refreshPhrases })
 
   // ευρετήριο του καταλόγου από πριν: η πρώτη φράση να μην περιμένει
   useEffect(() => {
@@ -196,9 +214,14 @@ export function Voice() {
   // -------------------------------------------------------------------
   // Ανοιχτά πρόχειρα (μετρητής, απογραφή)
   // -------------------------------------------------------------------
-  const refreshRunning = useCallback(async () => {
-    if (!companyId) return
-    try { setRunning(await loadRunning(companyId, today())) } catch { /* π.χ. χωρίς 0004 */ }
+  const refreshRunning = useCallback(async (): Promise<RunningState | null> => {
+    if (!companyId) return null
+    try {
+      const r = await loadRunning(companyId, today())
+      setRunning(r)
+      return r
+    } catch { return null /* π.χ. χωρίς 0004 */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId])
 
   useEffect(() => { refreshRunning() }, [refreshRunning])
@@ -249,6 +272,26 @@ export function Voice() {
       return await interpreter.interpret(text, ctx)
     } catch {
       try { return await localInterpreter.interpret(text, ctx) } catch { return { text, command: { kind: 'unknown' }, confidence: 0, issues: [] } }
+    }
+  }
+
+  /**
+   * Μέτρημα χώρο-χώρο χωρίς είδος («κι άλλα 2 κιλά», «σύνολο 40») αμέσως
+   * μετά από μέτρηση: το είδος είναι το τελευταίο που μετρήθηκε. Μόνο όταν
+   * ακούστηκε λέξη πρόσθεσης / συνόλου· η κάρτα το λέει και αλλάζει.
+   */
+  const continueCount = async (text: string): Promise<Interpretation | null> => {
+    const last = lastCountRef.current
+    const it = last && Date.now() - last.at < COUNT_CONTINUE_MS ? itemById.get(last.itemId) : undefined
+    if (!it || !it.is_active) return null
+    const again = await interpretText(`${it.name} ${text}`)
+    const c = again.command
+    if (c.kind !== 'stocktake' || c.lines.length !== 1 || c.lines[0].item.id !== it.id || !c.lines[0].mode) return null
+    return {
+      ...again,
+      text,
+      confidence: Math.min(again.confidence, 0.7),
+      issues: [`Δεν ακούστηκε είδος: συνεχίζω με «${it.name}», το τελευταίο που μέτρησες.`, ...again.issues],
     }
   }
 
@@ -313,6 +356,8 @@ export function Voice() {
     if (!interp) {
       setThinking(true)
       interp = await interpretText(text)
+      // «κι άλλα 2 κιλά» χωρίς είδος, μετά από μέτρηση (όχι ως απάντηση σε κάρτα)
+      if (interp.command.kind === 'unknown') interp = (await continueCount(text)) ?? interp
       if (seq !== seqRef.current) return
       setThinking(false)
     }
@@ -346,12 +391,22 @@ export function Voice() {
       return
     }
 
+    // απογραφή: οι μετρήσεις ως τώρα (και από άλλες συσκευές), για «10 + 5 = 15»·
+    // αφαίρεση από τον μετρητή: τι είναι ακόμα ανοιχτό και τι έχει καταχωρηθεί
+    if (cmd.kind === 'stocktake' || (cmd.kind === 'sale_tally' && cmd.lines.some((l) => l.qty < 0))) {
+      setThinking(true)
+      await Promise.race([refreshRunning(), new Promise((r) => window.setTimeout(r, 1200))])
+      if (seq !== seqRef.current) return
+      setThinking(false)
+    }
     const p = newPending(interp)
     setPending(p)
     setAnswer(prev ? { text: 'Η προηγούμενη ακυρώθηκε. Νέα κάρτα:', tone: 'info' } : null)
     // ό,τι εμποδίζει το «ναι» διαβάζεται κι αυτό· τότε δεν ακούμε για «ναι»
-    const why = problem(p)
-    const finished = await say(describe(interp, ctx) + notice(cmd) + (why ? ' ' + why : ''))
+    const run = runningRef.current
+    const why = problem(p, run)
+    const notes = cardNotes(p, run).filter((n) => n !== why)
+    const finished = await say(beforeQuestion(cardSentence(p, interp.issues, run), notes.join(' ')) + (why ? ' ' + why : ''))
     // επιβεβαίωση με φωνή: μία φορά ακούμε για ναι/όχι, μόνο αν η ανάγνωση τελείωσε
     // κανονικά (όχι αν κόπηκε από μικρόφωνο / νέα φράση / έξοδο από τη σελίδα)
     if (voiceConfirm && sr.supported && finished && !why && !isQuery(cmd)) {
@@ -404,18 +459,26 @@ export function Voice() {
     }
   }
 
-  /** Συνέπεια που πρέπει να ακουστεί πριν από το «ναι» */
-  const notice = (cmd: Command): string => (
-    cmd.kind === 'close_stocktake' && running?.stocktake?.date === today()
-      ? ' Μετά δεν θα μπαίνουν άλλες σημερινές πωλήσεις για τα είδη που μετρήθηκαν.'
-      : ''
-  )
+  const itemLabel = (id: string) => { const it = itemById.get(id); return it ? { name: it.name, unit: it.unit } : null }
+
+  /** Η πρόταση της κάρτας (οθόνη και ανάγνωση)· στην απογραφή με το νέο σύνολο */
+  const cardSentence = (p: Pending, shownIssues: string[], run: RunningState | null): string => {
+    const sv = stockView(p.cmd, countedFor(run, today(), localHour()))
+    const base = describe({ ...p.interp, command: sv ? sv.shown : p.cmd, issues: shownIssues }, ctx)
+    if (!sv || p.cmd.kind !== 'stocktake') return base
+    const lines = p.cmd.lines.map((l) => ({ id: l.item.id, qty: l.qty, mode: l.mode }))
+    return beforeQuestion(base, stockTotalsText(lines, sv.views, itemLabel))
+  }
+
+  /** Σημειώσεις της κάρτας εκτός parser: αφαιρέσεις που δεν γίνονται όλες (καταχωρημένες) */
+  const cardNotes = (p: Pending, run: RunningState | null): string[] =>
+    removalNotes(p.cmd, run, (id) => itemById.get(id)?.name ?? '?')
 
   /** Σφάλμα που εμποδίζει την εκτέλεση (null = όλα καλά) */
-  const problem = (p: Pending): string | null => cardProblem(p.cmd, {
+  const problem = (p: Pending, run: RunningState | null = running): string | null => cardProblem(p.cmd, {
     itemById,
     edited: p.edited,
-    running,
+    running: run,
     hasUndo: !!lastUndoable,
     saleFallback: (id) => salePriceOf(id)?.price,
   })
@@ -462,7 +525,27 @@ export function Voice() {
     setBusy(true)
     execRef.current = true
     try {
+      // νέα φράση: και ο πληθυντικός της (όπως τον έδειξε η κάρτα)
+      const pl = p.cmd.kind === 'new_phrase' && p.plural ? pluralOffer(p.cmd.phrase, p.cmd.meaning, rules) : null
       const res = await execute(p.cmd, env())
+      if (pl && p.cmd.kind === 'new_phrase') {
+        try {
+          const saved = await savePhrase(companyId, pl, p.cmd.meaning)
+          await refreshPhrases()
+          res.message += ` Και ο πληθυντικός: «${saved.row.phrase}».`
+          const first = res.undo
+          res.undo = async () => {
+            await undoPhrase(saved)
+            if (first) await first()
+            else await refreshPhrases()
+          }
+        } catch (e) { toast.err(voiceError(e).message) }
+      }
+      // συνέχεια μετρήματος χωρίς είδος («κι άλλα 2 κιλά»): το τελευταίο είδος που μετρήθηκε
+      if (p.cmd.kind === 'stocktake') {
+        const last = p.cmd.lines[p.cmd.lines.length - 1]?.item.id
+        lastCountRef.current = last ? { itemId: last, at: Date.now() } : null
+      } else if (!isQuery(p.cmd)) lastCountRef.current = null
       // "να το θυμάμαι ως ..."
       const learned: string[] = []
       for (const s of refSlots(p.cmd)) {
@@ -476,7 +559,7 @@ export function Voice() {
       if (!q) addLog(p.interp.text, res.message, res.undo)
       setAnswer({ text: res.message + (learned.length ? ` Θα θυμάμαι ${learned.join(', ')}.` : ''), tone: q ? 'info' : 'ok' })
       setPending(null)
-      say(q ? res.message : 'Έγινε.')
+      say(q ? res.message : res.spoken ?? 'Έγινε.')
       refreshRunning()
       if (res.navigateTo) nav(res.navigateTo)
     } catch (e) {
@@ -504,7 +587,7 @@ export function Voice() {
     const interp: Interpretation = { text, command: { kind }, confidence: 1, issues: [] }
     setPending(newPending(interp))
     setAnswer(null)
-    say(describe(interp, ctx) + notice(interp.command))
+    say(describe(interp, ctx))
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -574,19 +657,26 @@ export function Voice() {
   // Απόδοση
   // -------------------------------------------------------------------
   const why = pending ? problem(pending) : null
-  const issues = pending ? visibleIssues(pending.interp.issues, solvedOf(pending)) : []
+  const issues = pending
+    // νέα φράση: το «υπάρχει ήδη» το δείχνει η κάρτα ζωντανά (αλλάζει αν διορθωθεί η φράση)
+    ? visibleIssues(pending.interp.issues, solvedOf(pending)).filter((i) => pending.cmd.kind !== 'new_phrase' || !/^Υπάρχει ήδη/.test(i))
+    : []
+  const notes = pending ? cardNotes(pending, running).filter((n) => n !== why) : []
   // με τις προειδοποιήσεις που ισχύουν ακόμα: τιμή που γράφτηκε δεν είναι πια «δεν ακούστηκε»
-  const sentence = pending ? describe({ ...pending.interp, command: pending.cmd, issues }, ctx) : ''
+  const sentence = pending ? cardSentence(pending, issues, running) : ''
   const confirmLabel = !pending ? '' : isQuery(pending.cmd) ? 'Δείξε' : pending.cmd.kind === 'undo' ? 'Ναι, αναίρεσέ το' : 'Ναι, πέρασέ το'
   const live = sr.listening ? (sr.interim || 'Ακούω…') : thinking ? 'Σκέφτομαι…' : ''
 
   return (
     <div className={'max-w-2xl mx-auto ' + (pending ? 'pb-44' : 'pb-28')}>
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <h1 className="text-xl font-semibold">Πες το</h1>
-        <button type="button" className="btn-ghost text-sm h-11" onClick={() => { setShowHelp((v) => !v); window.setTimeout(() => helpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50) }}>
-          Τι μπορώ να πω;
-        </button>
+      <div className="flex items-center justify-between gap-1 mb-3">
+        <h1 className="text-xl font-semibold shrink-0">Πες το</h1>
+        <div className="flex items-center gap-1 min-w-0">
+          <Link to="/voice/words" className="btn-ghost text-sm h-11 inline-flex items-center px-2">Λέξεις & φράσεις</Link>
+          <button type="button" className="btn-ghost text-sm h-11 px-2" onClick={() => { setShowHelp((v) => !v); window.setTimeout(() => helpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50) }}>
+            Τι μπορώ να πω;
+          </button>
+        </div>
       </div>
 
       {!ready && !masterLoading && (
@@ -605,15 +695,16 @@ export function Voice() {
           {pending.interp.confidence < 0.5 && !why && Object.keys(pending.picked).length === 0 && Object.keys(pending.edited).length === 0 && (
             <div className="text-xs text-amber-700 mt-1">Δεν είμαι σίγουρος: έλεγξε τα στοιχεία πριν πεις ναι.</div>
           )}
-          {issues.length > 0 && (
+          {issues.length + notes.length > 0 && (
             <ul className="mt-2 text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 list-disc list-inside space-y-0.5">
-              {issues.map((i, k) => <li key={k}>{i}</li>)}
+              {[...issues, ...notes].map((i, k) => <li key={k}>{i}</li>)}
             </ul>
           )}
           <div className="mt-3 flex flex-col gap-3">
             <Editor
               pending={pending}
               running={running}
+              ctx={ctx}
               lastUndo={lastUndoable}
               itemById={itemById}
               salePriceOf={salePriceOf}
@@ -621,6 +712,7 @@ export function Voice() {
               updCmd={updCmd}
               setLine={setLine}
               removeLine={removeLine}
+              setPlural={(v) => setPending((p) => (p ? { ...p, plural: v } : p))}
               refField={(path, label) => {
                 const slot = refSlots(pending.cmd).find((s) => s.path === path)
                 if (!slot) return null
@@ -744,20 +836,33 @@ export function Voice() {
           <span className="text-stone-400">{showHelp ? '▴' : '▾'}</span>
         </button>
         {showHelp && (
-          <div className="px-3 pb-3 flex flex-col gap-3">
-            <p className="text-xs text-stone-500">Πάτα ένα παράδειγμα για να μπει στο κουτί. Τίποτα δεν περνάει χωρίς το δικό σου «ναι».</p>
+          <div className="px-3 pb-3 flex flex-col gap-2">
+            <p className="text-xs text-stone-500">
+              Πάτα ένα θέμα και μετά ένα παράδειγμα για να μπει στο κουτί. Τα ονόματα είναι παραδείγματα: λες τα δικά σας.
+              Τίποτα δεν περνάει χωρίς το δικό σου «ναι».
+            </p>
             {EXAMPLES.map((g) => (
-              <div key={g.title}>
-                <div className="text-xs font-medium text-stone-600 mb-1">{g.title}</div>
-                <div className="flex flex-wrap gap-2">
+              <details key={g.section} className="group rounded-lg border border-stone-200">
+                <summary className="list-none [&::-webkit-details-marker]:hidden cursor-pointer select-none px-3 min-h-[44px] flex items-center justify-between text-sm font-medium text-stone-700">
+                  <span>{g.section}</span>
+                  <span className="text-stone-400 group-open:rotate-180 transition">▾</span>
+                </summary>
+                <div className="px-3 pb-3 flex flex-col gap-2">
+                  {g.note && <p className="text-xs text-stone-500">{g.note}</p>}
                   {g.items.map((x) => (
-                    <button key={x} type="button" className="text-left text-sm rounded-lg border border-stone-300 bg-stone-50 px-3 py-2 active:bg-stone-200"
-                      onClick={() => { setInput(x); inputRef.current?.focus() }}>
-                      {x}
+                    <button key={x.say} type="button" className="text-left rounded-lg border border-stone-300 bg-stone-50 px-3 py-2 active:bg-stone-200"
+                      onClick={() => { setInput(x.say); inputRef.current?.focus() }}>
+                      <span className="block text-sm">«{x.say}»</span>
+                      <span className="block text-xs text-stone-500 mt-0.5">{x.does}</span>
                     </button>
                   ))}
+                  {/φράσεις/i.test(g.section) && (
+                    <Link to="/voice/words" className="text-sm text-red-700 underline underline-offset-2 min-h-[44px] inline-flex items-center">
+                      Όλες οι λέξεις και φράσεις σας →
+                    </Link>
+                  )}
                 </div>
-              </div>
+              </details>
             ))}
           </div>
         )}
@@ -812,7 +917,7 @@ function RunningStrips({ running, onCloseDay, onCloseStocktake, disabled }: {
   running: RunningState | null; onCloseDay: () => void; onCloseStocktake: () => void; disabled: boolean
 }) {
   if (!running) return null
-  const st = running.stocktake
+  const sts = running.stocktakes
   return (
     <div className="flex flex-col gap-2 mb-3">
       {running.older.length > 0 && (
@@ -827,8 +932,8 @@ function RunningStrips({ running, onCloseDay, onCloseStocktake, disabled }: {
         <Link to="/daily-sales" className="flex-1 min-w-0 min-h-[44px] flex items-center text-sm">
           <span>
             <span className="text-stone-500">Σήμερα: </span>
-            {running.tally.length === 0 ? <span className="text-stone-500">καμία πώληση ακόμα</span>
-              : running.tally.map((t, i) => (
+            {running.totals.length === 0 ? <span className="text-stone-500">καμία πώληση ακόμα</span>
+              : running.totals.map((t, i) => (
                 <span key={t.channel}>{i > 0 && <span className="text-stone-400"> · </span>}<b className="font-semibold">{CHANNEL_LABEL[t.channel]}</b> {fmtQty(t.qty)}</span>
               ))}
           </span>
@@ -837,14 +942,20 @@ function RunningStrips({ running, onCloseDay, onCloseStocktake, disabled }: {
           <button type="button" className="btn-secondary h-11 text-xs shrink-0" onClick={onCloseDay} disabled={disabled}>Κλείσιμο ημέρας</button>
         )}
       </div>
-      {st && (
-        <div className="card px-3 py-1 flex items-center gap-2 border-amber-200 bg-amber-50">
+      {/* μία λωρίδα ανά απογραφή (και ξεχασμένη παλιότερη)· το «Τέλος απογραφής» τις κλείνει όλες */}
+      {sts.map((st, i) => (
+        <div key={st.id} className="card px-3 py-1 flex items-center gap-2 border-amber-200 bg-amber-50">
           <Link to={`/docs/stocktake/${st.id}`} className="flex-1 min-w-0 min-h-[44px] flex items-center text-sm text-amber-900">
-            <span>Απογραφή σε εξέλιξη: <b>{st.count}</b> {plural(st.count, 'είδος', 'είδη')}{st.date !== today() && <> (από {fmtDate(st.date)})</>} →</span>
+            <span>
+              Απογραφή σε εξέλιξη: <b>{st.count}</b> {plural(st.count, 'είδος', 'είδη')}
+              {st.date !== today() && <> (από {fmtDate(st.date)}{i < sts.length - 1 && ', δεν έκλεισε'})</>} →
+            </span>
           </Link>
-          <button type="button" className="btn-secondary h-11 text-xs shrink-0" onClick={onCloseStocktake} disabled={disabled}>Τέλος απογραφής</button>
+          {i === sts.length - 1 && (
+            <button type="button" className="btn-secondary h-11 text-xs shrink-0" onClick={onCloseStocktake} disabled={disabled}>Τέλος απογραφής</button>
+          )}
         </div>
-      )}
+      ))}
     </div>
   )
 }
@@ -873,6 +984,9 @@ function Toggle({ checked, onChange, disabled, children }: { checked: boolean; o
     </label>
   )
 }
+
+/** Χωρίς την ερώτηση στο τέλος ("… Να το περάσω;") */
+const noQuestion = (s: string) => s.replace(/\s*Να [^.;]*;$/, '')
 
 const numText = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? '' : String(round(v, 4)).replace('.', ','))
 
@@ -1107,9 +1221,10 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, needPrice, en
 // ---------------------------------------------------------------------
 // Λεπτομέρειες ανά είδος εντολής (επεξεργάσιμες)
 // ---------------------------------------------------------------------
-function Editor({ pending, running, lastUndo, itemById, salePriceOf, setChannel, updCmd, setLine, removeLine, refField }: {
+function Editor({ pending, running, ctx, lastUndo, itemById, salePriceOf, setChannel, updCmd, setLine, removeLine, setPlural, refField }: {
   pending: Pending
   running: RunningState | null
+  ctx: InterpretContext
   lastUndo: LogEntry | null
   itemById: Map<string, Item>
   /** τιμή χονδρικής (πελάτη ή γενική) για γραμμή χωρίς ειπωμένη τιμή */
@@ -1118,6 +1233,7 @@ function Editor({ pending, running, lastUndo, itemById, salePriceOf, setChannel,
   updCmd: (f: (c: Command) => Command, edited?: string) => void
   setLine: (i: number, patch: Partial<QtyLine> & { unitPrice?: number | null }) => void
   removeLine: (i: number) => void
+  setPlural: (v: boolean) => void
   refField: (path: string, label: string) => ReactNode
 }) {
   const c = pending.cmd
@@ -1133,7 +1249,7 @@ function Editor({ pending, running, lastUndo, itemById, salePriceOf, setChannel,
     return sp.price > 0 ? `${numText(sp.price)} (${sp.partner ? 'πελάτη' : 'γενική'})` : 'γράψε τιμή'
   }
 
-  const lines = (opts: { price?: 'sale' | 'purchase'; label: string; negative?: boolean }) => hasLines(c) && (
+  const lines = (opts: { price?: 'sale' | 'purchase'; label: string; negative?: boolean; extra?: (i: number) => ReactNode }) => hasLines(c) && (
     <div className="flex flex-col gap-2">
       {c.lines.map((l, i) => {
         const it = l.item.id ? itemById.get(l.item.id) : null
@@ -1162,6 +1278,7 @@ function Editor({ pending, running, lastUndo, itemById, salePriceOf, setChannel,
                 />
               )}
             </div>
+            {opts.extra?.(i)}
           </div>
         )
       })}
@@ -1204,14 +1321,91 @@ function Editor({ pending, running, lastUndo, itemById, salePriceOf, setChannel,
         </>
       )
     case 'stocktake': {
-      const d = stocktakeDate(running?.stocktake ?? null, today())
+      // σημερινή απογραφή (ή η χθεσινή μόνο σε μέτρημα που πέρασε τα μεσάνυχτα)
+      const tg = targetOf(running, today(), localHour())
+      const sv = stockView(c, tg.doc?.counted ?? {})
+      const extra = (i: number) => {
+        const v = sv?.views[i]
+        const l = c.lines[i]
+        const it = l?.item.id ? itemById.get(l.item.id) : null
+        if (!v || !it) return null
+        const unheard = l.qty === 0 && !l.heardQty?.trim() && !pending.edited[`lines.${i}.qty`]
+        // μέτρηση σε παλιότερη απογραφή που δεν συνεχίζει
+        const old = v.mode === null ? staleCount(tg.stale, it.id) : null
+        return (
+          <div className="flex items-center gap-2 flex-wrap">
+            {v.mode && (
+              <div role="group" aria-label={`Μέτρηση ${it.name}`} className="inline-flex rounded-full border border-stone-300 overflow-hidden">
+                {(['add', 'set'] as const).map((m) => (
+                  <button key={m} type="button" aria-pressed={v.mode === m} onClick={() => setLine(i, { mode: m })}
+                    className={'h-10 px-3 text-sm font-medium ' + (v.mode === m ? 'bg-red-700 text-white' : 'bg-white text-stone-700 active:bg-stone-100')}>
+                    {m === 'add' ? 'Πρόσθεση' : 'Αντικατάσταση'}
+                  </button>
+                ))}
+              </div>
+            )}
+            {!unheard && <span className="text-sm font-medium text-stone-800">{stockResultText(v, it.name, it.unit)}</span>}
+            {v.mode === null && !unheard && <span className="text-xs text-stone-500">πρώτη μέτρηση</span>}
+            {old && (
+              <span className="text-xs text-amber-800">
+                (στην ανοιχτή απογραφή της {fmtDate(old.date)}: {fmtQty(old.qty)}{it.unit === 'τεμ' ? '' : ` ${it.unit}`}, δεν προστίθεται)
+              </span>
+            )}
+          </div>
+        )
+      }
       return (
         <>
-          {lines({ label: 'Είδος' })}
+          {lines({ label: 'Είδος', extra })}
           <p className="text-xs text-stone-500">
-            Μπαίνουν στην απογραφή σε εξέλιξη {d === today() ? 'της ημέρας' : `της ${fmtDate(d)} (συνεχίζει από χθες)`}. Καταχωρείται με «τέλος απογραφής».
+            Μπαίνουν στην απογραφή σε εξέλιξη {tg.date === today() ? 'της ημέρας' : `της ${fmtDate(tg.date)} (το μέτρημα συνεχίζει μετά τα μεσάνυχτα)`}.
+            «Πρόσθεση»: προστίθεται σε ό,τι μέτρησες ήδη (π.χ. άλλος χώρος). {COUNT_MOMENT}
           </p>
+          {tg.stale.length > 0 && (
+            <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+              Η απογραφή {stocktakeList(tg.stale)} δεν έκλεισε: οι νέες μετρήσεις μπαίνουν σε σημερινή και δεν προστίθενται σε εκείνη.
+              Το «τέλος απογραφής» τις καταχωρεί όλες.
+            </div>
+          )}
         </>
+      )
+    }
+    case 'new_phrase': {
+      const set = (patch: Partial<Extract<Command, { kind: 'new_phrase' }>>) => updCmd((x) => (x.kind === 'new_phrase' ? { ...x, ...patch } : x))
+      const k = phraseKey(c.phrase)
+      const same = k ? (ctx.phrases ?? []).find((r) => phraseKey(r.phrase) === k) : undefined
+      // τι καταλαβαίνω σήμερα από τη σημασία μόνη της (π.χ. όνομα είδους)
+      const alone = c.meaning.trim() ? interpret(c.meaning, ctx) : null
+      // «2 οικογενειακές»: ο πληθυντικός, αν δεν τον πιάνει ήδη
+      const pl = pluralOffer(c.phrase, c.meaning, ctx.phrases ?? [])
+      return (
+        <div className="flex flex-col gap-2">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-stone-500">Όταν λέω</span>
+            <input className="input h-11 text-base" value={c.phrase} onChange={(e) => set({ phrase: e.target.value })} aria-label="Όταν λέω" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-stone-500">εννοώ</span>
+            <input className="input h-11 text-base" value={c.meaning} onChange={(e) => set({ meaning: e.target.value })} aria-label="εννοώ" />
+          </label>
+          {same && (
+            <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+              Υπάρχει ήδη: «{same.phrase}» → «{same.meaning}». Θα αλλάξει.
+            </div>
+          )}
+          {alone && alone.command.kind !== 'unknown' && (
+            <div className="text-xs text-stone-600">Το «{c.meaning.trim()}» μόνο του το καταλαβαίνω: {noQuestion(describe(alone, ctx))}</div>
+          )}
+          {pl && (
+            <label className="flex items-center gap-3 text-sm min-h-[44px]">
+              <input type="checkbox" className="h-5 w-5 shrink-0" checked={pending.plural} onChange={(e) => setPlural(e.target.checked)} />
+              <span>Να το καταλαβαίνω και στον πληθυντικό: «{pl}»</span>
+            </label>
+          )}
+          <p className="text-xs text-stone-500">
+            {PHRASE_HINT} Όλες οι φράσεις: <Link className="underline" to="/voice/words">Λέξεις & φράσεις</Link>.
+          </p>
+        </div>
       )
     }
     case 'receipt':
@@ -1328,23 +1522,22 @@ function Editor({ pending, running, lastUndo, itemById, salePriceOf, setChannel,
       ) : null
     }
     case 'close_stocktake': {
-      const st = running?.stocktake
-      if (!running || !st) return null
-      const before = [...running.older, ...running.tally].filter((t) => t.date <= st.date)
+      const sts = running?.stocktakes ?? []
+      if (!running || !sts.length) return null
+      // ανοιχτές πωλήσεις παλιότερων ημερών: είναι πριν από τις μετρήσεις
+      const older = [...running.older, ...running.tally].filter((t) => t.date < sts[sts.length - 1].date)
       return (
         <div className="text-sm">
-          Απογραφή {docCode('stocktake', st.docNo)}: {st.count} {plural(st.count, 'είδος', 'είδη')} ({fmtDate(st.date)}).
-          <div className="text-xs text-stone-500 mt-1">Μετά την καταχώρηση ανοίγει η σελίδα της με τις διαφορές. Δεν αναιρείται από εδώ.</div>
-          {before.length > 0 && (
-            <div className="mt-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-xs px-2 py-1.5">
-              Πρώτα θα καταχωρηθούν οι ανοιχτές πωλήσεις ημέρας έως {fmtDate(st.date)} ({before.map((t) => tallyText(t, t.date !== today())).join(', ')}):
-              η απογραφή «κλειδώνει» τις μέρες έως τότε.
-            </div>
-          )}
-          {st.date === today() && (
-            <div className="mt-2 rounded-md bg-red-50 border border-red-200 text-red-800 text-xs px-2 py-1.5">
-              Η απογραφή είναι με σημερινή ημερομηνία: μετά την καταχώρηση δεν θα μπαίνουν άλλες σημερινές πωλήσεις
-              για ό,τι περιέχει τα είδη που μετρήθηκαν. Πες «τέλος απογραφής» όταν κλείσει η βάρδια.
+          {sts.length > 1 ? 'Απογραφές' : 'Απογραφή'}{' '}
+          {sts.map((st) => `${docCode('stocktake', st.docNo)}: ${st.count} ${plural(st.count, 'είδος', 'είδη')} (${fmtDate(st.date)})`).join(' · ')}.
+          {sts.length > 1 && <div className="text-xs text-amber-800 mt-1">Καταχωρούνται όλες, η παλιότερη πρώτη.</div>}
+          <div className="text-xs text-stone-500 mt-1">
+            Κάθε είδος μετράει τη στιγμή που το μέτρησες· οι πωλήσεις συνεχίζουν κανονικά και ό,τι πουλήθηκε μετά μετράει για μετά.
+            Μετά την καταχώρηση ανοίγει η σελίδα της με τις διαφορές. Δεν αναιρείται από εδώ.
+          </div>
+          {older.length > 0 && (
+            <div className="mt-2 rounded-md bg-stone-50 border border-stone-200 text-stone-700 text-xs px-2 py-1.5">
+              Ανοιχτές από προηγούμενες μέρες ({older.map((t) => tallyText(t, true)).join(', ')}): όσες κινούν μετρημένα είδη καταχωρούνται πρώτα.
             </div>
           )}
         </div>

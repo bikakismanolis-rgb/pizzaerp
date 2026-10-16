@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { capFirst, keySim, norm, normText, parseDigits, phon, stemKey, titleCase, tokenize } from './normalize'
+import { applyPhrases, capFirst, keySim, norm, normText, parseDigits, phon, phraseKey, phraseStartsName, stemKey, titleCase, tokenize, words } from './normalize'
 
 describe('norm', () => {
   it('πεζά, χωρίς τόνους, ς→σ', () => {
@@ -131,5 +131,142 @@ describe('κολλητά γράμματα και αριθμοί', () => {
     expect(t[3].glued).toBe(true)
     expect(t[2].glued).toBeUndefined()
     expect(tokenize('3 Ε')[1].glued).toBeUndefined()
+  })
+})
+
+describe('words: λέξεις με θέσεις', () => {
+  it('γράμματα και ψηφία χωριστά, κανονικοποιημένα', () => {
+    expect(words('Δύο «Οικογενειακές», 400γρ!').map((w) => w.n)).toEqual(['δυο', 'οικογενειακεσ', '400', 'γρ'])
+    const t = 'efood Μαργαρίτα'
+    expect(words(t).map((w) => t.slice(w.from, w.to))).toEqual(['efood', 'Μαργαρίτα'])
+  })
+})
+
+describe('applyPhrases: δικές τους φράσεις', () => {
+  const R = [
+    { phrase: 'οικογενειακή', meaning: 'μεγάλη μαργαρίτα' },
+    { phrase: 'ο Γιώργος', meaning: 'Ξενοδοχείο Αστέρια' },
+    { phrase: 'Χτύπα', meaning: 'πούλησα' },
+    { phrase: 'μεγάλη πίτσα', meaning: 'Special' },
+  ]
+  it.each([
+    ['efood δύο οικογενειακή', 'efood δύο μεγάλη μαργαρίτα'],
+    ['efood δύο ΟΙΚΟΓΕΝΕΙΑΚΗ', 'efood δύο μεγάλη μαργαρίτα'],
+    ['ο Γιώργος πλήρωσε 300', 'Ξενοδοχείο Αστέρια πλήρωσε 300'],
+    ['πόσα χρωστάει ο γιωργος;', 'πόσα χρωστάει Ξενοδοχείο Αστέρια;'],
+    // χωρίς άρθρο / μόνο το τελικό -ς αλλάζει
+    ['πούλησα στον Γιώργο 2', 'πούλησα στον Ξενοδοχείο Αστέρια 2'],
+    ['χτύπα 2 μαργαρίτες', 'πούλησα 2 μαργαρίτες'],
+    // μόνο ολόκληρες λέξεις
+    ['δύο οικογενειακές', 'δύο οικογενειακές'],
+    ['χτυπάμε', 'χτυπάμε'],
+    // κόμμα ανάμεσα: όχι η ίδια φράση
+    ['μεγάλη, πίτσα', 'μεγάλη, πίτσα'],
+    ['μεγάλη - πίτσα', 'Special'],
+    ['κολλητά 2οικογενειακή', 'κολλητά 2 μεγάλη μαργαρίτα'],
+  ])('%s → %s', (text, out) => {
+    expect(applyPhrases(text, R)).toBe(out)
+  })
+  it('η μεγαλύτερη φράση πρώτα, ένα πέρασμα', () => {
+    const r = [
+      { phrase: 'α', meaning: 'β' },
+      { phrase: 'β', meaning: 'γ' },
+      { phrase: 'μεγάλη', meaning: 'Χ' },
+      { phrase: 'μεγάλη μαργαρίτα', meaning: 'Υ' },
+    ]
+    expect(applyPhrases('α β μεγάλη μαργαρίτα μεγάλη', r)).toBe('β γ Υ Χ')
+  })
+  it('φράσεις με αριθμούς', () => {
+    expect(applyPhrases('δύο 30άρια και ένα 30άρι', [{ phrase: '30άρι', meaning: 'Special κατεψυγμένη 30εκ' }]))
+      .toBe('δύο 30άρια και ένα Special κατεψυγμένη 30εκ')
+    expect(applyPhrases('τιμή 6,5 τώρα', [{ phrase: '6,5', meaning: 'έξι και μισό' }])).toBe('τιμή έξι και μισό τώρα')
+  })
+  it('χωρίς φράσεις ή με λάθος φράσεις: ίδιο κείμενο', () => {
+    expect(applyPhrases('efood 2', [])).toBe('efood 2')
+    expect(applyPhrases('efood 2', undefined)).toBe('efood 2')
+    expect(applyPhrases('efood 2', [{ phrase: '', meaning: 'x' }, { phrase: '!!', meaning: 'y' }])).toBe('efood 2')
+  })
+  it('η πρώτη από δύο ίδιες φράσεις κερδίζει (π.χ. με και χωρίς τόνο)', () => {
+    expect(applyPhrases('χαβα', [{ phrase: 'χάβα', meaning: 'Α' }, { phrase: 'χαβα', meaning: 'Β' }])).toBe('Α')
+  })
+  it('phraseKey: όπως συγκρίνει το ταίριασμα', () => {
+    expect(phraseKey('Ο Γιώργος')).toBe(phraseKey('ο γιωργο'))
+    expect(phraseKey('ζυμάρι')).not.toBe(phraseKey('ζυμάρια'))
+    expect(phraseKey('νούμερο ένα')).toBe(phraseKey('Νούμερο 1'))
+    expect(phraseKey('νούμερο είκοσι τρία')).toBe('νουμερο 23')
+  })
+  it('αριθμοί με ψηφία ή με λέξεις είναι ίδιοι, προς τις δύο μεριές', () => {
+    const digit = [{ phrase: 'νούμερο 1', meaning: 'Μαργαρίτα' }]
+    expect(applyPhrases('efood δύο νούμερο ένα', digit)).toBe('efood δύο Μαργαρίτα')
+    expect(applyPhrases('efood δύο νούμερο 1', digit)).toBe('efood δύο Μαργαρίτα')
+    const word = [{ phrase: 'νούμερο είκοσι τρία', meaning: 'Χαβανέζα' }]
+    expect(applyPhrases('νούμερο 23 και νούμερο είκοσι τρία', word)).toBe('Χαβανέζα και Χαβανέζα')
+    // άλλος αριθμός: όχι ("είκοσι τρία" ≠ "είκοσι")
+    expect(applyPhrases('νούμερο είκοσι τρία', [{ phrase: 'νούμερο 20', meaning: 'Χ' }])).toBe('νούμερο είκοσι τρία')
+  })
+  it('φράση με άρθρο: χωρίς το άρθρο μόνο αν αυτό που μένει στέκει μόνο του', () => {
+    // "η μία" δεν γίνεται σκέτο "μία" (θα έπιανε κάθε "μία σπέσιαλ")
+    expect(applyPhrases('efood μία σπέσιαλ', [{ phrase: 'η μία', meaning: 'μαργαρίτα' }])).toBe('efood μία σπέσιαλ')
+    expect(applyPhrases('η μία', [{ phrase: 'η μία', meaning: 'μαργαρίτα' }])).toBe('μαργαρίτα')
+    for (const phrase of ['τα δύο', 'το πρώτο', 'τα άλλα', 'οι όλες', 'η πίτσα', 'το όχι']) {
+      const w = phrase.split(' ')[1]
+      expect(applyPhrases(`efood ${w} σπέσιαλ`, [{ phrase, meaning: 'Χ' }]), phrase).toBe(`efood ${w} σπέσιαλ`)
+    }
+    // ονόματα και λέξεις με νόημα: ναι
+    expect(applyPhrases('στον Γιώργο', [{ phrase: 'ο Γιώργος', meaning: 'Αστέρια' }])).toBe('στον Αστέρια')
+    expect(applyPhrases('efood δύο οικογενειακή', [{ phrase: 'η οικογενειακή', meaning: 'Special' }])).toBe('efood δύο Special')
+  })
+})
+
+describe('applyPhrases με τον κατάλογο: δεν κόβει μεγαλύτερα ονόματα', () => {
+  const named = (name: string, aliases: string[] = [], is_active = true) => ({ name, code: null, aliases, is_active })
+  const CAT = {
+    items: [named('Ζυμάρι 250γρ'), named('Ζυμάρι 400γρ'), named('Σάλτσα ντομάτας'), named('Τυρί φρέσκο'), named('Ζαμπόν χωριάτικο', [], false)],
+    partners: [named('Ξενοδοχείο Αστέρια'), named('Ξενοδοχείο Χ'), named('Γιώργος Παπαδάκης')],
+  }
+  const R = [
+    { phrase: 'ζυμάρι', meaning: 'Ζυμάρι 250γρ' },
+    { phrase: 'το ξενοδοχείο', meaning: 'Ξενοδοχείο Αστέρια' },
+    { phrase: 'τυρί', meaning: 'μοτσαρέλα' },
+    { phrase: 'σάλτσα', meaning: 'Σάλτσα ντομάτας' },
+    { phrase: 'ο Γιώργος', meaning: 'Ξενοδοχείο Αστέρια' },
+    { phrase: 'ζαμπόν', meaning: 'Ζαμπόν' },
+  ]
+  it.each([
+    // όνομα του καταλόγου που αρχίζει με τη φράση: μένει όπως ειπώθηκε
+    ['μέτρησα ζυμάρι 400 20', 'μέτρησα ζυμάρι 400 20'],
+    ['φτιάξαμε 80 ζυμάρια 400', 'φτιάξαμε 80 ζυμάρια 400'],
+    ['πόσο ζυμάρι τετρακόσια έχουμε', 'πόσο ζυμάρι τετρακόσια έχουμε'],
+    ['ζυμάρι 400 γραμμάρια', 'ζυμάρι 400 γραμμάρια'],
+    ['πούλησα στο ξενοδοχείο Χ 10 σπέσιαλ', 'πούλησα στο ξενοδοχείο Χ 10 σπέσιαλ'],
+    ['το ξενοδοχείο Χ μου έδωσε 100 ευρώ', 'το ξενοδοχείο Χ μου έδωσε 100 ευρώ'],
+    ['μέτρησα τυρί φρέσκο 3 κιλά', 'μέτρησα τυρί φρέσκο 3 κιλά'],
+    ['80 γραμμάρια σάλτσα ντομάτας', '80 γραμμάρια σάλτσα ντομάτας'],
+    ['πλήρωσε ο Γιώργος Παπαδάκης', 'πλήρωσε ο Γιώργος Παπαδάκης'],
+    // αλλιώς η φράση αλλάζει κανονικά
+    ['μέτρησα ζυμάρι 20', 'μέτρησα Ζυμάρι 250γρ 20'],
+    ['το ξενοδοχείο μου έδωσε 100 ευρώ', 'Ξενοδοχείο Αστέρια μου έδωσε 100 ευρώ'],
+    ['μέτρησα τυρί 3 κιλά', 'μέτρησα μοτσαρέλα 3 κιλά'],
+    ['πλήρωσε ο Γιώργος 300', 'πλήρωσε Ξενοδοχείο Αστέρια 300'],
+    // ανενεργό είδος δεν προστατεύεται
+    ['ζαμπόν χωριάτικο 2 κιλά', 'Ζαμπόν χωριάτικο 2 κιλά'],
+  ])('%s → %s', (text, out) => {
+    expect(applyPhrases(text, R, CAT)).toBe(out)
+  })
+  it('φράση ίδια ή μεγαλύτερη από το όνομα: αλλάζει (ο χρήστης το ζήτησε)', () => {
+    expect(applyPhrases('μέτρησα ζυμάρι 400 20', [{ phrase: 'ζυμάρι 400', meaning: 'Ζυμάρι 250γρ' }], CAT)).toBe('μέτρησα Ζυμάρι 250γρ 20')
+    expect(applyPhrases('ζυμάρι 400 διπλό', [{ phrase: 'ζυμάρι 400 διπλό', meaning: 'Χ' }], CAT)).toBe('Χ')
+  })
+  it('χωρίς κατάλογο: όπως πριν', () => {
+    expect(applyPhrases('μέτρησα ζυμάρι 400 20', R)).toBe('μέτρησα Ζυμάρι 250γρ 400 20')
+    expect(applyPhrases('μέτρησα ζυμάρι 400 20', R, null)).toBe('μέτρησα Ζυμάρι 250γρ 400 20')
+    expect(applyPhrases('μέτρησα ζυμάρι 400 20', R, { items: 'x' as unknown as [] })).toBe('μέτρησα Ζυμάρι 250γρ 400 20')
+  })
+  it('phraseStartsName: η φράση είναι η αρχή μεγαλύτερου ονόματος', () => {
+    expect(phraseStartsName('ζυμάρι', CAT)).toBe('Ζυμάρι 250γρ')
+    expect(phraseStartsName('Ξενοδοχείο', CAT)).toBe('Ξενοδοχείο Αστέρια')
+    expect(phraseStartsName('ζυμάρι 400', CAT)).toBeNull()
+    expect(phraseStartsName('οικογενειακή', CAT)).toBeNull()
+    expect(phraseStartsName('ζαμπόν', CAT)).toBeNull()
   })
 })

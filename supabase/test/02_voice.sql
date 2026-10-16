@@ -2,7 +2,13 @@
 -- απογραφή σε εξέλιξη, αυτόματο κλείσιμο ημερών, αυτόματο ζυμάρι (backflush
 -- δύο επιπέδων, μόνο όσο λείπει από το απόθεμα), επιμερισμός απογραφής πάνω
 -- σε αυτόματες παραγωγές (και σε δύο διαδοχικές απογραφές), απογραφή με
--- ανοιχτές πωλήσεις ημέρας, κλειδωμένες ημέρες, ασφάλεια (RLS, εταιρεία).
+-- ανοιχτές πωλήσεις ημέρας, κλειδωμένες ημέρες, ασφάλεια (RLS, εταιρεία),
+-- μέτρηση "τη στιγμή που λέγεται" (stock_cut): μέτρηση στη μέση της μέρας,
+-- πρόσθεση από δωμάτιο σε δωμάτιο, απογραφή με το χέρι, δεύτερη μέτρηση
+-- την ίδια μέρα, κλειδώματα πριν/μετά τη μέτρηση, δικές τους φράσεις,
+-- κλείδωμα όσων είναι ήδη μέσα σε μέτρηση σε εξέλιξη, πρόχειρες πωλήσεις
+-- ημέρας στη μέτρηση, αξία διαφοράς τη στιγμή της μέτρησης, ζυμάρια του
+-- πρωινού σε πίτσες όλης της μέρας, στιγμή που δεν πάει πίσω.
 \set ON_ERROR_STOP on
 \pset format aligned
 
@@ -49,7 +55,9 @@ declare
   d uuid; s1 uuid; p1 uuid; p2 uuid; a1 uuid; a2 uuid; a3 uuid;
   t uuid; t2 uuid; t3 uuid; t10 uuid; t11 uuid; t12 uuid; t13 uuid; t15 uuid; st uuid; st30 uuid;
   p3 uuid; p4 uuid; a4 uuid; imp uuid; b_x uuid;
-  v numeric; v2 numeric; v3 numeric; v4 numeric; v_total numeric;
+  t4 uuid; st2 uuid; st3 uuid; pm uuid; vp uuid; pa uuid; pb uuid; pc uuid;
+  cut1 bigint; cut2 bigint; cut3 bigint;
+  v numeric; v2 numeric; v3 numeric; v4 numeric; v5 numeric; v6 numeric; v_total numeric;
   n int; n2 int; n3 int;
   r record;
   sql text;
@@ -165,8 +173,15 @@ begin
      or has_function_privilege('authenticated', 'public._post_sale(public.doc)', 'execute')
      or has_function_privilege('authenticated', 'public._post_stocktake(public.doc)', 'execute')
      or has_function_privilege('authenticated', 'public._allocate_stocktake(public.doc)', 'execute')
-     or has_function_privilege('authenticated', 'public._allocate_cascade(public.doc,uuid,numeric,numeric,date)', 'execute')
-     or has_function_privilege('authenticated', 'public._semi_stock_use(uuid,uuid,date,date)', 'execute')
+     or has_function_privilege('authenticated', 'public._allocate_cascade(public.doc,uuid,numeric,numeric,date,bigint,bigint)', 'execute')
+     or has_function_privilege('authenticated', 'public._semi_stock_use(uuid,uuid,date,bigint,date,bigint)', 'execute')
+     or has_function_privilege('authenticated', 'public._allocate_item(public.doc,uuid,numeric,numeric,date,bigint,bigint,int,text)', 'execute')
+     or has_function_privilege('authenticated', 'public._prev_stocktake(public.doc,uuid,bigint)', 'execute')
+     or has_function_privilege('authenticated', 'public._post_day_tallies(uuid,date,uuid[],uuid[])', 'execute')
+     or has_function_privilege('authenticated', 'public._assert_open(uuid)', 'execute')
+     or has_function_privilege('authenticated', 'public._lock_postings(uuid)', 'execute')
+     or has_function_privilege('anon', 'public._lock_postings(uuid)', 'execute')
+     or has_function_privilege('authenticated', 'public.voice_phrase_clean()', 'execute')
      or has_function_privilege('authenticated', 'public._available_qty(uuid,date)', 'execute')
      or has_function_privilege('authenticated', 'public._item_tree(uuid)', 'execute')
      or has_function_privilege('anon', 'public._stocktake_lock(uuid,date,uuid[])', 'execute')
@@ -174,6 +189,13 @@ begin
     raise exception 'ΑΠΟΤΥΧΙΑ: εσωτερική function εκτελείται από τον client';
   end if;
   perform pg_temp.expect_fail(format('select public._post_internal(%L)', c), '%permission denied%', 'εσωτερική function από client');
+  -- οι παλιές υπογραφές (μόνο ημερομηνίες) δεν υπάρχουν πια
+  if to_regprocedure('public._prev_stocktake_date(public.doc,uuid)') is not null
+     or to_regprocedure('public._allocate_item(public.doc,uuid,numeric,numeric,date,int,text)') is not null
+     or to_regprocedure('public._semi_stock_use(uuid,uuid,date,date)') is not null
+     or to_regprocedure('public._allocate_cascade(public.doc,uuid,numeric,numeric,date)') is not null then
+    raise exception 'ΑΠΟΤΥΧΙΑ: έμειναν παλιές υπογραφές επιμερισμού';
+  end if;
   raise notice 'OK δικαιώματα';
 
   -- -------------------------------------------------------------------
@@ -439,7 +461,12 @@ begin
   perform public.tally_add(c, d12, 'phone', special, 1);
   t15 := public.tally_add(c, d15, 'store', marg, 1);            -- 15/9 = "σήμερα": μένει ανοιχτό
   insert into public.doc (company_id, doc_type, doc_date, channel, is_running) values (c, 'sale', d13, 'box', true) returning id into t13;  -- κενό
-  st := public.stocktake_count(c, d10, mozz, 50);               -- απογραφή σε εξέλιξη: δεν κλείνει ποτέ αυτόματα
+  -- απογραφή σε εξέλιξη: δεν κλείνει ποτέ αυτόματα (είδος που δεν κινεί ο
+  -- μετρητής της 10/9, αλλιώς η πρώτη μέτρηση θα τον καταχωρούσε)
+  st := public.stocktake_count(c, d10, special, 50);
+  if not exists (select 1 from public.doc where id = t10 and status = 'draft' and is_running) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: μέτρηση κατεψυγμένης καταχώρησε μετρητή που δεν την κινεί';
+  end if;
 
   n := 0; n2 := 0;
   for r in select * from public.close_running(c, d15) loop
@@ -502,6 +529,12 @@ begin
                                 and doc_date = d20 and channel is null and notes = 'Απογραφή σε εξέλιξη') then
     raise exception 'ΑΠΟΤΥΧΙΑ: δημιουργία απογραφής σε εξέλιξη';
   end if;
+  -- στιγμή πρώτης μέτρησης = θέση του μετρητή των κινήσεων εκείνη την ώρα
+  select stock_cut into cut1 from public.doc_line where doc_id = t and item_id = flour;
+  if cut1 is null or cut1 <> (select last_value from public.stock_move_id_seq)
+     or cut1 < (select max(id) from public.stock_move) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: στιγμή μέτρησης %', cut1;
+  end if;
   t2 := public.stocktake_count(c, d20, flour, 12);
   if t2 is distinct from t or (select qty from public.doc_line where doc_id = t and item_id = flour) <> 12 then
     raise exception 'ΑΠΟΤΥΧΙΑ: νέα μέτρηση';
@@ -546,7 +579,7 @@ begin
   end if;
   if public.stocktake_count(c, d20, flour, null) is not null then raise exception 'ΑΠΟΤΥΧΙΑ: αφαίρεση χωρίς απογραφή'; end if;
   -- και η απογραφή σε εξέλιξη της 10/9 φεύγει
-  t2 := public.stocktake_count(c, d10, mozz, null);
+  t2 := public.stocktake_count(c, d10, special, null);
   if t2 is not null or exists (select 1 from public.doc where id = st) then
     raise exception 'ΑΠΟΤΥΧΙΑ: καθάρισμα απογραφής 10/9';
   end if;
@@ -636,35 +669,47 @@ begin
   -- -------------------------------------------------------------------
   -- 12. Κλειδώματα με αυτόματα επίπεδα
   -- -------------------------------------------------------------------
-  -- νέα πώληση 30/9: η πώληση και η αυτόματη μαργαρίτα δεν έχουν αλεύρι,
-  -- το αυτόματο ζυμάρι όμως έχει -> κλειδωμένη περίοδος
-  insert into public.doc (company_id, doc_type, doc_date, channel) values (c, 'sale', d30, 'store') returning id into d;
+  -- νέα πώληση 29/9 (πριν από τη μέτρηση της 30/9): η πώληση και η αυτόματη
+  -- μαργαρίτα δεν έχουν αλεύρι, το αυτόματο ζυμάρι όμως έχει -> κλειδωμένη περίοδος
+  insert into public.doc (company_id, doc_type, doc_date, channel) values (c, 'sale', '2026-09-29', 'store') returning id into d;
   insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (d, 1, marg, 1, 8, 13);
-  perform pg_temp.expect_fail(format('select public.post_document(%L)', d), 'Κλειδωμένη περίοδος%"Αλεύρι"%', 'κλείδωμα μέσω αυτόματου ζυμαριού');
+  perform pg_temp.expect_fail(format('select public.post_document(%L)', d),
+    'Κλειδωμένη περίοδος: υπάρχει απογραφή ΑΠ-%"Αλεύρι"%', 'κλείδωμα μέσω αυτόματου ζυμαριού');
   if exists (select 1 from public.doc where source_doc_id = d) then raise exception 'ΑΠΟΤΥΧΙΑ: έμειναν μισές αυτόματες'; end if;
-  update public.doc set doc_date = '2026-10-01' where id = d;
+  -- την ίδια μέρα με τη μέτρηση, γραμμένη μετά από αυτήν: περνάει (μετράει για μετά)
+  update public.doc set doc_date = d30 where id = d;
   perform public.post_document(d);
-  -- μετρητής σε κλειδωμένη μέρα: απορρίπτεται αμέσως (αλλιώς θα έμενε πρόχειρο
-  -- που δεν καταχωρείται ποτέ)· είδος που δεν κινεί αλεύρι (κατεψυγμένη) περνάει
-  perform pg_temp.expect_fail(format('select public.tally_add(%L, %L, %L, %L, %L)', c, d30, 'efood', marg, 2),
-    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής σε κλειδωμένη μέρα');
+  select stock_cut into cut1 from public.doc_line where doc_id = st30 and item_id = flour;
+  if not exists (select 1 from public.stock_move m join public.doc b on b.id = m.doc_id join public.doc a on a.id = b.source_doc_id
+                  where a.source_doc_id = d and m.item_id = flour and m.move_date = d30 and m.id > cut1) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: το αλεύρι της πώλησης 30/9 δεν είναι μετά τη μέτρηση';
+  end if;
+  -- δεν την περιλαμβάνει η μέτρηση: ακυρώνεται και ξανακαταχωρείται
+  perform public.unpost_document(d);
+  perform public.post_document(d);
+  -- μετρητής: την ίδια μέρα με τη μέτρηση περνάει· σε παλιότερη μέρα η αύξηση
+  -- απορρίπτεται αμέσως (αλλιώς θα έμενε πρόχειρο που δεν καταχωρείται ποτέ)·
+  -- είδος που δεν κινεί αλεύρι (κατεψυγμένη) περνάει
+  t := public.tally_add(c, d30, 'efood', marg, 2);
+  if t is null then raise exception 'ΑΠΟΤΥΧΙΑ: μετρητής την ίδια μέρα με τη μέτρηση'; end if;
+  if public.tally_add(c, d30, 'efood', marg, -2) is not null then raise exception 'ΑΠΟΤΥΧΙΑ: καθάρισμα μετρητή 30/9'; end if;
   perform pg_temp.expect_fail(format('select public.tally_add(%L, %L, %L, %L, %L)', c, d20, 'wolt', pep, 1),
-    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής σε παλιότερη κλειδωμένη μέρα');
-  t := public.tally_add(c, d30, 'box', special, 1);
+    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής σε μέρα πριν από τη μέτρηση');
+  t := public.tally_add(c, d20, 'box', special, 1);
   if t is null then raise exception 'ΑΠΟΤΥΧΙΑ: κατεψυγμένη σε μέρα κλειδωμένη μόνο για το αλεύρι'; end if;
-  perform public.tally_add(c, d30, 'box', special, -1);
+  perform public.tally_add(c, d20, 'box', special, -1);
   -- μετρητής που έμεινε ανοιχτός σε κλειδωμένη μέρα (π.χ. από παλιότερη έκδοση): το
   -- close_running τον αναφέρει, και η μείωση επιτρέπεται για να καθαρίσει
   insert into public.doc (company_id, doc_type, doc_date, channel, is_running, notes)
-  values (c, 'sale', d30, 'efood', true, 'Πωλήσεις ημέρας') returning id into t;
+  values (c, 'sale', '2026-09-29', 'efood', true, 'Πωλήσεις ημέρας') returning id into t;
   insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (t, 1, marg, 2, 8, 13);
   select count(*) into n from public.close_running(c, '2026-10-01') x where x.doc_id = t and not x.ok and x.message like 'Κλειδωμένη περίοδος%';
   if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: close_running σε κλειδωμένη μέρα'; end if;
-  t2 := public.tally_add(c, d30, 'efood', marg, -2);
+  t2 := public.tally_add(c, '2026-09-29', 'efood', marg, -2);
   if t2 is not null or exists (select 1 from public.doc where id = t) then
     raise exception 'ΑΠΟΤΥΧΙΑ: καθάρισμα μετρητή σε κλειδωμένη μέρα';
   end if;
-  raise notice 'OK μετρητής σε κλειδωμένη μέρα: απορρίπτεται η αύξηση, επιτρέπεται η μείωση';
+  raise notice 'OK μετρητής: ίδια μέρα με τη μέτρηση περνάει, παλιότερη απορρίπτεται (εκτός από μείωση)';
 
   -- ακυρώσεις: παραγωγή με επιμερισμούς δεν ακυρώνεται (ούτε έμμεσα)
   perform pg_temp.expect_fail(format('select public.unpost_document(%L)', s1), '%επιμερισμούς κόστους από την απογραφή%', 'ακύρωση πώλησης με επιμερισμούς');
@@ -745,38 +790,46 @@ begin
   t3 := public.tally_add(c, '2026-12-04', 'phone', marg, 1);     -- προηγούμενη μέρα, ακόμα ανοιχτή
   v := public.item_on_hand(flour, '2026-12-05') - 5 * 6.5 / 40;  -- το αλεύρι που υπάρχει πραγματικά
   st := public.stocktake_count(c, '2026-12-05', flour, v);
-  perform public.post_document(st);
-  select expected_qty, diff_qty into v2, v3 from public.v_stocktake_result where doc_id = st and item_id = flour;
-  if v2 <> v or v3 <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ: η απογραφή δεν είδε τις πωλήσεις ημέρας (% / %)', v2, v3; end if;
+  -- η πρώτη μέτρηση του αλευριού καταχώρησε ήδη τις πωλήσεις ως εκείνη τη στιγμή
   if (select count(*) from public.doc where id in (t, t3) and status = 'posted' and not is_running) <> 2 then
-    raise exception 'ΑΠΟΤΥΧΙΑ: δεν καταχωρήθηκαν οι ανοιχτές πωλήσεις πριν την απογραφή';
+    raise exception 'ΑΠΟΤΥΧΙΑ: δεν καταχωρήθηκαν οι ανοιχτές πωλήσεις στην πρώτη μέτρηση';
   end if;
   if not exists (select 1 from public.doc where id = t2 and status = 'draft' and is_running) then
     raise exception 'ΑΠΟΤΥΧΙΑ: έκλεισε πώληση ημέρας που δεν κινεί είδη της απογραφής';
   end if;
-  perform pg_temp.expect_fail(format('select public.tally_add(%L, %L, %L, %L, %L)', c, '2026-12-05', 'efood', marg, 1),
-    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής μετά την απογραφή της ημέρας');
+  if (select stock_cut from public.doc_line where doc_id = st and item_id = flour) <> (select last_value from public.stock_move_id_seq) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: στιγμή μέτρησης μετά τις πωλήσεις ημέρας';
+  end if;
+  perform public.post_document(st);
+  select expected_qty, diff_qty into v2, v3 from public.v_stocktake_result where doc_id = st and item_id = flour;
+  if v2 <> v or v3 <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ: η απογραφή δεν είδε τις πωλήσεις ημέρας (% / %)', v2, v3; end if;
+  -- κι άλλες πωλήσεις την ίδια μέρα, μετά τη μέτρηση: νέος μετρητής, κλείνει κανονικά
+  t4 := public.tally_add(c, '2026-12-05', 'efood', marg, 1);
+  if t4 is null or t4 = t or not (select is_running from public.doc where id = t4) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: μετρητής μετά την απογραφή της ημέρας';
+  end if;
   if public.tally_add(c, '2026-12-05', 'box', special, 1) is distinct from t2 then
     raise exception 'ΑΠΟΤΥΧΙΑ: μετρητής κατεψυγμένης μετά την απογραφή αλευριού';
   end if;
   perform public.post_document(t2);
+  perform public.post_document(t4);
 
-  -- πώληση ημέρας που δεν καταχωρείται: η απογραφή αποτυγχάνει με καθαρό μήνυμα
+  -- πώληση ημέρας που δεν καταχωρείται: η μέτρηση αποτυγχάνει με καθαρό μήνυμα
   t := public.tally_add(c, '2026-12-10', 'store', marg, 1);
   update public.bom set is_active = false where id = b_dough;
-  st := public.stocktake_count(c, '2026-12-10', mozz, public.item_on_hand(mozz, '2026-12-10') - 0.12);
-  perform pg_temp.expect_fail(format('select public.post_document(%L)', st),
+  perform pg_temp.expect_fail(format('select public.stocktake_count(%L, %L, %L, %L)', c, '2026-12-10', mozz, 1),
     'Πρώτα πρέπει να καταχωρηθούν οι πωλήσεις ημέρας ΠΩ-% (10/12 store): Το ημιέτοιμο "Ζυμάρι 250γρ"%συνταγή',
-    'απογραφή με πώληση ημέρας που αποτυγχάνει');
+    'μέτρηση με πώληση ημέρας που αποτυγχάνει');
   if not exists (select 1 from public.doc where id = t and status = 'draft' and is_running)
-     or not exists (select 1 from public.doc where id = st and status = 'draft') then
-    raise exception 'ΑΠΟΤΥΧΙΑ: η αποτυχημένη απογραφή άφησε αλλαγές';
+     or exists (select 1 from public.doc where company_id = c and doc_type = 'stocktake' and doc_date = '2026-12-10') then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η αποτυχημένη μέτρηση άφησε αλλαγές';
   end if;
   update public.bom set is_active = true where id = b_dough;
   -- πρόχειρο που κόλλησε σε ημέρα ήδη κλειδωμένη (4/12, από το αλεύρι της 5/12): δεν μπλοκάρει
   insert into public.doc (company_id, doc_type, doc_date, channel, is_running, notes)
   values (c, 'sale', '2026-12-04', 'wolt', true, 'Πωλήσεις ημέρας') returning id into t3;
   insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (t3, 1, marg, 1, 8, 13);
+  st := public.stocktake_count(c, '2026-12-10', mozz, public.item_on_hand(mozz, '2026-12-10') - 0.12);
   perform public.post_document(st);
   if not exists (select 1 from public.doc where id = t and status = 'posted')
      or not exists (select 1 from public.doc where id = t3 and status = 'draft' and is_running)
@@ -916,6 +969,463 @@ begin
     raise exception 'ΑΠΟΤΥΧΙΑ: άλλαξαν οι συνταγές μας';
   end if;
   raise notice 'OK ασφάλεια: source_doc_id/is_auto, συνταγές και τιμές ίδιας εταιρείας';
+
+  -- -------------------------------------------------------------------
+  -- 19. Μέτρηση στη μέση της μέρας (μερική απογραφή αλευριού): μετράει τη
+  --     στιγμή που λέγεται. Πρωί: αγορά και πωλήσεις -> «αλεύρι 20 κιλά»
+  --     στην αποθήκη -> απόγευμα: κι άλλες πωλήσεις και αγορά την ίδια
+  --     μέρα -> «αλεύρι άλλα … κιλά» στο ψυγείο -> «τέλος απογραφής»
+  -- -------------------------------------------------------------------
+  -- αφετηρία: μέτρηση 5/1 χωρίς διαφορά (κλείνει την προηγούμενη περίοδο)
+  st := public.stocktake_count(c, '2027-01-05', flour, public.item_on_hand(flour, '2027-01-05'));
+  perform public.post_document(st);
+  -- πρωί 10/1
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-01-10', mill) returning id into pm;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (pm, 1, flour, 10, 0.68, 13);
+  perform public.post_document(pm);
+  t := public.tally_add(c, '2027-01-10', 'efood', marg, 3);       -- κινεί αλεύρι (αυτόματο ζυμάρι)
+  t2 := public.tally_add(c, '2027-01-10', 'box', special, 1);     -- δεν κινεί αλεύρι
+  -- πραγματικό αλεύρι = βιβλία - πρωινή κατανάλωση - 0,5 kg έλλειμμα
+  v := public.item_on_hand(flour, '2027-01-10') - 3 * 6.5 / 40 - 0.5;
+  st := public.stocktake_count(c, '2027-01-10', flour, 20);       -- «αλεύρι 20 κιλά» (αποθήκη)
+  select stock_cut into cut1 from public.doc_line where doc_id = st and item_id = flour;
+  if not exists (select 1 from public.doc where id = t and status = 'posted' and not is_running) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η πρώτη μέτρηση δεν καταχώρησε τις πρωινές πωλήσεις';
+  end if;
+  if not exists (select 1 from public.doc where id = t2 and status = 'draft' and is_running) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η μέτρηση αλευριού καταχώρησε πωλήσεις που δεν το κινούν';
+  end if;
+  if cut1 is distinct from (select last_value from public.stock_move_id_seq)
+     or not exists (select 1 from public.stock_move m join public.doc b on b.id = m.doc_id join public.doc a on a.id = b.source_doc_id
+                     where a.source_doc_id = t and m.item_id = flour and m.id <= cut1) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: στιγμή πρώτης μέτρησης %', cut1;
+  end if;
+  -- απόγευμα, ίδια μέρα: κι άλλες πωλήσεις (νέος μετρητής) και αγορά αλευριού
+  t3 := public.tally_add(c, '2027-01-10', 'efood', marg, 2);
+  if t3 is null or t3 = t or not (select is_running and status = 'draft' from public.doc where id = t3) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: μετρητής μετά τη μέτρηση της ίδιας μέρας';
+  end if;
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-01-10', mill) returning id into p3;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (p3, 1, flour, 25, 0.70, 13);
+  perform public.post_document(p3);
+  -- «αλεύρι άλλα … κιλά» (ψυγείο): πρόσθεση, ίδια στιγμή μέτρησης
+  perform public.stocktake_count(c, '2027-01-10', flour, v - 20, true);
+  if (select qty from public.doc_line where doc_id = st and item_id = flour) <> v
+     or (select stock_cut from public.doc_line where doc_id = st and item_id = flour) is distinct from cut1 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: πρόσθεση δεύτερου δωματίου (% / στιγμή %)',
+      (select qty from public.doc_line where doc_id = st and item_id = flour),
+      (select stock_cut from public.doc_line where doc_id = st and item_id = flour);
+  end if;
+  -- κλείσιμο του απογευματινού efood πριν από το «τέλος απογραφής», κι ένα
+  -- τηλέφωνο που μένει ανοιχτό ως μετά
+  perform public.post_document(t3);
+  t4 := public.tally_add(c, '2027-01-10', 'phone', marg, 1);
+  v2 := public.item_on_hand(flour);
+  perform public.post_document(st);                               -- «τέλος απογραφής»
+  select expected_qty, diff_qty into v3, v4 from public.doc_line where doc_id = st and item_id = flour;
+  if v3 <> v + 0.5 or v4 <> -0.5 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: αναμενόμενο μέτρησης στη μέση της μέρας: % / % (σωστό % / -0.5)', v3, v4, v + 0.5;
+  end if;
+  if not exists (select 1 from public.doc where id = t4 and status = 'draft' and is_running) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: το «τέλος απογραφής» καταχώρησε πωλήσεις μετά τη μέτρηση';
+  end if;
+  -- υπόλοιπο μετά τη διόρθωση = μέτρηση + κινήσεις μετά τη μέτρηση
+  if public.item_on_hand(flour) <> v + 25 - 2 * 6.5 / 40 or public.item_on_hand(flour) <> v2 - 0.5 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: υπόλοιπο μετά τη διόρθωση % (σωστό %)', public.item_on_hand(flour), v + 25 - 2 * 6.5 / 40;
+  end if;
+  -- κλείσιμο ημέρας μετά το «τέλος απογραφής»: περνάει
+  perform public.post_document(t4);
+  perform public.post_document(t2);
+  -- επιμερισμός: το έλλειμμα μόνο στο πρωινό αυτόματο ζυμάρι, όχι στα απογευματινά
+  select count(*) into n from public.cost_alloc where stocktake_doc_id = st and level = 1;
+  select count(*) into n2
+    from public.cost_alloc ca join public.doc b on b.id = ca.production_doc_id join public.doc a on a.id = b.source_doc_id
+   where ca.stocktake_doc_id = st and ca.level = 1 and a.source_doc_id = t;
+  select diff_value, allocated_value into v3, v4 from public.v_stocktake_result where doc_id = st and item_id = flour;
+  if n <> 1 or n2 <> 1 or v3 <= 0 or v4 <> v3 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: επιμερισμός μέτρησης στη μέση της μέρας: % (πρωινά %), % / %', n, n2, v3, v4;
+  end if;
+  -- κλειδώματα: ό,τι είναι πριν από τη μέτρηση κλειδώνει, ό,τι είναι μετά όχι
+  insert into public.doc (company_id, doc_type, doc_date, channel) values (c, 'sale', '2027-01-09', 'store') returning id into d;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (d, 1, marg, 1, 8, 13);
+  perform pg_temp.expect_fail(format('select public.post_document(%L)', d),
+    'Κλειδωμένη περίοδος: υπάρχει απογραφή ΑΠ-%"Αλεύρι"%', 'πώληση με ημερομηνία πριν από τη μέτρηση');
+  delete from public.doc where id = d;
+  perform pg_temp.expect_fail(format('select public.tally_add(%L, %L, %L, %L, %L)', c, '2027-01-09', 'efood', marg, 1),
+    'Κλειδωμένη περίοδος%"Αλεύρι"%', 'μετρητής την προηγούμενη μέρα της μέτρησης');
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', pm),
+    'Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην απογραφή ΑΠ-% μετά από αυτή την κίνηση%', 'ακύρωση πρωινής αγοράς (πριν από τη μέτρηση)');
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', t),
+    '%απογραφή ΑΠ-%', 'ακύρωση πρωινών πωλήσεων (πριν από τη μέτρηση)');
+  perform public.unpost_document(p3);                              -- απογευματινή αγορά
+  perform public.post_document(p3);
+  perform public.unpost_document(t3);                              -- απογευματινές πωλήσεις
+  if not (select is_running from public.doc where id = t3) then raise exception 'ΑΠΟΤΥΧΙΑ: οι απογευματινές πωλήσεις δεν ξανάνοιξαν'; end if;
+  perform public.post_document(t3);
+  -- επόμενη μέτρηση (15/1): η απογευματινή κατανάλωση της 10/1 πέφτει εδώ, δεν χάνεται
+  st2 := public.stocktake_count(c, '2027-01-15', flour, public.item_on_hand(flour, '2027-01-15') - 0.25);
+  perform public.post_document(st2);
+  select count(*) into n from public.cost_alloc where stocktake_doc_id = st2 and level = 1;
+  select count(*) into n2
+    from public.cost_alloc ca join public.doc b on b.id = ca.production_doc_id join public.doc a on a.id = b.source_doc_id
+   where ca.stocktake_doc_id = st2 and ca.level = 1 and a.source_doc_id in (t3, t4);
+  select diff_value, allocated_value into v3, v4 from public.v_stocktake_result where doc_id = st2 and item_id = flour;
+  if n <> 2 or n2 <> 2 or v3 <= 0 or v4 <> v3 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η απογευματινή κατανάλωση στην επόμενη περίοδο: % (απογευματινά %), % / %', n, n2, v3, v4;
+  end if;
+  raise notice 'OK μέτρηση στη μέση της μέρας: πρωινές πωλήσεις πριν, απογευματινές μετά (στην επόμενη περίοδο, έλλειμμα αξίας %)', v4;
+
+  -- -------------------------------------------------------------------
+  -- 20. Πρόσθεση / διόρθωση κρατούν τη στιγμή της πρώτης μέτρησης·
+  --     αφαίρεση και ξανά μέτρηση = νέα στιγμή
+  -- -------------------------------------------------------------------
+  st := public.stocktake_count(c, '2027-01-20', sauce, 10);        -- «σάλτσα 10 κιλά»
+  select stock_cut into cut1 from public.doc_line where doc_id = st and item_id = sauce;
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-01-20', mill) returning id into p4;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (p4, 1, sauce, 5, 2, 13);
+  perform public.post_document(p4);
+  perform public.stocktake_count(c, '2027-01-20', sauce, 2, true); -- «σάλτσα άλλα 2»
+  if (select qty from public.doc_line where doc_id = st and item_id = sauce) <> 12
+     or (select stock_cut from public.doc_line where doc_id = st and item_id = sauce) is distinct from cut1 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: πρόσθεση μετά από κίνηση άλλαξε τη στιγμή';
+  end if;
+  perform public.stocktake_count(c, '2027-01-20', sauce, 11);      -- «σάλτσα σύνολο 11»
+  if (select qty from public.doc_line where doc_id = st and item_id = sauce) <> 11
+     or (select stock_cut from public.doc_line where doc_id = st and item_id = sauce) is distinct from cut1 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: διόρθωση άλλαξε τη στιγμή';
+  end if;
+  t2 := public.stocktake_count(c, '2027-01-20', sauce, null);      -- αφαίρεση
+  if t2 is not null or exists (select 1 from public.doc where id = st) then raise exception 'ΑΠΟΤΥΧΙΑ: αφαίρεση σάλτσας'; end if;
+  st := public.stocktake_count(c, '2027-01-20', sauce, 11);        -- ξανά: νέα στιγμή, μετά την αγορά
+  select stock_cut into cut2 from public.doc_line where doc_id = st and item_id = sauce;
+  if cut2 <= cut1 or cut2 < (select max(id) from public.stock_move where doc_id = p4) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: νέα στιγμή μετά την αφαίρεση (% <= %)', cut2, cut1;
+  end if;
+  v := public.item_on_hand(sauce);
+  perform public.post_document(st);
+  if (select expected_qty from public.doc_line where doc_id = st and item_id = sauce) <> v then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η νέα μέτρηση δεν είδε την αγορά';
+  end if;
+  raise notice 'OK πρόσθεση/διόρθωση κρατούν τη στιγμή %, αφαίρεση + ξανά = νέα στιγμή %', cut1, cut2;
+
+  -- -------------------------------------------------------------------
+  -- 21. Απογραφή με το χέρι (γραμμές χωρίς στιγμή): "μετρήθηκε στην
+  --     καταχώρηση", με τις ανοιχτές πωλήσεις της ημέρας πρώτα
+  -- -------------------------------------------------------------------
+  t := public.tally_add(c, '2027-01-25', 'store', marg, 2);
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'stocktake', '2027-01-25') returning id into st;
+  insert into public.doc_line (doc_id, line_no, item_id, qty) values
+    (st, 1, flour, public.item_on_hand(flour, '2027-01-25') - 2 * 6.5 / 40);
+  -- στιγμή "από το μέλλον" (γραμμένη με το χέρι): σαν να μετρήθηκε τώρα
+  insert into public.doc_line (doc_id, line_no, item_id, qty, stock_cut) values
+    (st, 2, oil, public.item_on_hand(oil, '2027-01-25') - 2 * 0.2 / 40, 999999999999);
+  perform public.post_document(st);
+  if not exists (select 1 from public.doc where id = t and status = 'posted') then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η απογραφή με το χέρι δεν καταχώρησε τις πωλήσεις της ημέρας';
+  end if;
+  select min(stock_cut), max(stock_cut) into cut1, cut2 from public.doc_line where doc_id = st;
+  if cut1 is null or cut1 <> cut2 or cut1 < (select max(id) from public.stock_move where doc_id = t)
+     or exists (select 1 from public.stock_move where doc_id = st and id <= cut1) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: στιγμή απογραφής με το χέρι % / %', cut1, cut2;
+  end if;
+  if exists (select 1 from public.doc_line where doc_id = st and diff_qty <> 0) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: απογραφή με το χέρι χωρίς τις πωλήσεις της ημέρας';
+  end if;
+  -- κι άλλες πωλήσεις την ίδια μέρα: περνούν, και ακυρώνονται
+  t := public.tally_add(c, '2027-01-25', 'store', marg, 1);
+  perform public.post_document(t);
+  perform public.unpost_document(t);
+  perform public.post_document(t);
+  raise notice 'OK απογραφή με το χέρι: στιγμή = καταχώρηση';
+
+  -- -------------------------------------------------------------------
+  -- 22. Δεύτερη μέτρηση του ίδιου είδους την ίδια μέρα (πρωί και βράδυ)
+  -- -------------------------------------------------------------------
+  st := public.stocktake_count(c, '2027-02-01', flour, public.item_on_hand(flour, '2027-02-01') - 0.2);
+  perform public.post_document(st);                                -- πρωί
+  t := public.tally_add(c, '2027-02-01', 'efood', marg, 4);        -- μεσημέρι
+  perform public.post_document(t);
+  st2 := public.stocktake_count(c, '2027-02-01', flour, public.item_on_hand(flour) - 0.1);
+  if st2 is null or st2 = st then raise exception 'ΑΠΟΤΥΧΙΑ: βραδινή μέτρηση στην ίδια απογραφή'; end if;
+  v := public.item_on_hand(flour);
+  perform public.post_document(st2);                               -- βράδυ
+  select expected_qty, diff_qty into v2, v3 from public.doc_line where doc_id = st2 and item_id = flour;
+  if v2 <> v or v3 <> -0.1 then raise exception 'ΑΠΟΤΥΧΙΑ: βραδινή μέτρηση % / %', v2, v3; end if;
+  -- επιμερισμός της βραδινής: μόνο το μεσημεριανό αυτόματο ζυμάρι
+  select count(*) into n from public.cost_alloc where stocktake_doc_id = st2 and level = 1;
+  select count(*) into n2
+    from public.cost_alloc ca join public.doc b on b.id = ca.production_doc_id join public.doc a on a.id = b.source_doc_id
+   where ca.stocktake_doc_id = st2 and ca.level = 1 and a.source_doc_id = t;
+  if n <> 1 or n2 <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: επιμερισμός βραδινής μέτρησης % / %', n, n2; end if;
+  if exists (select 1 from public.cost_alloc ca
+              where ca.stocktake_doc_id = st
+                and ca.production_doc_id in (select a.id from public.doc a where a.source_doc_id = t
+                                             union all
+                                             select b.id from public.doc a join public.doc b on b.source_doc_id = a.id
+                                              where a.source_doc_id = t)) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η πρωινή μέτρηση πήρε το μεσημέρι';
+  end if;
+  -- το μεσημέρι είναι πριν από τη βραδινή μέτρηση: κλειδωμένο
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', t),
+    '%απογραφή ΑΠ-%', 'ακύρωση μεσημεριανών πωλήσεων (πριν από τη βραδινή μέτρηση)');
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', st),
+    'Υπάρχει μεταγενέστερη απογραφή ΑΠ-% για το είδος "Αλεύρι"%', 'ακύρωση πρωινής ενώ υπάρχει βραδινή');
+  -- ακύρωση και ξανά καταχώρηση με τη σειρά: ίδια αποτελέσματα
+  select diff_qty into v from public.doc_line where doc_id = st and item_id = flour;
+  perform public.unpost_document(st2);
+  perform public.unpost_document(st);
+  perform public.post_document(st2);
+  perform pg_temp.expect_fail(format('select public.post_document(%L)', st),
+    'Το είδος "Αλεύρι" μετρήθηκε ξανά μετά από αυτή τη μέτρηση, στην απογραφή ΑΠ-%', 'πρωινή μετά τη βραδινή');
+  perform public.unpost_document(st2);
+  perform public.post_document(st);
+  perform public.post_document(st2);
+  if (select diff_qty from public.doc_line where doc_id = st and item_id = flour) <> v
+     or (select diff_qty from public.doc_line where doc_id = st2 and item_id = flour) <> v3
+     or (select count(*) from public.cost_alloc where stocktake_doc_id = st2 and level = 1) <> 1 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ξανακαταχώρηση πρωινής/βραδινής';
+  end if;
+  raise notice 'OK δύο μετρήσεις την ίδια μέρα: πρωί %, βράδυ %', v, v3;
+
+  -- -------------------------------------------------------------------
+  -- 23. Παλιότερη μέτρηση δεν καταχωρείται μετά από νεότερη του ίδιου
+  --     είδους· βγάζεις το είδος και το ξαναμετράς
+  -- -------------------------------------------------------------------
+  st := public.stocktake_count(c, '2027-02-05', mozz, 3);           -- φωνή, πρωί
+  t := public.tally_add(c, '2027-02-05', 'store', marg, 1);
+  perform public.post_document(t);
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'stocktake', '2027-02-05') returning id into st3;
+  insert into public.doc_line (doc_id, line_no, item_id, qty) values (st3, 1, mozz, public.item_on_hand(mozz) - 0.3);
+  perform public.post_document(st3);                               -- με το χέρι, μεσημέρι
+  perform pg_temp.expect_fail(format('select public.post_document(%L)', st),
+    'Το είδος "Μοτσαρέλα" μετρήθηκε ξανά μετά από αυτή τη μέτρηση, στην απογραφή ΑΠ-%', 'παλιότερη μέτρηση μετά από νεότερη');
+  perform public.stocktake_count(c, '2027-02-05', mozz, null);
+  st := public.stocktake_count(c, '2027-02-05', mozz, public.item_on_hand(mozz));
+  perform public.post_document(st);
+  if (select diff_qty from public.doc_line where doc_id = st) <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ: ξαναμέτρηση μοτσαρέλας'; end if;
+  raise notice 'OK σειρά μετρήσεων: παλιότερη δεν περνά μετά από νεότερη';
+
+  -- -------------------------------------------------------------------
+  -- 24. Δικές τους φράσεις (voice_phrase): μόνο μέλη, μία φορά η καθεμία
+  -- -------------------------------------------------------------------
+  insert into public.voice_phrase (company_id, phrase, meaning) values (c, '  Οικογενειακή ', ' μεγάλη   μαργαρίτα ') returning id into vp;
+  if (select phrase || '|' || meaning from public.voice_phrase where id = vp) <> 'Οικογενειακή|μεγάλη μαργαρίτα' then
+    raise exception 'ΑΠΟΤΥΧΙΑ: καθάρισμα κενών φράσης';
+  end if;
+  insert into public.voice_phrase (company_id, phrase, meaning) values (c, 'το συνηθισμένο του ξενοδοχείου',
+    'πούλησα στο ξενοδοχείο Αστέρια 60 σπέσιαλ κατεψυγμένες');
+  sql := 'insert into public.voice_phrase (company_id, phrase, meaning) values (%L, %L, %L)';
+  perform pg_temp.expect_fail(format(sql, c, 'ΟΙΚΟΓΕΝΕΙΑΚΉ', 'κάτι'), '%voice_phrase_company_phrase%', 'φράση: διπλή με κεφαλαία');
+  perform pg_temp.expect_fail(format(sql, c, 'οικογενειακή  ', 'κάτι'), '%voice_phrase_company_phrase%', 'φράση: διπλή με κενά');
+  perform pg_temp.expect_fail(format(sql, c, '   ', 'κάτι'), '%voice_phrase_phrase_check%', 'φράση: κενή');
+  perform pg_temp.expect_fail(format(sql, c, 'κάτι', ''), '%voice_phrase_meaning_check%', 'φράση: κενή σημασία');
+  perform pg_temp.expect_fail(format(sql, c, repeat('α', 201), 'κάτι'), '%voice_phrase_phrase_check%', 'φράση: πάνω από 200');
+  perform pg_temp.expect_fail(format('insert into public.voice_phrase (company_id, phrase) values (%L, %L)', c, 'χωρίς σημασία'),
+    '%meaning%', 'φράση: χωρίς σημασία');
+  update public.voice_phrase set meaning = 'μεγάλη σπέσιαλ' where id = vp;
+  if (select meaning from public.voice_phrase where id = vp) <> 'μεγάλη σπέσιαλ' then raise exception 'ΑΠΟΤΥΧΙΑ: αλλαγή σημασίας'; end if;
+  if not exists (select 1 from pg_trigger where tgrelid = 'public.voice_phrase'::regclass and tgname = 'voice_phrase_updated_at') then
+    raise exception 'ΑΠΟΤΥΧΙΑ: updated_at στο voice_phrase';
+  end if;
+  -- άλλη εταιρεία: δεν βλέπει, δεν γράφει, δεν αλλάζει, δεν σβήνει
+  perform set_config('request.jwt.claim.sub', other::text, false);
+  if exists (select 1 from public.voice_phrase where company_id = c) then raise exception 'ΑΠΟΤΥΧΙΑ: ξένος βλέπει φράσεις'; end if;
+  perform pg_temp.expect_fail(format(sql, c, 'ξένη', 'κάτι'), '%row-level security%', 'φράση σε ξένη εταιρεία');
+  update public.voice_phrase set meaning = 'χακαρισμένο' where id = vp;
+  get diagnostics n = row_count;
+  delete from public.voice_phrase where id = vp;
+  get diagnostics n2 = row_count;
+  if n <> 0 or n2 <> 0 then raise exception 'ΑΠΟΤΥΧΙΑ: ξένος άλλαξε/έσβησε φράση (% / %)', n, n2; end if;
+  insert into public.voice_phrase (company_id, phrase, meaning) values (c2, 'οικογενειακή', 'ξένη πίτσα');  -- ίδια φράση, άλλη εταιρεία
+  perform pg_temp.expect_fail(format('update public.voice_phrase set company_id = %L where company_id = %L', c, c2),
+    '%row-level security%', 'μεταφορά φράσης σε ξένη εταιρεία');
+  perform set_config('request.jwt.claim.sub', me::text, false);
+  if (select meaning from public.voice_phrase where id = vp) <> 'μεγάλη σπέσιαλ'
+     or exists (select 1 from public.voice_phrase where company_id = c2) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: φράσεις μεταξύ εταιρειών';
+  end if;
+  if has_table_privilege('anon', 'public.voice_phrase', 'select') or has_table_privilege('anon', 'public.voice_phrase', 'insert') then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ο anon έχει πρόσβαση στις φράσεις';
+  end if;
+  delete from public.voice_phrase where id = vp;
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: διαγραφή φράσης'; end if;
+  raise notice 'OK δικές τους φράσεις: μέλη μόνο, μία φορά η καθεμία (χωρίς πεζά/κεφαλαία)';
+
+  -- -------------------------------------------------------------------
+  -- 25. Ό,τι είναι ήδη μέσα σε μέτρηση δεν ακυρώνεται, ούτε όσο η
+  --     απογραφή είναι σε εξέλιξη: ξανακαταχωρημένο θα έπαιρνε νέα id και
+  --     θα μετρούσε για μετά (διπλό απόθεμα / φανταστικό έλλειμμα).
+  --     Βγάζεις το είδος από την απογραφή, διορθώνεις, ξαναμετράς.
+  -- -------------------------------------------------------------------
+  -- 28/2: αγορά αλευριού (παλιότερη μέρα από τη μέτρηση της 1/3)
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-02-28', mill) returning id into pb;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (pb, 1, flour, 5, 0.68, 13);
+  perform public.post_document(pb);
+  -- 1/3 πρωί: παραλαβή 25 kg (λάθος τιμή) και 2 μαργαρίτες
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-03-01', mill) returning id into pa;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (pa, 1, flour, 25, 0.80, 13);
+  perform public.post_document(pa);
+  t := public.tally_add(c, '2027-03-01', 'store', marg, 2);
+  v := public.item_on_hand(flour) - 2 * 6.5 / 40;                  -- ό,τι υπάρχει στο ράφι
+  st := public.stocktake_count(c, '2027-03-01', flour, v);         -- «αλεύρι … κιλά»
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', pa),
+    'Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην απογραφή σε εξέλιξη ΑΠ-% μετά από αυτή την κίνηση%βγάλτε πρώτα το είδος%',
+    'ακύρωση αγοράς που είναι μέσα σε μέτρηση σε εξέλιξη');
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', t),
+    'Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην απογραφή σε εξέλιξη ΑΠ-%',
+    'ακύρωση πωλήσεων ημέρας μέσα σε μέτρηση σε εξέλιξη (μέσω αυτόματου ζυμαριού)');
+  if not exists (select 1 from public.doc where id = t and status = 'posted') then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η αποτυχημένη ακύρωση άφησε αλλαγές';
+  end if;
+  -- παλιότερη μέρα: μένει "πριν" ό,τι κι αν γίνει, ακυρώνεται και ξανακαταχωρείται
+  perform public.unpost_document(pb);
+  perform public.post_document(pb);
+  -- ίδια μέρα, μετά τη μέτρηση: περνάει, ακυρώνεται, ξανακαταχωρείται
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-03-01', mill) returning id into pc;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (pc, 1, flour, 10, 0.68, 13);
+  perform public.post_document(pc);
+  perform public.unpost_document(pc);
+  perform public.post_document(pc);
+  -- και σε πρόχειρη απογραφή που κρατά τη στιγμή («Χειροκίνητη επεξεργασία»)
+  update public.doc set is_running = false where id = st;
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', pa),
+    'Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην πρόχειρη απογραφή ΑΠ-%', 'ακύρωση αγοράς μέσα σε πρόχειρη απογραφή');
+  update public.doc set is_running = true where id = st;
+  -- όπως λέει το μήνυμα: βγάζεις το αλεύρι, διορθώνεις την τιμή, ξαναμετράς
+  if public.stocktake_count(c, '2027-03-01', flour, null) is not null then
+    raise exception 'ΑΠΟΤΥΧΙΑ: αφαίρεση αλευριού από την απογραφή σε εξέλιξη';
+  end if;
+  perform public.unpost_document(pa);
+  update public.doc_line set unit_price = 0.70 where doc_id = pa;
+  perform public.post_document(pa);
+  st := public.stocktake_count(c, '2027-03-01', flour, v + 10 - 0.5);   -- + η απογευματινή αγορά, λείπει 0,5
+  perform public.post_document(st);
+  select expected_qty, diff_qty into v2, v3 from public.doc_line where doc_id = st and item_id = flour;
+  if v2 <> v + 10 or v3 <> -0.5 or public.item_on_hand(flour) <> v + 10 - 0.5 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ξαναμέτρηση μετά τη διόρθωση: % / % / υπόλοιπο %', v2, v3, public.item_on_hand(flour);
+  end if;
+  -- καταχωρημένη: το μήνυμα λέει τι να κάνεις· ακυρωμένη κρατά τη στιγμή,
+  -- άρα κλειδώνει ακόμα (και ξανακαταχωρείται με το ίδιο αποτέλεσμα)
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', pa),
+    'Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην απογραφή ΑΠ-% μετά από αυτή την κίνηση%βγάλτε το είδος%',
+    'ακύρωση αγοράς μέσα σε καταχωρημένη μέτρηση');
+  perform public.unpost_document(st);
+  perform pg_temp.expect_fail(format('select public.unpost_document(%L)', pa),
+    'Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην πρόχειρη απογραφή ΑΠ-%', 'ακύρωση αγοράς μέσα σε ακυρωμένη μέτρηση');
+  perform public.post_document(st);
+  if (select diff_qty from public.doc_line where doc_id = st) <> -0.5 or public.item_on_hand(flour) <> v + 10 - 0.5 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ξανακαταχώρηση μέτρησης';
+  end if;
+  raise notice 'OK ό,τι είναι μέσα σε μέτρηση (και σε εξέλιξη) δεν ακυρώνεται· βγάζεις το είδος, διορθώνεις, ξαναμετράς';
+
+  -- -------------------------------------------------------------------
+  -- 26. Πωλήσεις ημέρας που έγιναν απλό πρόχειρο («Χειροκίνητη
+  --     επεξεργασία», ή ακύρωση ενώ άνοιξε νέος μετρητής) είναι πωλήσεις
+  --     πριν από τη μέτρηση: καταχωρούνται κι αυτές με την πρώτη μέτρηση
+  -- -------------------------------------------------------------------
+  t := public.tally_add(c, '2027-03-05', 'store', marg, 4);
+  update public.doc set is_running = false where id = t;           -- «Χειροκίνητη επεξεργασία»
+  update public.doc_line set unit_price = 7.5 where doc_id = t;
+  t2 := public.tally_add(c, '2027-03-04', 'efood', marg, 2);
+  perform public.post_document(t2);
+  t3 := public.tally_add(c, '2027-03-04', 'efood', marg, 1);       -- νέος μετρητής της 4/3
+  perform public.unpost_document(t2);                               -- μένει απλό πρόχειρο
+  if (select is_running from public.doc where id = t2) then raise exception 'ΑΠΟΤΥΧΙΑ: δύο ανοιχτοί μετρητές 4/3'; end if;
+  v := public.item_on_hand(flour) - 7 * 6.5 / 40;                  -- 4 + 2 + 1 μαργαρίτες
+  st := public.stocktake_count(c, '2027-03-05', flour, v);
+  if (select count(*) from public.doc where id in (t, t2, t3) and status = 'posted') <> 3 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: η μέτρηση δεν καταχώρησε τις πρόχειρες πωλήσεις ημέρας';
+  end if;
+  if (select total_net from public.doc where id = t) <> 30 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: χάθηκε η αλλαγή τιμής της χειροκίνητης επεξεργασίας';
+  end if;
+  perform public.post_document(st);
+  if (select diff_qty from public.doc_line where doc_id = st) <> 0 or public.item_on_hand(flour) <> v then
+    raise exception 'ΑΠΟΤΥΧΙΑ: πρόχειρες πωλήσεις ημέρας μετρήθηκαν δύο φορές (% / %)',
+      (select diff_qty from public.doc_line where doc_id = st), public.item_on_hand(flour);
+  end if;
+  raise notice 'OK πρόχειρες πωλήσεις ημέρας καταχωρούνται με την πρώτη μέτρηση';
+
+  -- -------------------------------------------------------------------
+  -- 27. Αξία διαφοράς με το μέσο κόστος τη στιγμή της μέτρησης: αγορά σε
+  --     άλλη τιμή πριν από το «τέλος απογραφής» δεν αλλάζει την αξία του
+  --     ελλείμματος, και η ακύρωσή της αφήνει σωστό μέσο κόστος
+  -- -------------------------------------------------------------------
+  select coalesce(sum(qty), 0), coalesce(sum(total_cost), 0) into v5, v6 from public.stock_move where item_id = flour;
+  v2 := (select avg_cost from public.item where id = flour);
+  st := public.stocktake_count(c, '2027-03-08', flour, v5 - 1);    -- λείπει 1 kg
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-03-08', mill) returning id into pa;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (pa, 1, flour, 100, 5, 13);
+  perform public.post_document(pa);
+  if (select avg_cost from public.item where id = flour) < v2 + 0.5 then raise exception 'ΑΠΟΤΥΧΙΑ: στήσιμο αξίας'; end if;
+  perform public.post_document(st);
+  select unit_cost, diff_value into v3, v4 from public.doc_line where doc_id = st;
+  if abs(v3 - v2) > 0.000002 or v4 <> round(v3, 4) then
+    raise exception 'ΑΠΟΤΥΧΙΑ: αξία ελλείμματος με κόστος % (σωστό %), αξία %', v3, v2, v4;
+  end if;
+  -- νέο μέσο κόστος = (απόθεμα πριν + αγορά - έλλειμμα στο κόστος της μέτρησης)
+  if abs((select avg_cost from public.item where id = flour) - (v6 + 500 - v4) / (v5 + 100 - 1)) > 0.000002 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: μέσο κόστος μετά το έλλειμμα %', (select avg_cost from public.item where id = flour);
+  end if;
+  perform public.unpost_document(pa);                               -- μετά τη μέτρηση: ακυρώνεται
+  if abs((select avg_cost from public.item where id = flour) - (v6 - v4) / (v5 - 1)) > 0.000002
+     or (select sum(total_cost) from public.stock_move where item_id = flour) <> v6 - v4 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: μέσο κόστος μετά την ακύρωση της αγοράς % (σωστό %)',
+      (select avg_cost from public.item where id = flour), (v6 - v4) / (v5 - 1);
+  end if;
+  raise notice 'OK αξία ελλείμματος με το κόστος της στιγμής της μέτρησης (%)', v3;
+
+  -- -------------------------------------------------------------------
+  -- 28. Μέτρηση αλευριού στη μέση της μέρας, με ζυμάρια ζυμωμένα το πρωί
+  --     (με το χέρι): το έλλειμμα του ζυμώματος πέφτει σε όλες τις πίτσες
+  --     της μέρας από αυτά τα ζυμάρια, όχι μόνο στις λίγες πριν τη μέτρηση
+  -- -------------------------------------------------------------------
+  st := public.stocktake_count(c, '2027-03-10', flour, public.item_on_hand(flour));   -- αφετηρία
+  perform public.post_document(st);
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2027-03-11') returning id into p3;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p3, 1, 'output', dough, 40);
+  perform public.post_document(p3);                                 -- 8:00 ζύμωμα
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2027-03-11') returning id into p4;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (p4, 1, 'output', special, 4);
+  perform public.post_document(p4);                                 -- πρωί: 4 πίτσες
+  st := public.stocktake_count(c, '2027-03-11', flour, public.item_on_hand(flour) - 0.5);   -- 12:00 μέτρηση
+  insert into public.doc (company_id, doc_type, doc_date) values (c, 'production', '2027-03-11') returning id into d;
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty) values (d, 1, 'output', special, 36);
+  perform public.post_document(d);                                  -- απόγευμα: 36 πίτσες
+  if exists (select 1 from public.doc where source_doc_id in (p4, d)) then raise exception 'ΑΠΟΤΥΧΙΑ: στήσιμο ζυμαριών'; end if;
+  perform public.post_document(st);
+  select diff_value into v from public.doc_line where doc_id = st;
+  select sum(cost_alloc) into v2 from public.cost_alloc where stocktake_doc_id = st and level = 1 and production_doc_id = p3;
+  select coalesce(sum(cost_alloc) filter (where production_doc_id = p4), 0),
+         coalesce(sum(cost_alloc) filter (where production_doc_id = d), 0),
+         coalesce(sum(cost_alloc), 0)
+    into v3, v4, v5
+    from public.cost_alloc where stocktake_doc_id = st and level = 2 and source = 'cascade';
+  if v <= 0 or v2 <> v or v5 <> v or abs(v3 - v * 4 / 40) > 0.0002 or abs(v4 - v * 36 / 40) > 0.0002 then
+    raise exception 'ΑΠΟΤΥΧΙΑ: ζυμάρια του πρωινού: % -> πρωί % / απόγευμα % (σύνολο %)', v, v3, v4, v5;
+  end if;
+  raise notice 'OK ζυμάρια του πρωινού: έλλειμμα % σε όλες τις πίτσες της μέρας (% / %)', v, v3, v4;
+
+  -- -------------------------------------------------------------------
+  -- 29. Η στιγμή της μέτρησης δεν πάει πίσω όταν ακυρώνεται η τελευταία
+  --     κίνηση: η βραδινή μέτρηση της ίδιας μέρας καταχωρείται
+  -- -------------------------------------------------------------------
+  insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-03-15', mill) returning id into pm;
+  insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (pm, 1, mozz, 2, 8, 13);
+  perform public.post_document(pm);
+  st := public.stocktake_count(c, '2027-03-15', flour, public.item_on_hand(flour));     -- πρωί, χωρίς διαφορά
+  perform public.post_document(st);
+  select stock_cut into cut1 from public.doc_line where doc_id = st;
+  perform public.unpost_document(pm);                               -- η τελευταία κίνηση φεύγει
+  delete from public.doc where id = pm;
+  if (select max(id) from public.stock_move) >= cut1 then raise exception 'ΑΠΟΤΥΧΙΑ: στήσιμο στιγμής'; end if;
+  st2 := public.stocktake_count(c, '2027-03-15', flour, public.item_on_hand(flour) - 0.1);   -- βράδυ
+  select stock_cut into cut2 from public.doc_line where doc_id = st2;
+  if cut2 < cut1 then raise exception 'ΑΠΟΤΥΧΙΑ: η στιγμή πήγε πίσω (% < %)', cut2, cut1; end if;
+  perform public.post_document(st2);
+  if (select diff_qty from public.doc_line where doc_id = st2) <> -0.1 then raise exception 'ΑΠΟΤΥΧΙΑ: βραδινή μέτρηση 15/3'; end if;
+  raise notice 'OK η στιγμή δεν πάει πίσω: πρωί %, βράδυ %', cut1, cut2;
 
   raise notice 'ΟΛΑ ΟΚ (φωνή)';
 end $$;

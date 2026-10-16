@@ -2,15 +2,16 @@ import type { Item, ItemType, Partner } from '../types'
 import type {
   Command, EntityRef, InterpretContext, Interpretation, Interpreter, PricedLine, QtyLine, TallyChannel,
 } from './types'
-import { capFirst, norm, titleCase, tokenize, type Tok } from './normalize'
+import { applyPhrases, capFirst, norm, phraseKey, phraseStartsName, titleCase, tokenize, words, type Tok, type Word } from './normalize'
+import { parseYesNo } from './describe'
 import { segment, type NumSeg, type Seg } from './numbers'
 import {
   AFM_WORDS, CENTS, CITIES, CITY_PREP, CORRECTION, EACH, LETTER_NAMES, LOCATION, MINUS_POST, MINUS_PRE, MONEY, MORE,
-  PER_ART, PHONE_WORDS, PLUS_WORDS, PRICE_PREP, REF_WORDS, TOTAL, UNIT_SHORT, VAT,
+  NET_WORDS, PER_ART, PHONE_WORDS, PLUS_WORDS, PRICE_PREP, REF_WORDS, ROOMS, SO_MANY, STOCK_WORDS, TOTAL, UNIT_SHORT, VAT,
   channelAt, convertUnit, cueOf, genericPack, isItemPack, isMeasureUnit, isModifier, isStop, unitWord,
   type Cue, type MeasureUnit,
 } from './lexicon'
-import { Matcher, emptyRef, getIndex, toRef, type Hit, type Index, type Pool, type Role, type Scored } from './match'
+import { Matcher, confident, emptyRef, getIndex, toRef, type Hit, type Index, type Pool, type Role, type Scored } from './match'
 import { fmtCost, fmtMoney } from '../format'
 
 /**
@@ -96,7 +97,25 @@ interface Line {
   price: NumInfo | null
 }
 
+/** Απογραφή: λέξη τρόπου στη φράση ("άλλα", "σύνολο", "άλλα τόσα") */
+interface ModeMark {
+  /** τμήματα [i, i + len) */
+  i: number
+  len: number
+  /** null: μόνο "τόσα" (λείπει ο αριθμός) */
+  mode: 'add' | 'set' | null
+  lead: boolean
+  trail: boolean
+  /** στην αρχή της φράσης ισχύει για όλες τις γραμμές */
+  all: boolean
+  /** "άλλα τόσα": δεν ειπώθηκε αριθμός */
+  soMany: boolean
+}
+
 const ARTICLES = new Set(['το', 'τον', 'τη', 'την', 'του', 'τησ'])
+const NEGATION = new Set(['δεν', 'δε', 'ουτε', 'μη', 'μην', 'χωρισ'])
+/** "πάγκος": κανάλι μαγαζί στις πωλήσεις, χώρος στην απογραφή */
+const COUNTER = new Set(['παγκο', 'παγκοσ', 'παγκου'])
 const NET_ADJ = new Set(['καθαρη', 'καθαρα', 'καθαρο', 'καθαρησ', 'καθαρων'])
 const TIME_PREV = new Set(['στισ', 'ωρα', 'ωρεσ'])
 /** "τραπέζι 5", "παραγγελία 1234": αριθμός-ετικέτα */
@@ -133,6 +152,12 @@ class Analysis {
   locStop = false
   /** αριθμοί που άλλαξαν από διόρθωση: πώς να φαίνονται */
   relabel = new Map<number, string>()
+  /** απογραφή: λέξεις πρόσθεσης / αντικατάστασης */
+  modes: ModeMark[] = []
+  /** "όχι 30 αλλά 40": θέση του "αλλά" (αντικατάσταση) */
+  private notButAt = new Set<number>()
+  /** τμήματα που διαβάζονται ως γέμισμα (λέξεις τρόπου, μόνο στην απογραφή) */
+  filler = new Set<number>()
 
   constructor(public text: string, public ctx: InterpretContext) {
     this.items = Array.isArray(ctx?.items) ? ctx.items : []
@@ -151,8 +176,10 @@ class Analysis {
     }
     this.idx = getIndex(this.items, this.partners)
     this.m = new Matcher(this.idx, this.toks, this.segs)
+    this.notBut()
     this.applyCorrections()
     this.uncueNames()
+    this.findModes()
   }
 
   w(i: number): string | null {
@@ -179,6 +206,22 @@ class Analysis {
 
   hasChannel(): boolean {
     return this.chan.some(Boolean)
+  }
+
+  /** Το μόνο "κανάλι" της φράσης είναι ο πάγκος; */
+  counterOnly(): boolean {
+    let any = false
+    for (let i = 0; i < this.segs.length; i++) {
+      if (!this.chan[i]) continue
+      if (!COUNTER.has(this.w(i) ?? '')) return false
+      any = true
+    }
+    return any
+  }
+
+  /** Ο πάγκος ως χώρος φύλαξης, όχι κανάλι */
+  counterAsRoom() {
+    this.segs.forEach((_s, i) => { if (this.chan[i] && COUNTER.has(this.w(i) ?? '')) this.chan[i] = null })
   }
 
   /** Μόνο γενικοί προσδιορισμοί ("κατεψυγμένα", "φρέσκο") στο [from, to) */
@@ -208,7 +251,7 @@ class Analysis {
   /** Απλή λέξη (όχι γέμισμα, εντολή, κανάλι, μονάδα, χρήματα) */
   isPlainWord(i: number): boolean {
     const n = this.w(i)
-    if (!n || isStop(n) || this.cue[i] || this.chan[i] || this.unitAt(i)) return false
+    if (!n || isStop(n) || this.filler.has(i) || this.cue[i] || this.chan[i] || this.unitAt(i)) return false
     return !MONEY.has(n) && !CENTS.has(n) && !VAT.has(n)
   }
 
@@ -223,6 +266,7 @@ class Analysis {
       if (s.t === 's') return 'block'
       if (s.t === 'n') return s.pct ? 'block' : 'num'
       const n = s.tok.n
+      if (this.filler.has(i)) return 'stop'
       if (reserveChannels && this.chan[i]) return 'block'
       const c = this.cue[i]
       if (c && c !== 'pizza') return 'block'
@@ -272,6 +316,60 @@ class Analysis {
   }
 
   /**
+   * "αλεύρι όχι 30 αλλά 40": μένει το 40 (στην απογραφή: αντικατάσταση).
+   * Χωρίς μονάδα στο 40 κρατά τη μονάδα του 30 ("όχι 3 σακιά αλλά 4").
+   */
+  private notBut() {
+    const n = this.segs.length
+    const isW = (j: number, stopAt?: string) => {
+      const w = this.w(j)
+      return w !== null && isStop(w) && w !== stopAt
+    }
+    for (let c = 0; c < n; c++) {
+      if (this.w(c) !== 'οχι' || this.used.has(c)) continue
+      let j = c + 1
+      while (j < n && isW(j, 'αλλα')) j++
+      const X = this.num(j)
+      if (!X || X.pct || X.size) continue
+      let k = j + 1
+      const xUnit = !!this.unitAt(k)
+      if (xUnit) k++
+      while (k < n && this.segs[k].t === 's') k++
+      if (this.w(k) !== 'αλλα') continue
+      let q = k + 1
+      while (q < n && (this.segs[q].t === 's' || isW(q))) q++
+      const Y = this.num(q)
+      if (!Y || Y.pct || Y.size) continue
+      this.used.add(c)
+      if (xUnit && !this.unitAt(q + 1)) {
+        // η νέα τιμή στη θέση της παλιάς (κρατά τη μονάδα)
+        X.value = Y.value
+        X.digits = Y.digits
+        X.words = Y.words
+        if (Y.half) X.half = true
+        else delete X.half
+        this.relabel.set(j, this.heard(q, q + 1))
+        this.used.add(q)
+      } else {
+        this.used.add(j)
+        if (xUnit) this.used.add(j + 1)
+      }
+      this.notButAt.add(k)
+      this.modes.push({ i: c, len: 1, mode: 'set', lead: true, trail: false, all: false, soMany: false })
+      c = k
+    }
+  }
+
+  /** "μοτσαρέλα 2 κιλά και αλεύρι διόρθωση 40": η διόρθωση πάει στο νέο είδος, όχι στο 2 */
+  private newItemBetween(p: number, c: number): boolean {
+    for (let t = p + 1; t < c - 1; t++) {
+      const w = this.w(t)
+      if ((w === 'και' || w === 'κι' || this.segs[t].t === 's') && this.isPlainWord(t + 1)) return true
+    }
+    return false
+  }
+
+  /**
    * "2 μαργαρίτες, λάθος, 3": η νέα ποσότητα αντικαθιστά την προηγούμενη·
    * "2 μαργαρίτες λάθος 3 μαργαρίτες": ξαναλέει όλη τη γραμμή.
    */
@@ -283,12 +381,12 @@ class Analysis {
       let j = c + 1
       while (j < n && (this.segs[j].t === 's' || (this.w(j) !== null && isStop(this.w(j) as string) && !CORRECTION.has(this.w(j) as string)))) j++
       const M = this.num(j)
-      if (!M || M.pct || M.size) continue
+      if (!M || M.pct || M.size || this.used.has(j)) continue
       let p = c - 1
       let steps = 0
       while (p >= 0 && !this.num(p) && steps < 5) { p--; steps++ }
       const N = p >= 0 ? this.num(p) : null
-      if (!N || N.pct || this.used.has(p)) continue
+      if (!N || N.pct || this.used.has(p) || this.newItemBetween(p, c)) continue
       let q = j + 1
       const mUnit = !!this.unitAt(q)
       if (mUnit) q++
@@ -342,6 +440,61 @@ class Analysis {
         if (top.entry.forms.some((f) => f.toks.some((t) => t.n === n))) this.cue[i] = null
       }
     }
+  }
+
+  /**
+   * Απογραφή: λέξεις τρόπου ("άλλα 5", "κι εδώ", "σύνολο 40", "40 αντί για
+   * 30", "όλα μαζί", "διόρθωσε", "άλλα τόσα"). Μόνο σημειώνονται εδώ· η
+   * απογραφή τις κάνει γέμισμα και τις δένει με γραμμές (stockModes).
+   */
+  private findModes() {
+    const n = this.segs.length
+    for (let i = 0; i < n; i++) {
+      if (this.used.has(i) || this.notButAt.has(i)) continue
+      const w = this.w(i)
+      if (!w) continue
+      const nx = this.used.has(i + 1) ? null : this.w(i + 1)
+      const at = i
+      const mark = (mode: 'add' | 'set' | null, len: number, lead: boolean, trail: boolean, all: boolean, soMany = false) => {
+        this.modes.push({ i: at, len, mode, lead, trail, all, soMany })
+        i += len - 1
+      }
+      // "όχι άλλα, σύνολο 40"
+      if (w === 'οχι' && nx && STOCK_WORDS.get(nx)?.mode === 'add') { mark('set', 2, true, true, false); continue }
+      // "κι εδώ αλεύρι 5 κιλά": άλλος χώρος
+      if ((w === 'και' || w === 'κι') && nx === 'εδω') { mark('add', 2, true, false, true); continue }
+      if ((w === 'ολα' || w === 'ολο' || w === 'ολεσ' || w === 'ολουσ') && nx === 'μαζι') { mark('set', 2, true, true, true); continue }
+      if (SO_MANY.has(w)) { mark(null, 1, true, true, false, true); continue }
+      const sw = STOCK_WORDS.get(w)
+      if (!sw) continue
+      // "έχουμε ακόμα 2 κιλά": ακόμα = ακόμη υπάρχουν, όχι πρόσθεση
+      if ((w === 'ακομα' || w === 'ακομη') && (this.cue[i - 1] === 'have' || this.cue[i - 1] === 'remain')) continue
+      if (sw.mode === 'add') {
+        // "αλλά" (τόνος στο τέλος) = σύνδεσμος, όχι "άλλα"· χωρίς τόνους δεν ξεχωρίζει
+        if (w === 'αλλα' && /^αλλά$/i.test((this.segs[i] as { tok: Tok }).tok.raw.normalize('NFC'))) continue
+        // "δεν έχει άλλο αλεύρι": άρνηση, όχι πρόσθεση
+        if (NEGATION.has(this.w(i - 1) ?? '') || NEGATION.has(this.w(i - 2) ?? '')) continue
+      }
+      if (sw.mode === 'add' && nx && SO_MANY.has(nx)) { mark('add', 2, true, true, false, true); continue }
+      if (w === 'αντι') {
+        // "40 κιλά αντί για 30": το 30 ήταν η παλιά μέτρηση
+        let j = i + 1
+        while (['για', 'του', 'τησ', 'τα', 'το', 'των', 'τουσ', 'τισ'].includes(this.w(j) ?? '')) j++
+        if (this.num(j) && !this.used.has(j)) {
+          this.used.add(j)
+          if (this.unitAt(j + 1)) this.used.add(j + 1)
+        }
+        mark('set', j - i, true, true, false)
+        continue
+      }
+      mark(sw.mode, 1, sw.lead, sw.trail, sw.all)
+    }
+  }
+
+  /** Απογραφή: οι λέξεις τρόπου γίνονται γέμισμα */
+  stockFiller() {
+    for (const m of this.modes) for (let i = m.i; i < m.i + m.len; i++) this.filler.add(i)
+    for (const k of this.notButAt) this.filler.add(k)
   }
 
   /**
@@ -473,10 +626,11 @@ class Analysis {
       const p = this.perAt(j)
       if (p) { info.per = p.per; j += p.len }
       const tw = this.w(j)
-      if (tw && TOTAL.has(tw) && !info.unit && !info.pack) { info.total = true; j++; if (this.w(j) === 'μαζι') j++ }
-      const prev = this.w(i - 1)
+      if (tw && TOTAL.has(tw) && !info.unit && !info.pack && !this.filler.has(j)) { info.total = true; j++; if (this.w(j) === 'μαζι') j++ }
+      const prev = this.filler.has(i - 1) ? null : this.w(i - 1)
       const prev2 = this.w(i - 2)
-      if (prev && (TOTAL.has(prev) || (prev === 'μαζι' && prev2 && TOTAL.has(prev2)))) info.total = true
+      // "σύνολο 155" = τιμή όλης της γραμμής· "σύνολο 10 σακιά" = ποσότητα
+      if (prev && !info.unit && !info.pack && (TOTAL.has(prev) || (prev === 'μαζι' && prev2 && TOTAL.has(prev2)))) info.total = true
       if (prev && (PRICE_PREP.has(prev) || this.cue[i - 1] === 'price' || this.cue[i - 1] === 'priceVerb')) info.prep = true
       info.end = j
       info.kaiNext = this.w(j) === 'και' && !!this.num(j + 1)
@@ -1099,7 +1253,7 @@ function recipeVerbAt(a: Analysis): number {
   return -1
 }
 
-function decide(a: Analysis): Decision {
+function decideKind(a: Analysis): Decision {
   const has = (...c: Cue[]) => a.has(...c)
   if (a.contentCount() === 0 && !a.cue.some(Boolean) && !a.hasChannel()) return { kind: 'unknown', conf: 0 }
   const txt = a.toks.filter((t) => !t.sep).map((t) => t.n).join(' ')
@@ -1151,7 +1305,13 @@ function decide(a: Analysis): Decision {
   if (has('ordered') && !a.hasChannel()) return unknownBecause('Οι παραγγελίες δεν περνιούνται· πες το όταν έρθουν ή όταν παραδοθούν.')
 
   // προκαταρκτικός εντοπισμός οντοτήτων
-  const pre = a.scan(POOL.all, true)
+  let pre = a.scan(POOL.all, true)
+  // "στον πάγκο μοτσαρέλα άλλα 2 κιλά": ο πάγκος είναι χώρος (όχι το κανάλι
+  // «μαγαζί») όταν δεν ακούστηκε έτοιμο είδος
+  if (a.counterOnly() && !pre.hits.some((h) => topKind(h) === 'item' && isFin(h.ranked[0].entry.item as Item))) {
+    a.counterAsRoom()
+    pre = a.scan(POOL.all, true)
+  }
   const ph = pre.hits.filter((h) => topKind(h) === 'partner' && (h.ranked[0]?.score ?? 0) >= 0.6)
   const ih = pre.hits.filter((h) => topKind(h) === 'item')
   const partner = ph[0]?.ranked[0]?.entry.partner ?? null
@@ -1171,6 +1331,8 @@ function decide(a: Analysis): Decision {
     return ih.some((h) => h.from === j)
   })
   const allFin = itemsOf.length > 0 && itemsOf.every(isFin)
+  /** πίτσες κατά παραγγελία: δεν έχουν απόθεμα, άρα πωλήσεις */
+  const mtoHeard = itemsOf.some((it) => isFin(it) && it.make_to_order)
   const sellPresent = a.toks.some((t) => SELL_PRESENT.has(t.n))
 
   // ερωτήσεις
@@ -1292,6 +1454,13 @@ function decide(a: Analysis): Decision {
   // "κάναμε 50 ζυμάρια"· "efood κάναμε 30 μαργαρίτες" = πωλήσεις
   if (has('did')) return a.hasChannel() ? { kind: 'sale_tally', conf: 0.7 } : { kind: 'production', conf: 0.75 }
   if (has('count', 'stocktakeNoun', 'remain', 'have')) return { kind: 'stocktake', conf: has('count', 'stocktakeNoun') ? 0.9 : 0.75 }
+  // μέτρηση χωρίς ρήμα: όχι με πίτσες κατά παραγγελία (πωλήσεις), όχι με
+  // προμηθευτή / πελάτη ("από τον μύλο άλλα 2 σακιά" = αγορά), όχι με τιμή
+  const countable = ih.length > 0 && !mtoHeard && !ph.length && !priceShaped(a, moneyNum, ih) && !a.hasChannel()
+  // "αλεύρι άλλα 5 κιλά", "μοτσαρέλα σύνολο 6", "διόρθωσε αλεύρι 40", "στον καταψύκτη άλλες 10 κατεψυγμένες"
+  if (countable && (a.modes.some((m) => m.mode || m.soMany) || has('fix'))) return { kind: 'stocktake', conf: 0.8 }
+  // "στην αποθήκη αλεύρι 10 σακιά": μέτρηση ανά χώρο
+  if (countable && nums && a.toks.some((t) => ROOMS.has(t.n))) return { kind: 'stocktake', conf: 0.7 }
   if (a.hasChannel()) return { kind: 'sale_tally', conf: 0.85 }
   // χωρίς ρήμα: από τα είδη (εκτός αν ακούστηκε ρήμα που δεν ξέρουμε: "χάλασαν", "κερνάμε")
   const verb = unknownVerb(a, pre.unknown)
@@ -1315,7 +1484,54 @@ function decide(a: Analysis): Decision {
     if (nums) return { kind: 'stocktake', conf: 0.45 }
   }
   if (has('stockNoun')) return { kind: 'query_stock', conf: 0.5 }
+  // "και στην κουζίνα άλλα 5", "άλλα δύο σακιά": λείπει το είδος
+  if (!ih.length && (nums || a.modes.some((m) => m.soMany)) && (a.modes.some((m) => m.mode || m.soMany) || a.toks.some((t) => ROOMS.has(t.n)))) {
+    return unknownBecause('Πες και το είδος, π.χ. «αλεύρι άλλα 5 κιλά» ή «efood άλλες δύο μαργαρίτες».')
+  }
   return { kind: 'unknown', conf: 0 }
+}
+
+/** Εντολές όπου το "διόρθωσε" θα πρόσθετε αντί να αντικαθιστά */
+const FIX_ADDS = new Set<Kind>(['sale_tally', 'sale', 'purchase', 'production', 'receipt', 'payment'])
+
+function decide(a: Analysis): Decision {
+  const d = decideKind(a)
+  // "διόρθωσε δύο μαργαρίτες": ο χρήστης θέλει "να γίνουν 2", όχι +2.
+  // Αντικατάσταση υπάρχει μόνο στην απογραφή (και στις τιμές / συνταγές).
+  if (a.has('fix') && FIX_ADDS.has(d.kind)) {
+    return unknownBecause(
+      d.kind === 'sale_tally'
+        ? 'Η διόρθωση γίνεται μόνο στην απογραφή· στις πωλήσεις πες τι αλλάζει, π.χ. «efood βγάλε μία μαργαρίτα».'
+        : 'Η διόρθωση γίνεται μόνο στην απογραφή· αλλιώς πες «ακύρωσε το τελευταίο» και ξαναπές το σωστά.',
+    )
+  }
+  return d
+}
+
+/**
+ * Αριθμός σε σχήμα τιμής: "ευρώ", "0,62 το κιλό", ή "σύνολο 155" για είδος
+ * που έχει ήδη ποσότητα με μονάδα ("10 σακιά αλεύρι σύνολο 155"· όχι το
+ * "αλεύρι σύνολο 40" ή το "σύνολο 260 κιλά", που είναι μέτρηση)
+ */
+function priceShaped(a: Analysis, moneyNum: boolean, ih: Hit[]): boolean {
+  if (moneyNum) return true
+  const qtyFor = (h: Hit, end: number) =>
+    a.segs.some((x, j) => {
+      if (x.t !== 'n' || a.used.has(j) || !a.unitAt(j + 1)) return false
+      if (j >= h.to && j < end) return true
+      // "10 σακιά (το) αλεύρι": ποσότητα ακριβώς πριν από το είδος
+      return j + 2 <= h.from && a.segs.slice(j + 2, h.from).every((y) => y.t === 'w' && isStop(y.tok.n) && y.tok.n !== 'και' && y.tok.n !== 'κι')
+    })
+  return a.segs.some((s, i) => {
+    if (s.t !== 'n' || a.used.has(i) || s.pct || s.size) return false
+    // "0,62 το κιλό" (όχι "ένα κομμάτι": μονάδα, όχι "ανά")
+    if (!a.unitAt(i + 1) && a.perAt(i + 1)) return true
+    let p = i - 1
+    if (a.w(p) === 'μαζι') p--
+    if (!TOTAL.has(a.w(p) ?? '') || a.unitAt(i + 1)) return false
+    const last = ih.filter((h) => h.to <= p).pop()
+    return !!last && qtyFor(last, p)
+  })
 }
 
 /** "νέο" ως εντολή: στην αρχή της φράσης ή πριν από λέξη τύπου ("Νέα Ζωή" δεν είναι εντολή) */
@@ -1391,6 +1607,7 @@ function buildLines(a: Analysis, pool: Pool, priced: boolean, lo = 0, hi = a.seg
   let nums = a.numbers(cov).filter((x) => x.i >= lo && x.i < hi)
   if (priced) nums = a.mergeCents(nums, false)
   const lines = pairLines(a, hitsToEnts(itemHits), hitsToEnts(sc.unknown, true), nums, priced, pool, tally)
+  sizeAsQty(a, lines, sc.roles, pool)
   const usedUnknown = new Set<Hit>(lines.filter((l) => l.ent.unknown).map((l) => l.ent.hit))
   // "λαζάνια κατεψυγμένα": ο προσδιορισμός μόνος του δεν φτάνει όταν δίπλα του
   // υπάρχει λέξη που δεν βρέθηκε → ρωτάμε, με όλη τη φράση όπως ακούστηκε
@@ -1403,6 +1620,38 @@ function buildLines(a: Analysis, pool: Pool, priced: boolean, lo = 0, hi = a.seg
     l.ent = { ...l.ent, weak: true, hit: { ...l.ent.hit, heard } }
   }
   return { lines, partnerHits, sc, usedUnknown, nums }
+}
+
+/**
+ * "σπέσιαλ κατεψυγμένες σύνολο 30" (είδος «Special κατεψυγμένη 30εκ»): ο
+ * αριθμός στο τέλος μπήκε στο όνομα, αλλά πριν από αυτόν ειπώθηκε λέξη
+ * ποσότητας ("σύνολο", "άλλες", "ακόμα") και το όνομα βγαίνει σίγουρο και
+ * χωρίς αυτόν → είναι η ποσότητα. Χωρίς τέτοια λέξη μένει αμφίσημο (ρωτάμε).
+ */
+function sizeAsQty(a: Analysis, lines: Line[], roles: Role[], pool: Pool) {
+  for (const l of lines) {
+    if (l.qty || l.ent.unknown) continue
+    const h = l.ent.hit
+    const ni = h.to - 1
+    const x = a.num(ni)
+    if (!x || x.pct || x.size || ni <= h.from) continue
+    let end = ni
+    let cue = false
+    while (end > h.from && roles[end - 1] === 'stop') {
+      const w = a.w(end - 1) ?? ''
+      if (STOCK_WORDS.has(w) || MORE.has(w) || TOTAL.has(w)) cue = true
+      end--
+    }
+    if (!cue || end <= h.from) continue
+    const before = confident(h.ranked)
+    const ranked = a.m.rank(h.from, end, roles, pool)
+    const now = confident(ranked)
+    if (!before || !now || now.entry.id !== before.entry.id) continue
+    const q = a.numbers(new Set()).find((n) => n.i === ni)
+    if (!q || q.money || q.per) continue
+    l.ent = { ...l.ent, to: end, hit: { ...h, to: end, heard: a.heard(h.from, end), ranked } }
+    l.qty = q
+  }
 }
 
 /** Η μονάδα που ακούστηκε βοηθά: "3 κιλά πεπερόνι" → το σαλάμι (kg), όχι η πίτσα (τεμ) */
@@ -1425,10 +1674,10 @@ function lineRef(l: Line): EntityRef {
 
 type Missing = 'one' | 'issue' | ((item: Item | null, ref: EntityRef) => number | null)
 
-function qtyLines(a: Analysis, lines: Line[], missing: Missing): { out: QtyLine[]; conf: number } {
+function qtyLines(a: Analysis, lines: Line[], missing: Missing, noQtyIssue?: (k: number, label: string) => string | null): { out: QtyLine[]; conf: number } {
   const out: QtyLine[] = []
   let conf = 1
-  for (const l of lines) {
+  for (const [k, l] of lines.entries()) {
     const ref = lineRef(l)
     refIssue(a, ref, 'είδος')
     conf = Math.min(conf, refConf(ref))
@@ -1440,7 +1689,11 @@ function qtyLines(a: Analysis, lines: Line[], missing: Missing): { out: QtyLine[
     if (qty === null) {
       const d = typeof missing === 'function' ? missing(item, ref) : missing === 'one' ? 1 : null
       if (d !== null) qty = d
-      else { a.issues.push(`Δεν ακούστηκε ποσότητα για «${label}».`); qty = 0; conf = Math.min(conf, 0.5) }
+      else {
+        a.issues.push(noQtyIssue?.(k, label) ?? `Δεν ακούστηκε ποσότητα για «${label}».`)
+        qty = 0
+        conf = Math.min(conf, 0.5)
+      }
     }
     const line: QtyLine = { item: ref, qty }
     const hq = lineHeardQty(a, l)
@@ -1619,23 +1872,93 @@ function buildProduction(a: Analysis): Built {
   return { command: { kind: 'production', item: out[0].item, qty: out[0].qty }, conf }
 }
 
+type StockMode = 'add' | 'set' | undefined
+
+/**
+ * Απογραφή: τρόπος ανά γραμμή. Η λέξη δένεται με την ποσότητα / το είδος
+ * που ακολουθεί ("άλλα 5 κιλά", "κι άλλη μοτσαρέλα") ή, όσες μπαίνουν και
+ * μετά, με αυτό που προηγείται ("40 κιλά συνολικά"). Στην αρχή της φράσης
+ * οι γενικές ("πρόσθεσε", "κι εδώ", "διόρθωσε") ισχύουν για όλες τις γραμμές.
+ * "5 κιλά και άλλα 2" μέσα στη φράση είναι άθροισμα, όχι τρόπος.
+ * Αν μια γραμμή ακούσει και τα δύο, κερδίζει η αντικατάσταση.
+ */
+function stockModes(a: Analysis, lines: Line[]): { mode: StockMode[]; soMany: boolean[] } {
+  const own: StockMode[] = lines.map(() => undefined)
+  const soMany = lines.map(() => false)
+  if (!lines.length) return { mode: own, soMany }
+  const n = a.segs.length
+  const first = Math.min(...lines.map(lineStart))
+  const quiet = (j: number) => {
+    const w = a.w(j)
+    return a.used.has(j) || a.filler.has(j) || (w !== null && (isStop(w) || LOCATION.has(w) || !!unitWord(w)))
+  }
+  const inSpan = (l: Line, j: number) =>
+    (j >= l.ent.from && j < l.ent.to) || [l.qty, ...(l.more ?? [])].some((x) => !!x && j >= x.i && j < x.end)
+  const merge = (cur: StockMode, m: 'add' | 'set'): StockMode => (cur === 'set' || m === 'set' ? 'set' : 'add')
+  let all: StockMode
+  for (const m of a.modes) {
+    // "40 κιλά συνολικά και μοτσαρέλα 6": μετά από "και" αρχίζει άλλη γραμμή
+    let nx = m.i + m.len
+    while (nx < n && quiet(nx) && a.w(nx) !== 'και' && a.w(nx) !== 'κι') nx++
+    if (m.mode === 'add' && lines.some((l) => l.more?.some((x) => x.i === nx))) continue
+    let k = m.lead ? lines.findIndex((l) => l.qty?.i === nx || (nx >= l.ent.from && nx < l.ent.to)) : -1
+    let back = false
+    if (k < 0 && m.trail) {
+      let pv = m.i - 1
+      while (pv >= 0 && quiet(pv)) pv--
+      k = pv >= 0 ? lines.findIndex((l) => inSpan(l, pv)) : -1
+      back = k >= 0
+    }
+    if (k >= 0 && m.soMany) {
+      const l = lines[k]
+      if (back && l.qty && l.qty.i < m.i) {
+        if (m.mode === 'add') {
+          // "αλεύρι 10 κιλά στην αποθήκη και άλλα τόσα στην κουζίνα": η ίδια
+          // ποσότητα ακόμα μία φορά (άθροισμα μέσα στη φράση, όχι τρόπος)
+          const xs = [l.qty, ...(l.more ?? [])]
+          l.more = [...(l.more ?? []), ...xs.map((x) => ({ ...x }))]
+          continue
+        }
+        a.issues.push('Δεν κατάλαβα το «τόσα»· πες τον αριθμό, π.χ. «άλλα πέντε κιλά».')
+        a.cap = Math.min(a.cap, 0.6)
+      } else soMany[k] = true
+    }
+    if (!m.mode) continue
+    if (m.all && m.i < first) all = merge(all, m.mode)
+    else if (k >= 0) own[k] = merge(own[k], m.mode)
+  }
+  return { mode: own.map((x) => x ?? all), soMany }
+}
+
+/** Απογραφή: ίδιο είδος δύο φορές στη φράση → άθροισμα· με "σύνολο" → η τελευταία μέτρηση */
+function mergeStock(lines: QtyLine[]): QtyLine[] {
+  const out: QtyLine[] = []
+  for (const l of lines) {
+    const prev = l.item.id ? out.find((x) => x.item.id === l.item.id) : undefined
+    if (!prev) { out.push(l); continue }
+    if (l.mode === 'set') {
+      prev.qty = l.qty
+      prev.mode = 'set'
+      if (l.heardQty) prev.heardQty = l.heardQty
+      else delete prev.heardQty
+      continue
+    }
+    prev.qty = round(prev.qty + l.qty, 6)
+    if (prev.heardQty || l.heardQty) prev.heardQty = [prev.heardQty ?? '0', l.heardQty ?? '0'].join(' + ')
+  }
+  return out
+}
+
 function buildStocktake(a: Analysis): Built {
   a.locStop = true
+  a.stockFiller()
   const { lines } = buildLines(a, POOL.stock, false)
-  // "μέτρησα κι άλλα 2 κιλά": η απογραφή γράφει τη μέτρηση, δεν προσθέτει σε παλιότερη
-  for (const l of lines) {
-    if (!l.qty) continue
-    let j = l.qty.i - 1
-    const isMore = (w: string | null) => !!w && MORE.has(w) && w !== 'ακομα' && w !== 'ακομη'
-    while (j >= 0 && a.w(j) && isStop(a.w(j) as string) && !isMore(a.w(j))) j--
-    if (isMore(a.w(j))) {
-      a.issues.push('Η απογραφή κρατά τη μέτρηση που λες· δεν προσθέτει σε προηγούμενη μέτρηση.')
-      a.cap = Math.min(a.cap, 0.7)
-      break
-    }
-  }
-  const q = qtyLines(a, lines, 'issue')
-  const out = mergeSame(q.out)
+  const sm = stockModes(a, lines)
+  // "αλεύρι άλλα τόσα": λείπει ο αριθμός
+  const q = qtyLines(a, lines, 'issue', (k, label) =>
+    sm.soMany[k] ? `Δεν ακούστηκε ποσότητα για «${label}»· πες τον αριθμό, π.χ. «άλλα πέντε κιλά».` : null)
+  q.out.forEach((l, k) => { const m = sm.mode[k]; if (m) l.mode = m })
+  const out = mergeStock(q.out)
   if (!out.length) a.issues.push('Δεν κατάλαβα ποια είδη μετρήθηκαν.')
   return { command: { kind: 'stocktake', lines: out }, conf: out.length ? q.conf : 0.2 }
 }
@@ -2062,6 +2385,246 @@ function buildQueryBalance(a: Analysis): Built {
 }
 
 // ---------------------------------------------------------------------
+// Νέα φράση: "όταν λέω οικογενειακή εννοώ μεγάλη μαργαρίτα"
+// ---------------------------------------------------------------------
+const SAY = new Set(['λεω', 'λεμε', 'λεσ', 'λεει', 'λενε', 'πω', 'πουμε', 'πεισ', 'πει', 'πουν', 'πουνε', 'ακουσ', 'ακουσεισ', 'ακουω'])
+const TEACH = new Set(['μαθε', 'μαθετε', 'θυμησου', 'θυμηθειτε'])
+const MEAN1 = new Set(['εννοω', 'εννοουμε', 'εννοει', 'εννοουν', 'εννοεισ', 'εννοειτε', 'σημαινει', 'σημαινουν', 'ειναι', 'καταλαβαινε', 'καταλαβε', 'καταλαβαινεισ', 'καταλαβαινετε'])
+/** "εννοώ": σίγουρη σημασία (όχι το "είναι", όχι το "θα πει", που είναι και μέλλοντας) */
+const MEAN_STRONG = new Set(['εννοω', 'εννοουμε', 'εννοει', 'εννοουν', 'εννοεισ', 'εννοειτε'])
+const QUESTION = new Set(['τι', 'ποιο', 'ποια', 'ποιοσ', 'ποιον', 'ποιεσ', 'ποσο', 'ποση', 'ποσα', 'πωσ', 'γιατι', 'που'])
+const SAY3 = new Set(['λεει', 'λενε', 'πει', 'πουν', 'πουνε'])
+/** "όταν (σου) λέω", "όποτε λέμε", "αν πω", "κάθε φορά που λέω" */
+const WHEN = new Set(['οταν', 'οποτε', 'αν', 'εαν'])
+/** ανάμεσα στο "όταν" και στο "λέω" ("όταν σου λέω", "όταν θα λέμε") */
+const SAY_FILL = new Set(['σου', 'σασ', 'μου', 'μασ', 'θα', 'το', 'να', 'εγω', 'εμεισ', 'εσυ', 'εσεισ', 'κανεισ', 'καποιοσ'])
+/** εισαγωγή πριν από τη φράση: "τη λέξη Χ", "νέα λέξη: Χ" */
+const WORD_NOUN = new Set(['λεξη', 'λεξεισ', 'φραση', 'φρασεισ', 'εκφραση'])
+/**
+ * Στο "Χ είναι / σημαίνει Υ" (χωρίς "όταν λέω" / "μάθε"): λέξεις που δείχνουν
+ * συνηθισμένη πρόταση, όχι νέα φράση ("η μία είναι μαργαρίτα", "όλες είναι
+ * μαργαρίτες", "το πρώτο είναι η μαργαρίτα", "όχι, είναι η μοτσαρέλα")
+ */
+const NOT_PHRASE = new Set([
+  'ολα', 'ολεσ', 'ολοι', 'ολο', 'ολη', 'ολουσ', 'αυτο', 'αυτη', 'αυτα', 'αυτοσ', 'αυτεσ', 'αυτοι', 'αυτον', 'αυτην', 'εκεινο',
+  'εκεινη', 'εκεινα', 'εκεινοσ', 'αλλο', 'αλλη', 'αλλα', 'αλλεσ', 'αλλοι', 'αλλοσ', 'πρωτο', 'πρωτη', 'πρωτα', 'πρωτεσ', 'πρωτοσ',
+  'δευτερο', 'δευτερη', 'δευτερα', 'τριτο', 'τριτη', 'τεταρτο', 'τεταρτη', 'επομενο', 'επομενη', 'επομενα', 'τελευταιο',
+  'τελευταια', 'τελευταιεσ', 'τελευταιοσ', 'προηγουμενο', 'προηγουμενη', 'ιδιο', 'ιδια', 'ιδιεσ', 'καθε', 'καθενα', 'καθεμια',
+  'μερικα', 'μερικεσ', 'μερικοι', 'κανενα', 'καμια', 'τιποτα', 'εδω', 'εκει', 'τωρα', 'σημερα', 'δεν', 'δε', 'μη', 'μην',
+])
+/** σημασία μετά από αυτά: "σημαίνει από τον μύλο" δεν είναι όνομα */
+const NOT_NAME_START = new Set(['απο', 'σε', 'στο', 'στη', 'στην', 'στον', 'στα', 'στουσ', 'στισ', 'για', 'με', 'του', 'τησ', 'των', 'πιο', 'πολυ', 'λιγο', 'ενα', 'μια', 'ενασ'])
+const EDGE_JUNK = /^[\s«»"“”'’`:,.;!?·\-–—]+|[\s«»"“”'’`:,.;!?·\-–—]+$/g
+const TEACH_EXAMPLE = 'Πες π.χ. «όταν λέω οικογενειακή εννοώ μεγάλη μαργαρίτα».'
+
+/** Μήκος της λέξης / φράσης σημασίας στο i ("εννοώ", "θέλω να πω", "θα πει", "να καταλαβαίνεις"), αλλιώς 0 */
+function meanLen(ws: Word[], i: number, onlyIs = false): number {
+  const w = ws[i]?.n
+  if (!w) return 0
+  if (onlyIs) return w === 'ειναι' ? 1 : 0
+  if (MEAN1.has(w)) return 1
+  if ((w === 'θελω' || w === 'θελουμε' || w === 'θελει') && ws[i + 1]?.n === 'να' && ['πω', 'πουμε', 'πει'].includes(ws[i + 2]?.n ?? '')) return 3
+  if (w === 'θα' && ws[i + 1]?.n === 'πει') return 2
+  if ((w === 'να' || w === 'θα') && ['καταλαβαινεισ', 'καταλαβαινετε', 'καταλαβεισ', 'γραφεισ', 'βαζεισ'].includes(ws[i + 1]?.n ?? '')) return 2
+  return 0
+}
+
+/** "θα πει", "θέλει να πει": σημασία χωρίς "όταν λέω" (όπως το "σημαίνει") */
+function mightMean(ws: Word[], i: number): number {
+  const w = ws[i]?.n
+  if (w === 'θα' && ws[i + 1]?.n === 'πει') return 2
+  if (w === 'θελει' && ws[i + 1]?.n === 'να' && ws[i + 2]?.n === 'πει') return 3
+  return 0
+}
+
+/**
+ * Το κείμενο είναι ακριβώς ένα είδος / συναλλασσόμενος του καταλόγου (με
+ * σίγουρο id); Επιτρέπονται γύρω του γενικοί προσδιορισμοί ("μεγάλη μαργαρίτα").
+ */
+function resolvesWhole(text: string, ctx: InterpretContext): string | null {
+  const a = new Analysis(text, ctx)
+  const sc = a.scan(POOL.all, false)
+  if (sc.hits.length !== 1 || !sc.unknown.every((h) => a.onlyModifiers(h.from, h.to))) return null
+  const cov = a.covered(sc.hits)
+  if (a.segs.some((s, i) => !cov.has(i) && (s.t === 'n' || (s.t === 'w' && !isStop(s.tok.n) && !isModifier(s.tok.n))))) return null
+  return toRef(sc.hits[0].heard, sc.hits[0].ranked).id
+}
+
+/** Η φράση Χ μοιάζει με κομμάτι συνηθισμένης πρότασης; (αριθμοί, κανάλια, "όχι", "όλες", "η πίτσα", "το σακί" ...) */
+function ordinaryWords(phrase: string, cmd: boolean): boolean {
+  const toks = tokenize(phrase)
+  if (segment(toks).some((s) => s.t === 'n')) return true
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]
+    if (t.sep) continue
+    const n = t.n
+    if (channelAt(toks, i) || CORRECTION.has(n) || NOT_PHRASE.has(n) || parseYesNo(n) !== null) return true
+    if (unitWord(n) || genericPack(n)) return true
+    const c = cueOf(n)
+    if (c === 'pizza' || c === 'question' || (cmd && c && !c.startsWith('type'))) return true
+  }
+  return false
+}
+
+/** Μόνο τιμή / αριθμός ("8 ευρώ", "4,50 με ΦΠΑ"): όχι σημασία φράσης */
+function onlyPrice(meaning: string): boolean {
+  const segs = segment(tokenize(meaning))
+  if (!segs.some((s) => s.t === 'n')) return false
+  return segs.every((s) => s.t !== 'w' || isStop(s.tok.n) || MONEY.has(s.tok.n) || CENTS.has(s.tok.n) || VAT.has(s.tok.n) || NET_WORDS.has(s.tok.n))
+}
+
+/**
+ * Πού αρχίζει η φράση μετά από "όταν λέω" / "μάθε": χωρίς "ότι", "τη λέξη",
+ * "νέα φράση", "αυτό που λέμε"
+ */
+function skipLeadIn(ws: Word[], xs: number, end: number): number {
+  let j = xs
+  for (let guard = 0; guard < 4 && j < end; guard++) {
+    const w = ws[j].n
+    const nx = ws[j + 1]?.n ?? ''
+    if (w === 'οτι' || w === 'πωσ') { j++; continue }
+    if (['τη', 'την', 'μια', 'μιαν', 'νεα', 'νεεσ', 'καινουργια', 'καινουρια', 'αλλη'].includes(w) && WORD_NOUN.has(nx)) { j += 2; continue }
+    if (WORD_NOUN.has(w)) { j++; continue }
+    if ((w === 'αυτο' || w === 'αυτα') && nx === 'που' && SAY.has(ws[j + 2]?.n ?? '')) { j += 3; continue }
+    // "όταν λέει ο πελάτης Χ": το υποκείμενο δεν είναι μέρος της φράσης
+    if ((w === 'ο' || w === 'οι') && ['πελατησ', 'πελατεσ', 'κοσμοσ', 'σεφ', 'μαγειρασ', 'ταμιασ'].includes(nx)) { j += 2; continue }
+    if (w === 'καποιοσ' || w === 'κανεισ' || w === 'ολοι') { j++; continue }
+    break
+  }
+  return j
+}
+
+/** "όταν (σου) λέω", "όποτε λέμε", "αν πω", "κάθε φορά που λέω": θέση μετά το ρήμα, και αν είναι αδύναμο ("αν") */
+function whenSay(ws: Word[], free: (k: number) => boolean): { xs: number; weak: boolean } | null {
+  for (let k = 0; k < ws.length; k++) {
+    if (!free(k)) continue
+    let j = -1
+    let weak = false
+    if (WHEN.has(ws[k].n)) { j = k + 1; weak = ws[k].n === 'αν' || ws[k].n === 'εαν' }
+    else if (ws[k].n === 'καθε' && ws[k + 1]?.n === 'φορα' && ws[k + 2]?.n === 'που') j = k + 3
+    else if (k <= 1 && (ws[k].n === 'αυτο' || ws[k].n === 'αυτα') && ws[k + 1]?.n === 'που') { j = k + 2; weak = true }
+    if (j < 0) continue
+    let f = 0
+    while (f < 2 && SAY_FILL.has(ws[j]?.n ?? '')) { j++; f++ }
+    // "όταν θα πει ο μύλος την τιμή": τρίτο πρόσωπο, μόνο με λέξη σημασίας
+    if (SAY.has(ws[j]?.n ?? '') && free(j)) return { xs: j + 1, weak: weak || SAY3.has(ws[j].n) }
+  }
+  return null
+}
+
+/**
+ * "όταν (σου) λέω Χ εννοώ / θέλω να πω / να καταλαβαίνεις Υ", "μάθε ότι Χ
+ * σημαίνει Υ", "Χ σημαίνει / θα πει Υ", "το Χ είναι το Υ" (τα δύο τελευταία
+ * μόνο όταν το Υ είναι είδος ή συναλλασσόμενος του καταλόγου και το Χ δεν
+ * μοιάζει με κομμάτι συνηθισμένης πρότασης, για να μην κλέβει προτάσεις).
+ * Η φράση και η σημασία μένουν όπως ειπώθηκαν (χωρίς κανονικοποίηση).
+ */
+function teach(text: string, ctx: InterpretContext): Omit<Interpretation, 'text'> | null {
+  const ws = words(text)
+  if (ws.length < 3) return null
+  const quotes = [...text.matchAll(/«[^»]*»|“[^”]*”|"[^"]*"/g)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length])
+  const free = (k: number) => !quotes.some(([a, b]) => ws[k].from > a && ws[k].to < b)
+  const findMean = (from: number, onlyIs: boolean): number => {
+    for (let k = from; k < ws.length; k++) if (free(k) && meanLen(ws, k, onlyIs)) return k
+    return -1
+  }
+  const example = { command: { kind: 'unknown' } as Command, confidence: 0, issues: [TEACH_EXAMPLE] }
+  // ρητή διδασκαλία: "όταν λέω …", "μάθε (ότι) …", "νέα λέξη …"
+  const when = whenSay(ws, free)
+  const ti = ws.findIndex((w, k) => k <= 2 && TEACH.has(w.n) && free(k))
+  const ni = ws.findIndex((w, k) => k <= 1 && ['νεα', 'καινουργια', 'καινουρια'].includes(w.n) && WORD_NOUN.has(ws[k + 1]?.n ?? '') && free(k))
+  let xs = when ? when.xs : ti >= 0 ? ti + 1 : ni >= 0 ? ni + 2 : -1
+  let weak = !!when?.weak || (!when && ti < 0 && ni >= 0)
+  // δίχτυ ασφαλείας: "λέω Χ και εννοώ Υ" (ρήμα "λέω" και πιο μετά "εννοώ" / "θέλω να πω"): ποτέ πώληση
+  if (xs < 0) {
+    const si = ws.findIndex((w, k) => SAY.has(w.n) && free(k))
+    if (si >= 0 && ws.some((w, k) => k > si + 1 && free(k) && (MEAN_STRONG.has(w.n) || (w.n.startsWith('θελ') && meanLen(ws, k) === 3)))) {
+      xs = si + 1
+      weak = false
+    }
+  }
+  const explicit = xs >= 0
+  /** μισή / άδεια διδασκαλία: παράδειγμα μόνο όταν ήταν σίγουρα διδασκαλία */
+  const fail = () => (explicit && !weak ? example : null)
+  let onlyIs = false
+  let conf = 0.95
+  let mi: number
+  if (explicit) {
+    mi = findMean(xs + 1, false)
+    // "μάθε πόση μοτσαρέλα έχουμε": όχι διδασκαλία
+    if (mi < 0) return when && !weak ? example : null
+    // "αυτό που λέμε τυρί είναι η μοτσαρέλα", "αν πω Χ είναι Υ": με "είναι" μόνο γνωστό Υ
+    if (weak && ws[mi].n === 'ειναι') onlyIs = true
+  } else {
+    // "Χ σημαίνει Υ"· "Χ θα πει / είναι Υ" μόνο με γνωστό Υ
+    xs = 0
+    mi = ws.findIndex((w, k) => k > 0 && (w.n === 'σημαινει' || w.n === 'σημαινουν') && free(k))
+    conf = 0.9
+    if (mi < 0) {
+      mi = ws.findIndex((_w, k) => k > 0 && free(k) && mightMean(ws, k) > 0)
+      if (mi < 0) mi = findMean(1, true)
+      if (mi < 0) return null
+      onlyIs = true
+      conf = 0.8
+    }
+    const xw = ws.slice(0, mi).map((w) => w.n)
+    if (xw.length > (onlyIs ? 6 : 8) || QUESTION.has(xw[0]) || xw.every((w) => isStop(w) || QUESTION.has(w))) return null
+  }
+  const mlen = onlyIs && mightMean(ws, mi) ? mightMean(ws, mi) : meanLen(ws, mi, onlyIs)
+  let ys = mi + mlen
+  if (ws[ys]?.n === 'οτι' || ws[ys]?.n === 'πωσ') ys++
+  if (ys >= ws.length) return fail()
+  xs = skipLeadIn(ws, xs, mi)
+  if (xs >= mi) return fail()
+  let phrase = text.slice(ws[xs].from, ws[mi].from)
+  // "νέα λέξη: οικογενειακή" → μετά την άνω κάτω τελεία· "το «χτύπα»" → μέσα στα εισαγωγικά
+  const q = /«([^»]*)»|“([^”]*)”|"([^"]*)"/.exec(phrase)
+  const inQ = q ? (q[1] ?? q[2] ?? q[3] ?? '').trim() : ''
+  if (inQ) phrase = inQ
+  else if (phrase.includes(':')) phrase = phrase.slice(phrase.lastIndexOf(':') + 1)
+  phrase = phrase.replace(EDGE_JUNK, '').replace(/\s+(και|κι)$/i, '').replace(EDGE_JUNK, '')
+  const meaning = text.slice(ws[ys].from).replace(EDGE_JUNK, '')
+  if (!phrase || !meaning) return fail()
+  const pKey = phraseKey(phrase)
+  const mKey = phraseKey(meaning)
+  if (!pKey) return fail()
+  // "μάθε ότι η μαργαρίτα είναι 8 ευρώ": τιμή, όχι φράση
+  if (ws[mi].n === 'ειναι' && onlyPrice(meaning)) return null
+  if (!explicit) {
+    // "Χ είναι Υ" / "Χ σημαίνει Υ": όχι κομμάτια συνηθισμένων προτάσεων
+    if (ordinaryWords(phrase, onlyIs)) return null
+  }
+  if (onlyIs) {
+    // "το τυρί είναι η μοτσαρέλα": η σημασία πρέπει να είναι όνομα του καταλόγου
+    if (NOT_NAME_START.has(ws[ys].n) || pKey === mKey) return null
+    const id = resolvesWhole(meaning, ctx)
+    if (!id || resolvesWhole(phrase, ctx) === id) return null
+  }
+  if (pKey === mKey) return { command: { kind: 'unknown' }, confidence: 0, issues: ['Η φράση και η σημασία της είναι ίδιες.'] }
+  if (parseYesNo(phrase) !== null) {
+    return { command: { kind: 'unknown' }, confidence: 0, issues: [`Το «${phrase}» το κρατάμε για το «ναι» / «όχι»· διάλεξε άλλη λέξη.`] }
+  }
+  const issues: string[] = []
+  if (phrase.length > 200 || meaning.length > 200) {
+    issues.push('Πολύ μεγάλη φράση: έως 200 γράμματα.')
+    conf = Math.min(conf, 0.4)
+  }
+  const old = (Array.isArray(ctx?.phrases) ? ctx.phrases : []).find((r) => r && phraseKey(String(r.phrase ?? '')) === pKey)
+  if (old) issues.push(`Υπάρχει ήδη: «${old.phrase}» σημαίνει «${old.meaning}»· θα αλλάξει.`)
+  // "η Special" πιάνει και σκέτο "Special"
+  const bare = pKey.replace(/^(ο|η|το|οι|τα|τον|την|τη|του|τησ|των|τισ) (?=\S)/, '')
+  const named = [...(ctx?.items ?? []), ...(ctx?.partners ?? [])]
+    .find((e) => e?.is_active && [e.name, ...(e.aliases ?? [])].some((x) => { const k = phraseKey(String(x ?? '')); return k === pKey || k === bare }))
+  if (named) issues.push(`Το «${phrase}» είναι ήδη όνομα στον κατάλογο (${named.name})· η φράση θα μετράει πρώτη.`)
+  else {
+    // "ζυμάρι" → «Ζυμάρι 400γρ»: στο "ζυμάρι 400" μένει το όνομα του καταλόγου
+    const longer = phraseStartsName(phrase, ctx, meaning) ?? (bare !== pKey ? phraseStartsName(bare, ctx, meaning) : null)
+    if (longer) issues.push(`Το «${phrase}» είναι και η αρχή του «${longer}»· εκεί θα κρατάω το όνομα του καταλόγου.`)
+  }
+  return { command: { kind: 'new_phrase', phrase, meaning }, confidence: conf, issues }
+}
+
+// ---------------------------------------------------------------------
 function run(text: string, ctx: InterpretContext): Interpretation {
   const a = new Analysis(text, ctx)
   const d = decide(a)
@@ -2094,11 +2657,19 @@ function run(text: string, ctx: InterpretContext): Interpretation {
   return { text, command: b.command, confidence, issues }
 }
 
-/** Κείμενο → εντολή. Δεν πετάει ποτέ: σε σφάλμα επιστρέφει 'unknown'. */
+/**
+ * Κείμενο → εντολή. Πρώτα οι δικές τους φράσεις (ctx.phrases), σιωπηλά·
+ * το Interpretation.text μένει το αρχικό. Η "νέα φράση" ("όταν λέω Χ εννοώ
+ * Υ") διαβάζεται πριν από τις φράσεις, για να μην αλλάξει η ίδια.
+ * Δεν πετάει ποτέ: σε σφάλμα επιστρέφει 'unknown'.
+ */
 export function interpret(text: string, ctx: InterpretContext): Interpretation {
   const t = typeof text === 'string' ? text : String(text ?? '')
   try {
-    return { ...run(t.slice(0, 500), ctx), text: t }
+    const src = t.slice(0, 500)
+    const taught = teach(src, ctx)
+    if (taught) return { ...taught, text: t }
+    return { ...run(applyPhrases(src, ctx?.phrases, ctx).slice(0, 1000), ctx), text: t }
   } catch {
     return { text: t, command: { kind: 'unknown' }, confidence: 0, issues: [] }
   }
