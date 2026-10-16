@@ -32,6 +32,13 @@ export interface QtyLine {
   qty: number
   /** π.χ. "10 σακιά", για εμφάνιση. Χωρίς heardQty και με qty 0 = δεν ακούστηκε ποσότητα */
   heardQty?: string
+  /**
+   * Μόνο στην απογραφή: 'add' = ειπώθηκε "άλλα / ακόμα / επιπλέον" (προστίθεται
+   * σε ό,τι έχει ήδη μετρηθεί, π.χ. από άλλον χώρο), 'set' = ειπώθηκε διόρθωση
+   * ("σύνολο / διόρθωσε / τελικά"). Χωρίς mode: αποφασίζει η οθόνη (αν υπάρχει
+   * ήδη μέτρηση ρωτάει, με προεπιλογή την πρόσθεση).
+   */
+  mode?: 'add' | 'set'
 }
 
 export interface PricedLine extends QtyLine {
@@ -78,6 +85,8 @@ export type Command =
   /** ειδική τιμή πελάτη (χωρίς ΦΠΑ) */
   | { kind: 'partner_price'; partner: EntityRef; item: EntityRef; netPrice: number }
   /** κλείσιμο (καταχώρηση) των σημερινών πωλήσεων λιανικής */
+  /** δική τους φράση: "όταν λέω «οικογενειακή» εννοώ «μεγάλη μαργαρίτα»" */
+  | { kind: 'new_phrase'; phrase: string; meaning: string }
   | { kind: 'close_day' }
   /** καταχώρηση της ανοιχτής απογραφής */
   | { kind: 'close_stocktake' }
@@ -107,6 +116,16 @@ export interface InterpretContext {
   partners: Partner[]
   /** κανάλι όταν δεν ειπώθηκε (επιλογή του χρήστη στην οθόνη) */
   defaultChannel: TallyChannel
+  /**
+   * Δικές τους φράσεις ("όταν λέω Χ εννοώ Υ"). Ο interpreter αντικαθιστά τη
+   * φράση με τη σημασία της πριν καταλάβει την πρόταση.
+   */
+  phrases?: VoicePhraseRule[]
+}
+
+export interface VoicePhraseRule {
+  phrase: string
+  meaning: string
 }
 
 /**

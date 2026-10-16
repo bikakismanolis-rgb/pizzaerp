@@ -51,6 +51,14 @@ export interface Partner {
   aliases: string[]
 }
 
+/** Δική τους φράση για τις φωνητικές εντολές: "όταν λέω phrase εννοώ meaning" */
+export interface VoicePhrase {
+  id: string
+  company_id: string
+  phrase: string
+  meaning: string
+}
+
 export interface PartnerPrice {
   id: string
   company_id: string
