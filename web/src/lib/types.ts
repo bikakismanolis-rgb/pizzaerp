@@ -1,7 +1,7 @@
 export type ItemType = 'raw' | 'semi' | 'finished'
 export type DocType = 'purchase' | 'sale' | 'production' | 'stocktake' | 'receipt' | 'payment'
 export type DocStatus = 'draft' | 'posted'
-export type Channel = 'wholesale' | 'efood' | 'phone' | 'store'
+export type Channel = 'wholesale' | 'efood' | 'wolt' | 'box' | 'phone' | 'store'
 export type LineRole = 'item' | 'output' | 'input'
 
 export interface Company {
@@ -29,6 +29,8 @@ export interface Item {
   min_stock: number | null
   is_active: boolean
   notes: string | null
+  /** άλλα ονόματα με τα οποία το λένε (για τις φωνητικές εντολές) */
+  aliases: string[]
 }
 
 export interface Partner {
@@ -45,6 +47,16 @@ export interface Partner {
   city: string | null
   notes: string | null
   is_active: boolean
+  /** άλλα ονόματα με τα οποία τον λένε (για τις φωνητικές εντολές) */
+  aliases: string[]
+}
+
+/** Δική τους φράση για τις φωνητικές εντολές: "όταν λέω phrase εννοώ meaning" */
+export interface VoicePhrase {
+  id: string
+  company_id: string
+  phrase: string
+  meaning: string
 }
 
 export interface PartnerPrice {
@@ -88,6 +100,8 @@ export interface Doc {
   bom_id: string | null
   source_doc_id: string | null
   is_auto: boolean
+  /** ανοιχτό πρόχειρο που γεμίζει σταδιακά (μετρητής ημέρας, απογραφή σε εξέλιξη) */
+  is_running: boolean
   ref_no: string | null
   amount: number | null
   total_net: number

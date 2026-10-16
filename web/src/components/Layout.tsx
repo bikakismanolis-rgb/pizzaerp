@@ -1,13 +1,19 @@
-import { useState } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { useCompany } from '../context/CompanyContext'
+import { useMaster } from '../context/MasterData'
+import { supabase } from '../lib/supabase'
+import { CHANNEL_LABEL } from '../lib/labels'
+import { fmtDate, today } from '../lib/format'
+import type { Channel } from '../lib/types'
+import { MicIcon, useToast } from './ui'
 
 interface NavItem { to: string; label: string }
 interface NavGroup { title: string; items: NavItem[] }
 
 const NAV: NavGroup[] = [
-  { title: '', items: [{ to: '/', label: 'Αρχική' }] },
+  { title: '', items: [{ to: '/voice', label: '🎤 Πες το' }, { to: '/', label: 'Αρχική' }] },
   {
     title: 'Κινήσεις',
     items: [
@@ -25,6 +31,7 @@ const NAV: NavGroup[] = [
     items: [
       { to: '/items', label: 'Είδη & συνταγές' },
       { to: '/partners', label: 'Πελάτες & προμηθευτές' },
+      { to: '/voice/words', label: 'Λέξεις & φράσεις' },
     ],
   },
   {
@@ -40,10 +47,82 @@ const NAV: NavGroup[] = [
   },
 ]
 
+// ---------------------------------------------------------------------
+// Αυτόματο κλείσιμο προηγούμενων ημερών: μία φορά ανά εταιρεία/ημέρα/συνεδρία.
+// Η ημέρα ξαναϋπολογίζεται όταν η εφαρμογή ξαναγίνεται ορατή (κινητό/tablet
+// που έμεινε ανοιχτό από χθες). Αν η κλήση αποτύχει, ξαναδοκιμάζει τότε.
+// ---------------------------------------------------------------------
+const autoCloseDone = new Set<string>()
+
+interface CloseRow { doc_id: string; doc_no: number; doc_date: string; channel: Channel | null; ok: boolean; message: string }
+
+const short = (d: string) => fmtDate(d).slice(0, 5)
+const rowLabel = (r: CloseRow) => `${short(r.doc_date)} ${r.channel ? CHANNEL_LABEL[r.channel] : '—'}`
+
+function useAutoCloseRunning(companyId: string | undefined) {
+  const toast = useToast()
+  const { refresh } = useMaster()
+  const [day, setDay] = useState(today)
+  const [nonce, setNonce] = useState(0)
+
+  useEffect(() => {
+    const h = () => {
+      if (document.visibilityState !== 'visible') return
+      setDay(today())
+      setNonce((n) => n + 1)
+    }
+    window.addEventListener('focus', h)
+    document.addEventListener('visibilitychange', h)
+    return () => { window.removeEventListener('focus', h); document.removeEventListener('visibilitychange', h) }
+  }, [])
+
+  useEffect(() => {
+    if (!companyId) return
+    const key = `pizza-erp.autoclose.${companyId}.${day}`
+    // σε εξέλιξη ή έγινε (και StrictMode)
+    if (autoCloseDone.has(key)) return
+    try { if (sessionStorage.getItem(key)) { autoCloseDone.add(key); return } } catch { /* ignore */ }
+    autoCloseDone.add(key)
+    ;(async () => {
+      const { data, error } = await supabase.rpc('close_running', { p_company: companyId, p_before: day })
+      if (error) {
+        console.warn('close_running:', error.message)
+        // χωρίς 0004 δεν έχει νόημα να ξαναδοκιμάσει· αλλιώς ξανά στο επόμενο focus
+        if (error.code !== 'PGRST202') autoCloseDone.delete(key)
+        return
+      }
+      try { sessionStorage.setItem(key, '1') } catch { /* ignore */ }
+      const rows = (data ?? []) as CloseRow[]
+      if (rows.length === 0) return
+      // μία ειδοποίηση ανά ημέρα για όσα έκλεισαν, μία συνολική για τις αποτυχίες
+      const byDate = new Map<string, string[]>()
+      for (const r of rows.filter((x) => x.ok)) {
+        byDate.set(r.doc_date, [...(byDate.get(r.doc_date) ?? []), r.channel ? CHANNEL_LABEL[r.channel] : '—'])
+      }
+      for (const [d, chs] of byDate) toast.ok(`Έκλεισαν αυτόματα οι πωλήσεις της ${short(d)} (${chs.join(', ')})`)
+      const failed = rows.filter((x) => !x.ok)
+      if (failed.length === 1) {
+        const r = failed[0]
+        toast.err(`Δεν έκλεισε η πώληση ημέρας ${rowLabel(r)} (ΠΩ-${r.doc_no}): ${r.message}. Δες τις Πωλήσεις.`)
+      } else if (failed.length > 1) {
+        const list = failed.slice(0, 4).map(rowLabel).join(', ') + (failed.length > 4 ? ` και ${failed.length - 4} ακόμα` : '')
+        toast.err(`Δεν έκλεισαν ${failed.length} πωλήσεις ημέρας (${list}): ${failed[0].message}. Δες τις Πωλήσεις (σε εξέλιξη).`)
+      }
+      if (byDate.size > 0) await refresh()
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, day, nonce])
+}
+
 export function Layout() {
   const [open, setOpen] = useState(false)
   const { signOut, user } = useAuth()
   const { company, companies, select } = useCompany()
+  const { pathname } = useLocation()
+  useAutoCloseRunning(company?.id)
+  // το στρογγυλό μικρόφωνο: όχι στο «Πες το» και όχι στις Πωλήσεις ημέρας (έχουν
+  // δικό τους «Πες το» και τα +/− θα κρύβονταν από κάτω του)
+  const showMic = !/^\/voice\/?$/.test(pathname) && !pathname.startsWith('/daily-sales')
 
   const nav = (
     <nav className="flex flex-col gap-4 p-3 text-sm">
@@ -54,7 +133,7 @@ export function Layout() {
             <NavLink
               key={it.to}
               to={it.to}
-              end={it.to === '/'}
+              end={it.to === '/' || it.to === '/voice'}
               onClick={() => setOpen(false)}
               className={({ isActive }) =>
                 'block rounded-md px-2 py-1.5 ' + (isActive ? 'bg-red-700 text-white' : 'text-stone-700 hover:bg-stone-200')
@@ -106,15 +185,27 @@ export function Layout() {
       )}
 
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="md:hidden sticky top-0 z-30 bg-white border-b border-stone-200 flex items-center gap-3 px-3 py-2">
-          <button className="btn-ghost px-2" onClick={() => setOpen(true)} aria-label="Μενού">☰</button>
+        <header className="md:hidden sticky top-0 z-30 bg-white border-b border-stone-200 flex items-center gap-3 px-2 py-1">
+          <button className="btn-ghost h-11 w-11 p-0 text-xl" onClick={() => setOpen(true)} aria-label="Μενού">☰</button>
           <div className="font-bold text-red-700">🍕 Pizza ERP</div>
           <div className="text-xs text-stone-500 truncate">{company?.name}</div>
         </header>
-        <main className="flex-1 p-3 md:p-6 max-w-7xl w-full mx-auto">
+        <main className={'flex-1 p-3 md:p-6 max-w-7xl w-full mx-auto ' + (showMic ? 'pb-24 md:pb-6' : '')}>
           <Outlet />
         </main>
       </div>
+
+      {/* Στρογγυλό μικρόφωνο σε κινητό: πάει στο «Πες το» και ακούει αμέσως */}
+      {showMic && (
+        <Link
+          to="/voice"
+          state={{ listen: true }}
+          aria-label="Πες το"
+          className="md:hidden fixed right-4 bottom-[max(1rem,env(safe-area-inset-bottom))] z-30 h-14 w-14 rounded-full bg-red-700 text-white shadow-lg flex items-center justify-center active:scale-95 transition"
+        >
+          <MicIcon className="h-7 w-7" />
+        </Link>
+      )}
     </div>
   )
 }

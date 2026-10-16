@@ -66,6 +66,7 @@ export function DocList() {
                   <td className="whitespace-nowrap">
                     <Link to={`/docs/${docType}/${r.id}`} className="text-red-700 hover:underline font-medium">{docCode(docType, r.doc_no)}</Link>
                     {r.is_auto && <span className="text-xs text-stone-400 ml-1">(αυτόματο)</span>}
+                    {r.is_running && r.status === 'draft' && <Badge className="bg-amber-100 text-amber-800 ml-1">σε εξέλιξη</Badge>}
                   </td>
                   <td className="whitespace-nowrap">{fmtDate(r.doc_date)}</td>
                   {showPartner && <td>{r.partner_name}</td>}

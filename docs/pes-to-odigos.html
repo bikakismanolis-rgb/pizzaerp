@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Πες το — οδηγός φωνητικών εντολών</title>
+<!--
+  Οδηγός για το προσωπικό (εκτύπωση A4). Πηγή του docs/pes-to-odigos.pdf.
+  Τα παραδείγματα φράσεων είναι από web/src/lib/voice/examples.ts και
+  ελέγχονται από examples.test.ts· αν αλλάξουν εκεί, αλλάζουν και εδώ.
+  Εκτύπωση σε PDF: Chromium, A4, χωρίς κεφαλίδα/υποσέλιδο του browser
+  (οι αριθμοί σελίδας είναι στο @page).
+-->
+<style>
+:root {
+  --red: #b91c1c;
+  --red-dark: #7f1d1d;
+  --red-soft: #fef2f2;
+  --red-line: #fecaca;
+  --ink: #1c1917;
+  --muted: #57534e;
+  --faint: #78716c;
+  --line: #e7e5e4;
+  --paper: #ffffff;
+  --tint: #fafaf9;
+  --amber-soft: #fffbeb;
+  --amber-line: #fde68a;
+  --amber-ink: #78350f;
+  --green-soft: #f0fdf4;
+  --green-line: #bbf7d0;
+  --green-ink: #14532d;
+}
+
+@page {
+  size: A4;
+  margin: 15mm 16mm 17mm 16mm;
+  @bottom-left {
+    content: "«Πες το» · οδηγός φωνητικών εντολών";
+    font-family: "Carlito", "Calibri", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 8pt;
+    color: #78716c;
+    vertical-align: top;
+    padding-top: 4mm;
+  }
+  @bottom-right {
+    content: "σελίδα " counter(page) " από " counter(pages);
+    font-family: "Carlito", "Calibri", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 8pt;
+    color: #78716c;
+    vertical-align: top;
+    padding-top: 4mm;
+  }
+}
+@page :first {
+  @bottom-left { content: none; }
+  @bottom-right { content: none; }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Carlito", "Calibri", "Noto Sans", "Segoe UI", Roboto, "DejaVu Sans", Arial, sans-serif;
+  font-size: 11pt;
+  line-height: 1.36;
+  font-feature-settings: "tnum" 0;
+}
+/* στην οθόνη: σαν σελίδες σε γκρι φόντο */
+@media screen {
+  body { background: #e7e5e4; padding: 24px 12px; }
+  main { max-width: 178mm; margin: 0 auto; background: var(--paper); padding: 16mm 14mm; box-shadow: 0 1px 6px rgba(0,0,0,.12); }
+  .page-break { border-top: 1px dashed var(--line); margin: 10mm -14mm; }
+}
+@media screen and (max-width: 640px) {
+  body { padding: 0; }
+  main { padding: 20px 16px; }
+  .page-break { margin: 24px -16px; }
+  .figrow { grid-template-columns: 1fr !important; }
+  .cols-2, .steps, .three, .toc-grid { grid-template-columns: 1fr !important; }
+}
+@media print {
+  .page-break { break-before: page; height: 0; }
+}
+
+p { margin: 0 0 2.2mm; }
+b, strong { font-weight: 650; }
+a { color: inherit; text-decoration: none; }
+.say-q { font-weight: 600; color: var(--ink); white-space: nowrap; }
+.ui { font-weight: 600; color: var(--red-dark); }
+
+h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
+h2 {
+  font-size: 17pt;
+  line-height: 1.2;
+  margin: 0 0 4mm;
+  padding-bottom: 2.5mm;
+  border-bottom: 1.5pt solid var(--red);
+  display: flex;
+  align-items: center;
+  gap: 3mm;
+  letter-spacing: -0.01em;
+}
+h2 .no {
+  flex: none;
+  width: 9mm; height: 9mm;
+  border-radius: 50%;
+  background: var(--red);
+  color: #fff;
+  font-size: 12pt;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+h3 {
+  font-size: 12.5pt;
+  margin: 6mm 0 1.5mm;
+  color: var(--red-dark);
+}
+h4 { font-size: 10.5pt; margin: 4mm 0 1.5mm; }
+.lead { font-size: 11.5pt; color: var(--ink); }
+.muted { color: var(--muted); }
+.small { font-size: 9pt; }
+
+/* μένουν μαζί: τίτλος + σημείωση + αρχή πίνακα */
+.keep { break-inside: avoid; page-break-inside: avoid; }
+.sec { margin-bottom: 2mm; }
+
+/* ------------------------------------------------ εξώφυλλο */
+.cover { display: flex; flex-direction: column; }
+.brand { display: flex; align-items: center; gap: 6mm; margin-top: 2mm; }
+.mic {
+  flex: none;
+  width: 26mm; height: 26mm; border-radius: 50%;
+  background: var(--red);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 4mm var(--red-soft);
+}
+.mic svg { width: 12mm; height: 12mm; }
+.cover h1 { font-size: 44pt; line-height: 1; margin: 0; letter-spacing: -0.02em; color: var(--red); }
+.cover .sub { font-size: 15pt; margin: 2mm 0 0; color: var(--ink); font-weight: 500; }
+.cover .for { font-size: 10.5pt; color: var(--muted); margin-top: 1mm; }
+.cover .lead { margin: 7mm 0 4.5mm; font-size: 12.5pt; max-width: 155mm; }
+
+.steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3mm; margin: 0 0 5mm; }
+.step { border: 1pt solid var(--line); border-radius: 3mm; padding: 3mm 3mm 3.2mm; background: var(--tint); }
+.step .n { display: inline-flex; width: 6.5mm; height: 6.5mm; border-radius: 50%; background: var(--red); color: #fff; font-weight: 700; font-size: 9.5pt; align-items: center; justify-content: center; }
+.step b { display: block; margin: 1.6mm 0 0.6mm; font-size: 10.5pt; }
+.step span { font-size: 9pt; color: var(--muted); line-height: 1.35; display: block; }
+
+.toc { border-top: 1pt solid var(--line); padding-top: 3mm; }
+.toc ol { list-style: none; margin: 0; padding: 0; }
+.toc li { display: flex; align-items: baseline; gap: 2mm; padding: 0.6mm 0; }
+.toc li .t { flex: none; }
+.toc li .dots { flex: 1; border-bottom: 1pt dotted #d6d3d1; transform: translateY(-1mm); }
+.toc li .p { flex: none; font-variant-numeric: tabular-nums; color: var(--muted); min-width: 5mm; text-align: right; }
+.toc li.ch { font-weight: 600; }
+.toc li.ch .num { color: var(--red); display: inline-block; width: 5mm; }
+.toc-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 8mm; padding-left: 5mm; font-size: 9.5pt; }
+.toc-grid li { padding: 0.25mm 0; }
+
+.cover .names { margin: 2.5mm 0 0; color: var(--muted); }
+.top { margin: 0 0 4mm; }
+.top h4, .toc h4 { margin: 0 0 2mm; font-size: 10pt; color: var(--muted); font-weight: 700; }
+.top ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 2mm 4mm; }
+.top li { border-left: 1.2mm solid var(--red); background: var(--tint); padding: 1.3mm 3mm; border-radius: 0 2mm 2mm 0; break-inside: avoid; }
+.top li b { display: block; font-size: 11pt; }
+.top li span { display: block; font-size: 9pt; color: var(--muted); }
+
+/* ------------------------------------------------ κουτιά */
+.box { border-radius: 3mm; padding: 3.5mm 4mm; margin: 3mm 0 4mm; break-inside: avoid; }
+.box > :last-child { margin-bottom: 0; }
+.box h4 { margin: 0 0 1.5mm; }
+.box.red { background: var(--red-soft); border: 1pt solid var(--red-line); }
+.box.amber { background: var(--amber-soft); border: 1pt solid var(--amber-line); color: var(--amber-ink); }
+.box.amber h4 { color: var(--amber-ink); }
+.box.green { background: var(--green-soft); border: 1pt solid var(--green-line); color: var(--green-ink); }
+.box.grey { background: var(--tint); border: 1pt solid var(--line); }
+.box ul { margin: 0; padding-left: 4.5mm; }
+.box li { margin: 0.8mm 0; }
+
+/* βήματα «πώς δουλεύει» */
+ol.how { list-style: none; padding: 0; margin: 0 0 3mm; counter-reset: how; }
+ol.how > li { position: relative; padding: 0 0 3.2mm 11mm; break-inside: avoid; counter-increment: how; }
+ol.how > li::before {
+  content: counter(how);
+  position: absolute; left: 0; top: -0.5mm;
+  width: 7.5mm; height: 7.5mm; border-radius: 50%;
+  background: var(--red); color: #fff; font-weight: 700; font-size: 10.5pt;
+  display: flex; align-items: center; justify-content: center;
+}
+ol.how > li > b:first-child { display: block; font-size: 11pt; margin-bottom: 0.5mm; }
+
+ul.tips { list-style: none; padding: 0; margin: 0; }
+ul.tips > li { padding: 2.2mm 0 2.2mm 8mm; border-bottom: 1pt solid var(--line); position: relative; break-inside: avoid; }
+ul.tips > li:last-child { border-bottom: 0; }
+ul.tips > li::before { content: ""; position: absolute; left: 1mm; top: 3.6mm; width: 3mm; height: 3mm; border-radius: 50%; background: var(--red); }
+ul.tips > li > b:first-child { display: block; }
+
+.cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }
+.three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3mm; margin: 2mm 0 4mm; }
+.card { border: 1pt solid var(--line); border-radius: 3mm; padding: 3mm; break-inside: avoid; background: var(--tint); }
+.card .w { font-size: 13pt; font-weight: 700; color: var(--red); display: block; margin-bottom: 1mm; }
+.card span { font-size: 9.5pt; color: var(--muted); }
+
+/* ------------------------------------------------ πίνακες */
+table { width: 100%; border-collapse: collapse; margin: 1.5mm 0 3mm; }
+thead { display: table-header-group; }
+tr { break-inside: avoid; page-break-inside: avoid; }
+th { text-align: left; font-size: 8.5pt; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; padding: 1.4mm 2.5mm; border-bottom: 1pt solid #d6d3d1; }
+td { padding: 2mm 2.5mm; vertical-align: top; border-bottom: 1pt solid var(--line); }
+tbody tr:last-child td { border-bottom: 0; }
+table.ex td.say { width: 50%; font-weight: 600; }
+table.ex td.say q { quotes: "«" "»"; }
+table.ex td.does { color: var(--ink); }
+table.ex { margin: 0 0 2mm; }
+table.ex tr.z td { background: var(--tint); }
+table.ex tr.tt th { text-transform: none; letter-spacing: 0; border-bottom: 1pt solid #d6d3d1; padding: 4mm 0 1mm; }
+table.ex tr.tt h3 { margin: 0; }
+table.ex tr.note td { color: var(--muted); font-size: 9.5pt; padding: 1.2mm 0 1.5mm; border-bottom: 0; }
+table.ex tr.note { break-after: avoid; page-break-after: avoid; }
+td.say .mi { display: inline-block; width: 3.2mm; height: 3.2mm; margin-right: 1.4mm; vertical-align: -0.4mm; }
+
+table.walk td { vertical-align: middle; }
+table.walk td.where { width: 20%; color: var(--muted); font-weight: 600; }
+table.walk td.say { width: 40%; font-weight: 600; }
+table.walk td.res { font-variant-numeric: tabular-nums; }
+table.walk td.res b { color: var(--red-dark); }
+
+table.learn td { width: 27%; }
+table.learn td.teach { width: 46%; }
+table.learn td.teach { font-weight: 600; }
+table.learn td.use { font-weight: 600; color: var(--red-dark); }
+
+table.words td { padding: 1.3mm 2.5mm; font-size: 10.5pt; }
+table.words td.k { width: 24%; font-weight: 600; }
+table.words td.v { color: var(--ink); }
+table.words td.v q { font-weight: 500; }
+q { quotes: "«" "»"; }
+
+/* πίνακας για συμπλήρωση */
+.fill-intro { margin-bottom: 3mm; }
+table.fill { margin-top: 2mm; }
+table.fill th { font-size: 10pt; text-transform: none; letter-spacing: 0; color: var(--ink); border-bottom: 1.5pt solid var(--red); padding: 2mm 3mm; }
+table.fill td { height: 14mm; border-bottom: 1pt solid #a8a29e; border-right: 1pt solid var(--line); }
+table.fill td:last-child { border-right: 0; text-align: center; vertical-align: middle; }
+table.fill td.nr { width: 7mm; color: var(--faint); font-size: 8.5pt; vertical-align: bottom; text-align: right; padding-right: 2mm; }
+table.fill tbody tr:nth-child(odd) td { background: transparent; }
+table.fill .chk { display: inline-block; width: 4.5mm; height: 4.5mm; border: 1pt solid #a8a29e; border-radius: 1mm; }
+table.fill tbody tr:last-child td { border-bottom: 1pt solid #a8a29e; }
+.sample { color: var(--faint); font-style: italic; }
+
+.kbd { display: inline-block; border: 1pt solid #d6d3d1; border-bottom-width: 1.5pt; border-radius: 1.2mm; padding: 0 1.4mm; font-size: 9pt; font-weight: 600; background: #fff; white-space: nowrap; }
+.chip { display: inline-block; border: 1pt solid #d6d3d1; border-radius: 10mm; padding: 0 2mm; font-size: 9pt; font-weight: 600; background: #fff; white-space: nowrap; }
+.chip.on { background: var(--red); color: #fff; border-color: var(--red); }
+.mock {
+  border: 1pt solid var(--line); border-radius: 3mm; padding: 3mm 3.5mm; background: #fff;
+  box-shadow: 0 0.5mm 1.5mm rgba(0,0,0,.06); break-inside: avoid; font-size: 9.5pt;
+}
+.mock .heard { color: var(--faint); font-size: 8.5pt; }
+.mock .sent { font-size: 11pt; font-weight: 600; margin: 1mm 0 2mm; }
+.mock .btns { display: flex; gap: 2mm; margin-top: 2.5mm; }
+.mock .btn { flex: 1; text-align: center; border-radius: 2mm; padding: 1.6mm 0; font-weight: 600; font-size: 9.5pt; border: 1pt solid #d6d3d1; }
+.mock .btn.primary { flex: 2; background: var(--red); color: #fff; border-color: var(--red); }
+.mock .toggle { display: inline-flex; border: 1pt solid #d6d3d1; border-radius: 10mm; overflow: hidden; vertical-align: middle; }
+.mock .toggle span { padding: 0.6mm 2.4mm; font-size: 8.5pt; font-weight: 600; }
+.mock .toggle span.on { background: var(--red); color: #fff; }
+.mock .line { display: flex; align-items: center; gap: 2.5mm; flex-wrap: wrap; padding: 1.2mm 0; }
+.mock .lbl { font-size: 8pt; color: var(--faint); }
+
+.figrow { display: grid; grid-template-columns: 1.05fr 1fr; gap: 5mm; align-items: start; }
+</style>
+</head>
+<body>
+<main>
+
+<!-- ============================================================ ΕΞΩΦΥΛΛΟ -->
+<section class="cover">
+  <div class="brand">
+    <div class="mic" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M8.5 21h7"/></svg>
+    </div>
+    <div>
+      <h1>Πες το</h1>
+      <p class="sub">Οδηγός φωνητικών εντολών</p>
+      <p class="for">για όλους όσους δουλεύουν στην πιτσαρία</p>
+    </div>
+  </div>
+
+  <p class="lead">
+    Λες με απλά λόγια τι έγινε, όπως θα το έλεγες σε έναν συνάδελφο, και η εφαρμογή το γράφει για σένα.
+    Χωρίς πληκτρολόγηση, ακόμα και με αλευρωμένα χέρια. Τίποτα δεν περνάει χωρίς το δικό σου <b>«ναι»</b>.
+  </p>
+
+  <div class="steps">
+    <div class="step"><span class="n">1</span><b>Πάτα το μικρόφωνο</b><span>Το μεγάλο κόκκινο κουμπί στο «Πες το».</span></div>
+    <div class="step"><span class="n">2</span><b>Πες τι έγινε</b><span>Ένα πράγμα τη φορά, με αριθμούς και μονάδες.</span></div>
+    <div class="step"><span class="n">3</span><b>Κοίτα την κάρτα</b><span>Γράφει τι κατάλαβε. Διόρθωσε αν χρειάζεται.</span></div>
+    <div class="step"><span class="n">4</span><b>«Ναι, πέρασέ το»</b><span>Πάτα το κουμπί ή πες «ναι». Λάθος; «Αναίρεση».</span></div>
+  </div>
+
+  <div class="top">
+    <h4>Οι πιο συχνές</h4>
+    <ul>
+      <li><b>«efood τρεις μαργαρίτες και δύο σπέσιαλ»</b><span>πωλήσεις ημέρας</span></li>
+<li><b>«ήρθαν από τον μύλο δέκα σακιά αλεύρι 0,62 το κιλό»</b><span>παραλαβή</span></li>
+<li><b>«φτιάξαμε 80 ζυμάρια 400»</b><span>παραγωγή</span></li>
+<li><b>«αλεύρι άλλα πέντε κιλά»</b><span>απογραφή, από άλλον χώρο</span></li>
+<li><b>«πόση μοτσαρέλα έχουμε»</b><span>ερώτηση</span></li>
+<li><b>«ακύρωσε το τελευταίο»</b><span>αναίρεση</span></li>
+    </ul>
+    <p class="names small"><b>Τα ονόματα είναι παραδείγματα.</b> Όπου βλέπεις Μαργαρίτα, Special, Αλεύρι, Μύλο ή Ξενοδοχείο Αστέρια,
+      εσύ λες τα <b>δικά σας</b> ονόματα, όπως είναι γραμμένα στην εφαρμογή ή όπως της τα έχετε μάθει (κεφάλαιο 5, σελίδα 9).</p>
+  </div>
+
+  <nav class="toc">
+    <h4>Τι θα βρεις μέσα</h4>
+    <ol>
+      <li class="ch"><a href="#how" class="t"><span class="num">1</span>Πώς δουλεύει</a><span class="dots"></span><span class="p">2</span></li>
+<li class="ch"><a href="#tips" class="t"><span class="num">2</span>Για να σε καταλαβαίνει</a><span class="dots"></span><span class="p">3</span></li>
+<li class="ch"><a href="#tasks" class="t"><span class="num">3</span>Τι λες για κάθε δουλειά</a><span class="dots"></span><span class="p">4</span></li>
+<li style="display:block;padding:0"><ol class="toc-grid"><li class=""><a href="#task-0" class="t">Πωλήσεις ημέρας</a><span class="dots"></span><span class="p">4</span></li>
+<li class=""><a href="#task-1" class="t">Πωλήσεις σε πελάτες</a><span class="dots"></span><span class="p">4</span></li>
+<li class=""><a href="#task-2" class="t">Αγορές</a><span class="dots"></span><span class="p">4</span></li>
+<li class=""><a href="#task-3" class="t">Παραγωγή</a><span class="dots"></span><span class="p">5</span></li>
+<li class=""><a href="#task-4" class="t">Απογραφή</a><span class="dots"></span><span class="p">5</span></li>
+<li class=""><a href="#task-5" class="t">Εισπράξεις και πληρωμές</a><span class="dots"></span><span class="p">6</span></li>
+<li class=""><a href="#task-6" class="t">Νέα είδη</a><span class="dots"></span><span class="p">6</span></li>
+<li class=""><a href="#task-7" class="t">Νέοι πελάτες και προμηθευτές</a><span class="dots"></span><span class="p">6</span></li>
+<li class=""><a href="#task-8" class="t">Συνταγές</a><span class="dots"></span><span class="p">6</span></li>
+<li class=""><a href="#task-9" class="t">Τιμές</a><span class="dots"></span><span class="p">7</span></li>
+<li class=""><a href="#task-10" class="t">Ερωτήσεις</a><span class="dots"></span><span class="p">7</span></li>
+<li class=""><a href="#task-11" class="t">Κλείσιμο και αναίρεση</a><span class="dots"></span><span class="p">7</span></li></ol></li>
+<li class="ch"><a href="#count" class="t"><span class="num">4</span>Απογραφή χώρο-χώρο</a><span class="dots"></span><span class="p">8</span></li>
+<li class="ch"><a href="#words" class="t"><span class="num">5</span>Οι δικές σας λέξεις και φράσεις</a><span class="dots"></span><span class="p">9</span></li>
+<li class="ch"><a href="#vocab" class="t"><span class="num">6</span>Ποια κανάλια και λέξεις καταλαβαίνει</a><span class="dots"></span><span class="p">10</span></li>
+<li class="ch"><a href="#ours" class="t"><span class="num">7</span>Οι λέξεις μας</a><span class="dots"></span><span class="p">11</span></li>
+
+    </ol>
+  </nav>
+
+
+</section>
+
+<!-- ============================================================ 1. ΠΩΣ ΔΟΥΛΕΥΕΙ -->
+<div class="page-break"></div>
+<section id="how">
+  <h2><span class="no">1</span>Πώς δουλεύει</h2>
+
+  <ol class="how">
+    <li>
+      <b>Άνοιξε το «Πες το».</b>
+      Είναι πρώτο στο μενού. Στο κινητό, στις άλλες σελίδες υπάρχει και ένα κόκκινο στρογγυλό μικρόφωνο κάτω δεξιά:
+      το πατάς και σε ακούει αμέσως.
+    </li>
+    <li>
+      <b>Πάτα το μεγάλο κόκκινο μικρόφωνο και μίλα.</b>
+      Όσο ακούει, γράφει <span class="ui">Ακούω…</span> και βλέπεις τα λόγια σου. Όταν σταματήσεις να μιλάς, σταματάει κι αυτό.
+      Δεν θες να μιλήσεις; Γράψε στο κουτί κάτω (<span class="ui">Γράψε ή υπαγόρευσε…</span>) και πάτα <span class="kbd">Στείλε</span>.
+    </li>
+    <li>
+      <b>Κοίτα την κάρτα.</b>
+      Πάνω γράφει τι άκουσε (<span class="ui">Άκουσα: «…»</span>) και από κάτω τι κατάλαβε, με μια ερώτηση στο τέλος.
+      Αν έχεις ανοιχτή την <span class="ui">Ανάγνωση φωναχτά</span>, σ’ το διαβάζει κιόλας.
+      Ό,τι δεν είναι σωστό το διορθώνεις πάνω στην κάρτα: ποσότητες, τιμές, κανάλι.
+      Για άλλο είδος ή πελάτη πάτα <span class="ui">αλλαγή</span>, ή διάλεξε από τα κουμπιά που σου δείχνει,
+      ή <span class="chip">Άλλο…</span> για αναζήτηση, ή <span class="chip">Νέο είδος…</span> / <span class="chip">Νέος…</span> για καινούριο.
+      Σε κίτρινο κουτί σού λέει αν κάτι λείπει ή αν δεν είναι σίγουρο.
+    </li>
+    <li>
+      <b>Πάτα «Ναι, πέρασέ το» ή πες «ναι».</b>
+      Με <span class="kbd">Άκυρο</span> ή <q>όχι</q> δεν γράφεται τίποτα. Στις ερωτήσεις (π.χ. <q class="ph">πόση μοτσαρέλα έχουμε</q>) η απάντηση έρχεται αμέσως· αν δεν είναι σίγουρο τι ρωτάς, διαλέγεις και πατάς <span class="kbd">Δείξε</span>.
+    </li>
+    <li>
+      <b>Έκανες λάθος; Αναίρεση.</b>
+      Ό,τι περνάς μπαίνει στη λίστα <span class="ui">Τι πέρασε</span>, με κουμπί <span class="kbd">Αναίρεση</span> δίπλα σε κάθε γραμμή
+      (και <span class="kbd">Αναίρεση τελευταίου</span> πάνω). Ή πες <q class="ph">ακύρωσε το τελευταίο</q>.
+      Το κλείσιμο της ημέρας και το τέλος της απογραφής δεν αναιρούνται από εκεί: εκεί γράφει <span class="ui">χωρίς αναίρεση</span>.
+    </li>
+  </ol>
+
+  <div class="figrow">
+    <div class="mock" aria-label="Παράδειγμα κάρτας">
+      <div class="heard">Άκουσα: «efood τρεις μαργαρίτες και δύο σπέσιαλ»</div>
+      <div class="sent">Πώληση efood: 3 Μαργαρίτα, 2 Special. Να το περάσω;</div>
+      <div class="line"><span class="lbl">Κανάλι</span>
+        <span class="chip on">efood</span><span class="chip">Wolt</span><span class="chip">box</span><span class="chip">Τηλέφωνο</span><span class="chip">Μαγαζί</span></div>
+      <div class="line"><span class="lbl">Προϊόν</span> <b>Μαργαρίτα</b> <span class="kbd">−</span> 3 <span class="kbd">+</span></div>
+      <div class="line"><span class="lbl">Προϊόν</span> <b>Special</b> <span class="kbd">−</span> 2 <span class="kbd">+</span></div>
+      <div class="btns"><span class="btn">Άκυρο</span><span class="btn primary">Ναι, πέρασέ το</span></div>
+    </div>
+    <div class="box grey small" style="margin-top:0">
+      <h4>Στην ίδια οθόνη θα βρεις</h4>
+      <ul>
+        <li><span class="ui">Κανάλι όταν δεν το λες</span>: efood, Wolt, box, Τηλέφωνο ή Μαγαζί. Αν πεις μόνο <q class="ph">δύο μαργαρίτες</q>, μπαίνουν εκεί.</li>
+        <li><span class="ui">Ανάγνωση φωναχτά</span>: διαβάζει την κάρτα.</li>
+        <li><span class="ui">Επιβεβαίωση με φωνή</span>: μετά την ανάγνωση περιμένει να πεις «ναι» ή «όχι», για να μην αγγίζεις την οθόνη με αλευρωμένα χέρια.</li>
+        <li>Η λωρίδα <span class="ui">Σήμερα</span> δείχνει τις σημερινές πωλήσεις ανά κανάλι· η <span class="ui">Απογραφή σε εξέλιξη</span> φαίνεται όταν μετράτε.</li>
+        <li>Στο <span class="ui">«Τι μπορώ να πω;»</span> έχει παραδείγματα. Πατάς ένα και μπαίνει στο κουτί.</li>
+        <li><span class="ui">Λέξεις &amp; φράσεις</span>: οι δικές σας λέξεις (κεφάλαιο 5, σελίδα 9).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 2. ΣΥΜΒΟΥΛΕΣ -->
+<div class="page-break"></div>
+<section id="tips">
+  <h2><span class="no">2</span>Για να σε καταλαβαίνει</h2>
+  <ul class="tips">
+    <li><b>Ένα πράγμα τη φορά.</b> Μία παραλαβή, μία πώληση, μία μέτρηση. Πολλά είδη μαζί γίνονται
+      (<q class="ph">efood τρεις μαργαρίτες και δύο σπέσιαλ</q>), αλλά όχι πώληση και παραλαβή στην ίδια φράση.</li>
+    <li><b>Πες αριθμό και μονάδα.</b> <q>έξι κιλά</q>, <q>δέκα σακιά</q>, <q>80 γραμμάρια</q>. Ψηφία ή λέξεις, όπως σου βγαίνει.
+      Στις πωλήσεις, χωρίς αριθμό μετράει ένα. Αλλού, αν λείπει ο αριθμός, θα σ’ το πει η κάρτα.</li>
+    <li><b>Πες ποιος ή πού.</b> Βοηθάει να ξεκινάς με το κανάλι ή τον πελάτη/προμηθευτή: <q>efood…</q>, <q>ήρθαν από τον μύλο…</q>,
+      <q>πούλησα στο ξενοδοχείο…</q>.</li>
+    <li><b>Ονόματα όπως τα ξέρει η εφαρμογή.</b> Όπως είναι γραμμένα ή όπως της τα μάθατε. Τόνοι, κεφαλαία και πληθυντικός
+      δεν πειράζουν (<q>μαργαρίτες</q> = Μαργαρίτα).</li>
+    <li><b>Λάθος στη μέση; Συνέχισε.</b> <q class="ph">efood τρεις μαργαρίτες, όχι δύο</q>: κρατάει τις δύο.</li>
+    <li><b>Μίλα κανονικά.</b> Όχι πολύ γρήγορα και όχι δίπλα στον απορροφητήρα. Ξεκίνα αφού πατήσεις το κουμπί.</li>
+    <li><b>Κινητό.</b> Σε Android με Chrome δουλεύει καλύτερα. Σε iPhone, ή όταν γράφει
+      <span class="ui">Ο browser δεν έχει αναγνώριση φωνής</span>, πάτα στο κουτί κάτω και μετά το μικρόφωνο του πληκτρολογίου·
+      μίλα και πάτα <span class="kbd">Στείλε</span>. Την πρώτη φορά θα σου ζητήσει άδεια για το μικρόφωνο: δώσ’ την.</li>
+  </ul>
+
+  <div class="box amber small">
+    <h4>Αν κάτι δεν πάει καλά</h4>
+    <ul>
+      <li><b>«Δεν κατάλαβα»:</b> πες το πιο απλά, ένα πράγμα τη φορά. Για ιδέες, άνοιξε το <span class="ui">«Τι μπορώ να πω;»</span></li>
+      <li><b>Η κάρτα γράφει «Δεν βρέθηκε…»:</b> διάλεξε το σωστό από τα κουμπιά ή με <span class="chip">Άλλο…</span>. Άφησε τσεκαρισμένο το
+        <span class="ui">Να το θυμάμαι ως «…»</span> και την επόμενη φορά θα το καταλάβει.</li>
+      <li><b>Το μικρόφωνο δεν ακούει:</b> έλεγξε ότι ο browser έχει άδεια για το μικρόφωνο. Αλλιώς μίλα στο κουτί με το μικρόφωνο του πληκτρολογίου.</li>
+      <li><b>Μήνυμα ότι κάτι μετρήθηκε σε απογραφή:</b> αυτή η κίνηση έγινε πριν από μια μέτρηση και δεν αλλάζει από μόνη της
+        (κεφάλαιο 4, σελίδα 8). Αν η απογραφή είναι ακόμα σε εξέλιξη: πάτα τη λωρίδα <span class="ui">Απογραφή σε εξέλιξη</span>,
+        <span class="kbd">Βγάλε</span> στο είδος, διόρθωσε την κίνηση (π.χ. στις <span class="ui">Αγορές</span>: <span class="kbd">Ακύρωση καταχώρησης</span>) και μέτρησέ το πάλι.
+        Αν έχει καταχωρηθεί, μίλα με τον υπεύθυνο.</li>
+      <li><b>Η απογραφή έμεινε ανοιχτή από άλλη μέρα:</b> οι νέες μετρήσεις πάνε στη σημερινή και το <q>τέλος απογραφής</q> καταχωρεί
+        όλες τις ανοιχτές, την παλιότερη πρώτη. Μέτρημα που περνάει τα μεσάνυχτα συνεχίζει την απογραφή της προηγούμενης μέρας
+        ως τις 5 το πρωί, όσο δεν έχει γραφτεί τίποτα για τη νέα μέρα.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================ 3. ΑΝΑ ΔΟΥΛΕΙΑ -->
+<div class="page-break"></div>
+<section id="tasks">
+  <h2><span class="no">3</span>Τι λες για κάθε δουλειά</h2>
+  <p class="muted">
+    Αριστερά αυτό που λες, δεξιά τι γίνεται. Όλες οι φράσεις είναι δοκιμασμένες. Δεν χρειάζεται να τις λες λέξη προς λέξη:
+    πες το με τον δικό σου τρόπο, με τις ίδιες πληροφορίες (τι, πόσο, ποιος).
+  </p>
+  
+  <table class="ex" id="task-0">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Πωλήσεις ημέρας</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Πρώτα το κανάλι (efood, Wolt, box, τηλέφωνο, μαγαζί) και μετά τι πουλήθηκε. Χωρίς κανάλι μπαίνει στο κανάλι που έχεις διαλέξει στην οθόνη. Τα βλέπεις και στη σελίδα «Πωλήσεις ημέρας», με + και −. Στο τέλος της βάρδιας πες «κλείσε τη μέρα»· αν ξεχαστεί, κλείνει μόνη της με την επόμενη σύνδεση.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«efood τρεις μαργαρίτες και δύο σπέσιαλ»</td><td class="does">Προσθέτει στο efood 3 Μαργαρίτα και 2 Special.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«wolt μία χαβανέζα»</td><td class="does">Προσθέτει στο Wolt 1 Χαβανέζα.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«τηλέφωνο δύο μαργαρίτες και μία πεπερόνι»</td><td class="does">Προσθέτει στις τηλεφωνικές 2 Μαργαρίτα και 1 Πεπερόνι.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«μαγαζί μία μαργαρίτα και μία χαβανέζα»</td><td class="does">Προσθέτει στο μαγαζί 1 Μαργαρίτα και 1 Χαβανέζα.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«δύο μαργαρίτες»</td><td class="does">Χωρίς κανάλι: μπαίνουν στο κανάλι που είναι επιλεγμένο στην οθόνη.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«efood βγάλε μία μαργαρίτα»</td><td class="does">Αφαιρεί 1 Μαργαρίτα από το efood (π.χ. ακυρώθηκε η παραγγελία).</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«efood τρεις μαργαρίτες, όχι δύο»</td><td class="does">Διόρθωση μέσα στη φράση: κρατάει τις 2.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-1">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Πωλήσεις σε πελάτες</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Για πελάτες χονδρικής: φτιάχνει παραστατικό πώλησης. Χωρίς τιμή μπαίνει η τιμή του πελάτη ή η γενική.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«πούλησα στο ξενοδοχείο Αστέρια εξήντα σπέσιαλ κατεψυγμένες»</td><td class="does">Πώληση στο Ξενοδοχείο Αστέρια: 60 Special κατεψυγμένη.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«δελτίο στο ξενοδοχείο Χ είκοσι σπέσιαλ κατεψυγμένες 3,90 η μία»</td><td class="does">Πώληση στο Ξενοδοχείο Χ: 20 τεμάχια προς 3,90 € χωρίς ΦΠΑ.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-2">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Αγορές</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Ποιος τα έφερε, τι και πόσο, και αν θέλεις την τιμή (χωρίς ΦΠΑ, εκτός αν πεις «με ΦΠΑ»). Χωρίς τιμή μπαίνει το μέσο κόστος.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«ήρθαν από τον μύλο δέκα σακιά αλεύρι 0,62 το κιλό»</td><td class="does">Αγορά από τον Μύλο: 250 kg Αλεύρι (10 σακιά των 25 kg) προς 0,62 € το κιλό.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«τιμολόγιο 1234 από το τυροκομείο 20 κιλά μοτσαρέλα 7 ευρώ το κιλό»</td><td class="does">Αγορά από το Τυροκομείο Κρήτης: 20 kg Μοτσαρέλα προς 7 € το κιλό, με αριθμό τιμολογίου 1234.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«πήρα από τον μύλο 2 κιλά μαγιά 3 ευρώ το κιλό»</td><td class="does">Αγορά από τον Μύλο: 2 kg Μαγιά προς 3 € το κιλό.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«ήρθαν από τον μύλο 10 σακιά αλεύρι, 155 ευρώ όλα»</td><td class="does">Αγορά με σύνολο: 250 kg Αλεύρι, 155 € όλα μαζί (βγαίνει 0,62 € το κιλό). Αν τα πλήρωσες κιόλας, πες μετά και «πλήρωσα τον μύλο 155 ευρώ».</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-3">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Παραγωγή</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Τι φτιάξατε και πόσα. Τα υλικά βγαίνουν αυτόματα από τη συνταγή.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«φτιάξαμε 80 ζυμάρια 400»</td><td class="does">Παραγωγή: 80 Ζυμάρι 400γρ.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«ζύμωσα σαράντα ζυμάρια 250»</td><td class="does">Παραγωγή: 40 Ζυμάρι 250γρ.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«έφτιαξα 20 σπέσιαλ κατεψυγμένες»</td><td class="does">Παραγωγή: 20 Special κατεψυγμένη.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-4">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Απογραφή</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Η μέτρηση μετράει τη στιγμή που τη λες· ό,τι πουληθεί ή φτιαχτεί μετά, μετράει για μετά. Μπορείς να μετρήσεις και ένα μόνο είδος. Πηγαίνεις χώρο-χώρο: «άλλα» προσθέτει σε ό,τι έχεις ήδη μετρήσει, «σύνολο» ή «διόρθωσε» βάζει τη νέα μέτρηση στη θέση της παλιάς. Όταν τελειώσεις, πες «τέλος απογραφής». Αναλυτικά, με παράδειγμα: κεφάλαιο 4, σελίδα 8.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«μέτρησα μοτσαρέλα έξι κιλά, αλεύρι σαράντα επτά κιλά και είκοσι τρία ζυμάρια 400»</td><td class="does">Γράφει τρεις μετρήσεις: 6 kg Μοτσαρέλα, 47 kg Αλεύρι, 23 Ζυμάρι 400γρ.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«στην αποθήκη αλεύρι δέκα σακιά»</td><td class="does">Μέτρηση στον πρώτο χώρο: 250 kg Αλεύρι.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«αλεύρι άλλα πέντε κιλά»</td><td class="does">Από άλλον χώρο: προσθέτει 5 kg στο Αλεύρι που έχεις μετρήσει (250 + 5 = 255).</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«στο ψυγείο κι άλλη μοτσαρέλα τρία κιλά»</td><td class="does">Προσθέτει 3 kg στη Μοτσαρέλα που έχεις μετρήσει.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«κι εδώ αλεύρι δύο σακιά»</td><td class="does">Προσθέτει 50 kg στο Αλεύρι (άλλος χώρος).</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«στον καταψύκτη άλλες δέκα σπέσιαλ κατεψυγμένες»</td><td class="does">Προσθέτει 10 στις Special κατεψυγμένες που έχεις μετρήσει.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«αλεύρι σύνολο σαράντα κιλά»</td><td class="does">Αντικαθιστά τη μέτρηση: το Αλεύρι είναι 40 kg συνολικά.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«διόρθωσε μοτσαρέλα έξι κιλά»</td><td class="does">Διόρθωση: η Μοτσαρέλα γίνεται 6 kg (όχι πρόσθεση).</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«μοτσαρέλα άλλα δύο κιλά και αλεύρι σύνολο σαράντα»</td><td class="does">Προσθέτει 2 kg στη Μοτσαρέλα και βάζει το Αλεύρι 40 kg.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«έμειναν είκοσι τρία ζυμάρια 250»</td><td class="does">Μέτρηση: 23 Ζυμάρι 250γρ.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«τέλος απογραφής»</td><td class="does">Καταχωρεί την απογραφή και δείχνει τις διαφορές.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-5">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Εισπράξεις και πληρωμές</h3></th></tr>
+    </thead>
+    <tbody>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«το ξενοδοχείο Αστέρια μου έδωσε 300 ευρώ»</td><td class="does">Είσπραξη 300 € από το Ξενοδοχείο Αστέρια.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«είσπραξη 150 ευρώ από το ξενοδοχείο Χ»</td><td class="does">Είσπραξη 150 € από το Ξενοδοχείο Χ.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«πλήρωσα τον μύλο 500 ευρώ»</td><td class="does">Πληρωμή 500 € στον Μύλο.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«έδωσα στο τυροκομείο 200 ευρώ»</td><td class="does">Πληρωμή 200 € στο Τυροκομείο Κρήτης.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-6">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Νέα είδη</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Πες τι είδος είναι (πρώτη ύλη / υλικό, ημιέτοιμο, πίτσα / προϊόν), το όνομα και, αν θέλεις, μονάδα, συσκευασία και τιμή.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέο υλικό θυμάρι σε γραμμάρια»</td><td class="does">Νέα πρώτη ύλη «Θυμάρι» που μετριέται σε γραμμάρια.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέα πρώτη ύλη σιμιγδάλι έρχεται σε σακί των 25 κιλών»</td><td class="does">Νέα πρώτη ύλη «Σιμιγδάλι» σε κιλά, σε σακί των 25 kg.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέα πίτσα βεζούβιο 11 ευρώ»</td><td class="does">Νέα πίτσα «Βεζούβιο», 11 € με ΦΠΑ, φτιάχνεται κατά παραγγελία.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέο προϊόν μαργαρίτα κατεψυγμένη 4,50»</td><td class="does">Νέο προϊόν «Μαργαρίτα κατεψυγμένη», 4,50 € χωρίς ΦΠΑ.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέο ημιέτοιμο ζυμάρι 300 γραμμάρια»</td><td class="does">Νέο ημιέτοιμο «Ζυμάρι 300γρ».</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-7">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Νέοι πελάτες και προμηθευτές</h3></th></tr>
+    </thead>
+    <tbody>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέος πελάτης ταβέρνα Κύμα τηλέφωνο 6944123456»</td><td class="does">Νέος πελάτης «Ταβέρνα Κύμα» με τηλέφωνο.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέος προμηθευτής τυροκομείο Ζαρού ΑΦΜ 123456789»</td><td class="does">Νέος προμηθευτής «Τυροκομείο Ζαρού» με ΑΦΜ.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«νέος πελάτης ξενοδοχείο Κνωσός στο Ηράκλειο»</td><td class="does">Νέος πελάτης «Ξενοδοχείο Κνωσός», πόλη Ηράκλειο.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-8">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Συνταγές</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Τι χρειάζεται για ένα τεμάχιο, ή «για σαράντα τεμάχια» για μια παρτίδα. Η νέα συνταγή αντικαθιστά την παλιά.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«η μαργαρίτα θέλει ένα ζυμάρι 250, 80 γραμμάρια σάλτσα και 120 γραμμάρια μοτσαρέλα»</td><td class="does">Συνταγή της Μαργαρίτας για μία πίτσα: 1 Ζυμάρι 250γρ, 80 g σάλτσα, 120 g μοτσαρέλα.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«συνταγή ζυμάρι 400 για σαράντα τεμάχια: έξι κιλά αλεύρι, τέσσερα λίτρα νερό, εκατό γραμμάρια μαγιά»</td><td class="does">Συνταγή για παρτίδα 40 ζυμαριών 400γρ.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-9">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Τιμές</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Η τιμή μιας πίτσας κατά παραγγελία λέγεται με ΦΠΑ, όπως στον κατάλογο· όλες οι άλλες τιμές (κατεψυγμένες, ειδικές τιμές πελατών) χωρίς ΦΠΑ. Αν θέλεις το αντίθετο, πες «με ΦΠΑ» ή «χωρίς ΦΠΑ».</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«η μαργαρίτα κάνει οκτώ ευρώ»</td><td class="does">Νέα τιμή Μαργαρίτας: 8 € με ΦΠΑ.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«τιμή μαργαρίτας οκτώ και πενήντα»</td><td class="does">Νέα τιμή Μαργαρίτας: 8,50 € με ΦΠΑ.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«η σπέσιαλ κατεψυγμένη κάνει 4,50 χωρίς ΦΠΑ»</td><td class="does">Νέα τιμή για Special κατεψυγμένη: 4,50 € χωρίς ΦΠΑ.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«το ξενοδοχείο Αστέρια παίρνει τη σπέσιαλ κατεψυγμένη 3,90»</td><td class="does">Ειδική τιμή πελάτη: 3,90 € για το Ξενοδοχείο Αστέρια.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«τιμή για το ξενοδοχείο Χ σπέσιαλ κατεψυγμένη 4,20»</td><td class="does">Ειδική τιμή πελάτη: 4,20 € για το Ξενοδοχείο Χ.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-10">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Ερωτήσεις</h3></th></tr>
+    </thead>
+    <tbody>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«πόση μοτσαρέλα έχουμε»</td><td class="does">Λέει το απόθεμα της Μοτσαρέλας.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«πόσα ζυμάρια 250 έχουν μείνει»</td><td class="does">Λέει πόσα Ζυμάρι 250γρ έχουν μείνει.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«πόσα μας χρωστάει το ξενοδοχείο Αστέρια»</td><td class="does">Λέει το υπόλοιπο του πελάτη.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«τι χρωστάμε στον μύλο»</td><td class="does">Λέει τι χρωστάμε στον προμηθευτή.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«τι πουλήσαμε σήμερα»</td><td class="does">Λέει τις σημερινές πωλήσεις ανά κανάλι.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«βοήθεια»</td><td class="does">Δείχνει τι μπορείς να πεις.</td></tr>
+    </tbody>
+  </table>
+  <table class="ex" id="task-11">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Κλείσιμο και αναίρεση</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Το κλείσιμο της ημέρας και το τέλος της απογραφής δεν αναιρούνται.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«κλείσε τη μέρα»</td><td class="does">Καταχωρεί τις πωλήσεις ημέρας όλων των καναλιών.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«κλείσε την απογραφή»</td><td class="does">Καταχωρεί την απογραφή σε εξέλιξη.</td></tr>
+<tr class="z"><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«ακύρωσε το τελευταίο»</td><td class="does">Αναιρεί την τελευταία καταχώρηση.</td></tr>
+<tr><td class="say"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«λάθος, ακύρωσέ το»</td><td class="does">Το ίδιο: αναίρεση της τελευταίας καταχώρησης.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================================================ 4. ΑΠΟΓΡΑΦΗ ΧΩΡΟ-ΧΩΡΟ -->
+<div class="page-break"></div>
+<section id="count">
+  <h2><span class="no">4</span>Απογραφή χώρο-χώρο</h2>
+  <p class="lead">
+    Πηγαίνεις από χώρο σε χώρο και λες ό,τι βλέπεις. Αν ένα είδος είναι σε πολλά σημεία, η εφαρμογή τα προσθέτει.
+  </p>
+
+  <div class="keep">
+    <h3 style="margin-top:3mm">Παράδειγμα: το αλεύρι είναι σε τρία σημεία</h3>
+    <table class="walk">
+      <thead><tr><th>Πού είσαι</th><th>Λες</th><th>Η κάρτα δείχνει</th></tr></thead>
+      <tbody>
+        <tr><td class="where">Στην αποθήκη</td><td class="say">«στην αποθήκη αλεύρι δέκα σακιά»</td><td class="res">Αλεύρι: <b>250 kg</b> (πρώτη μέτρηση)</td></tr>
+<tr><td class="where">Στην κουζίνα</td><td class="say">«αλεύρι άλλα πέντε κιλά»</td><td class="res">Αλεύρι: 250 + 5 = <b>255 kg</b></td></tr>
+<tr><td class="where">Στο πατάρι</td><td class="say">«κι εδώ αλεύρι δύο σακιά»</td><td class="res">Αλεύρι: 255 + 50 = <b>305 kg</b></td></tr>
+<tr><td class="where">Τελείωσες</td><td class="say">«τέλος απογραφής»</td><td class="res">Καταχωρείται. Βλέπεις τι έλειπε ή περίσσευε.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="three">
+    <div class="card"><span class="w">«άλλα»</span><span>Προσθέτει σε ό,τι έχεις ήδη μετρήσει. Το ίδιο κάνουν «κι άλλα», «ακόμα», «κι εδώ».</span></div>
+    <div class="card"><span class="w">«σύνολο»</span><span>Η νέα μέτρηση μπαίνει στη θέση της παλιάς: <q class="ph">αλεύρι σύνολο σαράντα κιλά</q>. Το ίδιο το «διόρθωσε».</span></div>
+    <div class="card"><span class="w">«τέλος απογραφής»</span><span>Καταχωρεί και δείχνει τι έλειπε ή περίσσευε. Ως τότε, πάνω στην οθόνη φαίνεται «Απογραφή σε εξέλιξη».</span></div>
+  </div>
+
+  <div class="box green">
+    <h4>Η μέτρηση μετράει τη στιγμή που τη λες</h4>
+    <ul>
+      <li><b>Δεν χρειάζεται να σταματήσει η δουλειά.</b> Μπορείς να μετρήσεις όλη την αποθήκη ή <b>ένα μόνο είδος</b>
+        (π.χ. μόνο το αλεύρι ή μόνο τα ζυμάρια), όποια ώρα θέλεις, και να συνεχίσετε κανονικά.</li>
+      <li><b>Ό,τι γίνει μετά, μετράει για μετά.</b> Πίτσες που πουλιούνται και ζυμάρια που φτιάχνονται μετά τη μέτρηση
+        γράφονται κανονικά (και στις <span class="ui">Πωλήσεις ημέρας</span>) και δεν χαλάνε τη μέτρηση.</li>
+      <li><b>Ό,τι έγινε πριν, κλειδώνει.</b> Η μέτρηση το έχει ήδη «δει», γι’ αυτό δεν αλλάζει πια. Αυτό σημαίνει «κλειδωμένο».</li>
+    </ul>
+    <p style="margin-top:1.5mm"><b>Για παράδειγμα:</b> ως τις 12:00 πουλήθηκαν 5 μαργαρίτες. Στις 12:30 μετράς μόνο το αλεύρι.
+      Ως το βράδυ πουλιούνται άλλες 30. Οι 5 μετράνε πριν από τη μέτρηση και οι 30 μετά: η μέτρηση του αλευριού μένει σωστή
+      και οι πωλήσεις της ημέρας είναι 35.</p>
+  </div>
+
+  <div class="figrow">
+    <div>
+      <h4 style="margin-top:0">Πρόσθεση ή Αντικατάσταση;</h4>
+      <p>
+        Όταν ένα είδος έχει ήδη μέτρηση, η κάρτα δείχνει <span class="chip on">Πρόσθεση</span>
+        <span class="chip">Αντικατάσταση</span> και το αποτέλεσμα. Αν δεν πεις «άλλα» ή «σύνολο», διαλέγει
+        <b>Πρόσθεση</b>· πάτα το άλλο αν θέλεις. Η ανάγνωση φωναχτά λέει και το νέο σύνολο.
+      </p>
+      <p class="small">
+        Πες πάντα και το είδος. Αν το ξεχάσεις αμέσως μετά από μια μέτρηση, η κάρτα συνεχίζει με το τελευταίο είδος
+        που μέτρησες και το γράφει. Λάθος μέτρηση; <span class="kbd">Αναίρεση</span> στο <span class="ui">Τι πέρασε</span>.
+      </p>
+    </div>
+    <div class="mock" aria-label="Κάρτα απογραφής">
+      <div class="heard">Άκουσα: «αλεύρι άλλα πέντε κιλά»</div>
+      <div class="sent">Απογραφή: Αλεύρι άλλα 5 kg. Να το περάσω;</div>
+      <div class="line"><span class="lbl">Είδος</span> <b>Αλεύρι</b> <span class="kbd">5 kg</span></div>
+      <div class="line"><span class="toggle"><span class="on">Πρόσθεση</span><span>Αντικατάσταση</span></span> <b>Αλεύρι: 250 + 5 = 255 kg</b></div>
+      <div class="btns"><span class="btn">Άκυρο</span><span class="btn primary">Ναι, πέρασέ το</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 5. ΔΙΚΕΣ ΣΑΣ ΛΕΞΕΙΣ -->
+<div class="page-break"></div>
+<section id="words">
+  <h2><span class="no">5</span>Οι δικές σας λέξεις και φράσεις</h2>
+  <p class="lead">
+    Κάθε μαγαζί έχει τις δικές του λέξεις. Μάθε τες στην εφαρμογή μία φορά και από εκεί και πέρα τις καταλαβαίνει,
+    για όλους στο μαγαζί. Τρεις τρόποι:
+  </p>
+
+  <h3>α. Από την κάρτα: «Να το θυμάμαι ως…»</h3>
+  <p>
+    Όταν η εφαρμογή δεν αναγνωρίζει μια λέξη και εσύ διαλέξεις το σωστό είδος ή πελάτη, κάτω εμφανίζεται τσεκαρισμένο το
+    <span class="ui">Να το θυμάμαι ως «…»</span>. Άφησέ το έτσι: με το «ναι» η λέξη γίνεται άλλο όνομα αυτού του είδους ή πελάτη.
+  </p>
+
+  <h3>β. Με φωνή: «όταν λέω… εννοώ…»</h3>
+  <p>
+    Πες τη λέξη σου και τι σημαίνει. Η κάρτα δείχνει τα κουτιά <span class="ui">Όταν λέω</span> και <span class="ui">εννοώ</span>
+    (τα διορθώνεις αν χρειάζεται) και ρωτάει <span class="ui">«Να τη θυμάμαι;»</span> Αν σου προτείνει
+    <span class="ui">Να το καταλαβαίνω και στον πληθυντικό</span>, άφησέ το τσεκαρισμένο. Πέντε τρόποι να το πεις:
+  </p>
+  <table class="learn"><thead><tr><th>Μαθαίνεις (μία φορά)</th><th>Μετά λες</th><th>Τι γίνεται</th></tr></thead><tbody>
+<tr><td class="teach">«όταν λέω κλασική εννοώ μαργαρίτα»</td><td class="use">«efood μία κλασική»</td><td>όπως «efood μία μαργαρίτα».</td></tr>
+<tr><td class="teach">«όταν λέω ο Γιώργος θέλω να πω Ξενοδοχείο Αστέρια»</td><td class="use">«ο Γιώργος πλήρωσε 300 ευρώ»</td><td>είσπραξη 300 € από το Ξενοδοχείο Αστέρια.</td></tr>
+<tr><td class="teach">«μάθε ότι χτύπα σημαίνει πούλησα»</td><td class="use">«χτύπα δύο μαργαρίτες»</td><td>όπως «πούλησα δύο μαργαρίτες».</td></tr>
+<tr><td class="teach">«το συνηθισμένο του ξενοδοχείου σημαίνει πούλησα στο ξενοδοχείο Αστέρια εξήντα σπέσιαλ κατεψυγμένες»</td><td class="use">«το συνηθισμένο του ξενοδοχείου»</td><td>πώληση 60 Special κατεψυγμένη στο Ξενοδοχείο Αστέρια.</td></tr>
+<tr><td class="teach">«το τυρί είναι η μοτσαρέλα»</td><td class="use">«πόσο τυρί έχουμε»</td><td>απόθεμα της Μοτσαρέλας.</td></tr>
+</tbody></table>
+<p class="small muted">Το «το Χ είναι το Υ» πιάνει μόνο όταν το Υ είναι είδος ή πελάτης που ξέρει η εφαρμογή· αλλιώς πες «όταν λέω Χ εννοώ Υ».</p>
+
+  <h3>γ. Στη σελίδα «Λέξεις &amp; φράσεις»</h3>
+  <p>
+    Από το μενού, ή από το κουμπί <span class="ui">Λέξεις &amp; φράσεις</span> πάνω δεξιά στο «Πες το». Εκεί:
+  </p>
+  <ul>
+    <li><span class="ui">Δοκίμασε</span>: γράφεις μια φράση και βλέπεις τι καταλαβαίνει. Είναι μόνο δοκιμή, δεν γράφεται τίποτα.</li>
+    <li><span class="ui">Οι φράσεις σας</span>: γράφεις στα κουτιά <span class="ui">Όταν λέω</span> και <span class="ui">εννοώ</span> και πατάς
+      <span class="kbd">Πρόσθεση φράσης</span>. Δίπλα σε κάθε φράση: <span class="kbd">Αλλαγή</span> για διόρθωση, <span class="kbd">×</span> για σβήσιμο.</li>
+    <li><span class="ui">Άλλα ονόματα ειδών, πελατών, προμηθευτών</span>: βρίσκεις το είδος ή τον πελάτη, γράφεις το άλλο όνομα
+      (π.χ. ο Μύλος Α.Ε. είναι και «μύλος») και πατάς <span class="kbd">Πρόσθεση</span>. Το <span class="kbd">×</span> σε ένα όνομα το βγάζει.</li>
+  </ul>
+
+  <div class="box grey small">
+    <h4>Καλό να ξέρεις</h4>
+    <ul>
+      <li>Πιάνει <b>ολόκληρες λέξεις</b>, με ή χωρίς τόνους, μικρά ή κεφαλαία: το «ζυμάρι» δεν αλλάζει το «ζυμάρια» από μόνο του.</li>
+      <li>Για <b>πληθυντικό</b> ή άλλη κατάληξη μάθε και αυτή τη μορφή (π.χ. και «κλασικές»), αν δεν σ’ το προτείνει η κάρτα.</li>
+      <li>Το <b>«εννοώ»</b> γράψ’ το όπως θα το έλεγες σε εντολή, με τα ονόματα της εφαρμογής. Μπορεί να είναι και ολόκληρη πρόταση.</li>
+      <li>Αν δύο φράσεις μοιάζουν, πιάνει πρώτα η μεγαλύτερη.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================ 6. ΛΕΞΕΙΣ ΠΟΥ ΚΑΤΑΛΑΒΑΙΝΕΙ -->
+<div class="page-break"></div>
+<section id="vocab">
+  <h2><span class="no">6</span>Ποια κανάλια και λέξεις καταλαβαίνει</h2>
+  <p class="muted">Όλες δοκιμασμένες. Με ή χωρίς τόνους, μικρά ή κεφαλαία.</p>
+
+  <table class="words">
+    <thead><tr><th>Θέλεις</th><th>Πες</th></tr></thead>
+    <tbody>
+      <tr><td class="k">Κανάλι efood</td><td class="v"><q>efood</q>, <q>e-food</q>, <q>ιφούντ</q></td></tr>
+<tr><td class="k">Κανάλι Wolt</td><td class="v"><q>wolt</q>, <q>βολτ</q></td></tr>
+<tr><td class="k">Κανάλι box</td><td class="v"><q>box</q>, <q>μποξ</q></td></tr>
+<tr><td class="k">Κανάλι Τηλέφωνο</td><td class="v"><q>τηλέφωνο</q>, <q>τηλεφωνικά</q></td></tr>
+<tr><td class="k">Κανάλι Μαγαζί</td><td class="v"><q>μαγαζί</q>, <q>κατάστημα</q>, <q>σαλόνι</q>, <q>ταμείο</q>, <q>πάγκος</q>, <q>τραπέζι</q>, <q>από μέσα</q></td></tr>
+<tr><td class="k">Χονδρική</td><td class="v">Δεν τη λες ως κανάλι: πες τον πελάτη, π.χ. <q>πούλησα στο ξενοδοχείο Αστέρια…</q>.</td></tr>
+<tr><td class="k">Αριθμούς</td><td class="v"><q>6</q> ή <q>έξι</q>, <q>είκοσι τρία</q>, <q>εκατόν πενήντα</q>, <q>6,5</q> ή <q>έξι κόμμα πέντε</q>, <q>μισό</q>, <q>ενάμισι</q></td></tr>
+<tr><td class="k">Βάρος, υγρά</td><td class="v"><q>κιλά</q>, <q>κιλό</q>, <q>γραμμάρια</q>, <q>γρ</q>, <q>λίτρα</q>. Τα γραμμάρια γίνονται κιλά μόνα τους: <q>500 γραμμάρια</q> μοτσαρέλα = 0,5 kg.</td></tr>
+<tr><td class="k">Τεμάχια</td><td class="v"><q>τεμάχια</q>, <q>κομμάτια</q> ή σκέτος ο αριθμός: <q>είκοσι τρία ζυμάρια</q>.</td></tr>
+<tr><td class="k">Συσκευασίες</td><td class="v">Όπως είναι γραμμένες στο είδος: <q>σακιά</q>, <q>κούτες</q>… <q>δέκα σακιά αλεύρι</q> = 250 kg, όταν το σακί είναι 25 kg.</td></tr>
+<tr><td class="k">Τιμή</td><td class="v"><q>0,62 το κιλό</q>, <q>εξήντα δύο λεπτά το κιλό</q>, <q>15 ευρώ το σακί</q>, <q>3,90 η μία</q>, <q>155 ευρώ όλα</q></td></tr>
+<tr><td class="k">ΦΠΑ</td><td class="v"><q>με ΦΠΑ</q>, <q>χωρίς ΦΠΑ</q>. Η τιμή πίτσας κατά παραγγελία εννοείται με ΦΠΑ· όλες οι άλλες χωρίς, εκτός αν πεις αλλιώς.</td></tr>
+<tr><td class="k">Αφαίρεση από τις πωλήσεις</td><td class="v"><q>βγάλε μία μαργαρίτα</q>, <q>μείον μία μαργαρίτα</q>, <q>αφαίρεσε μία μαργαρίτα</q>, <q>μία μαργαρίτα λιγότερη</q></td></tr>
+<tr><td class="k">Απογραφή: πρόσθεση</td><td class="v"><q>άλλα</q>, <q>άλλο</q>, <q>άλλη</q>, <q>άλλες</q>, <q>κι άλλα</q>, <q>ακόμα</q>, <q>επιπλέον</q>, <q>συν</q>, <q>πρόσθεσε</q>, <q>βάλε κι άλλα</q>, <q>κι εδώ</q></td></tr>
+<tr><td class="k">Απογραφή: αντικατάσταση</td><td class="v"><q>σύνολο</q>, <q>συνολικά</q>, <q>όλα μαζί</q>, <q>τελικά</q>, <q>διόρθωσε</q>, <q>διόρθωση</q></td></tr>
+<tr><td class="k">Χώροι (τους λες ελεύθερα)</td><td class="v"><q>στην αποθήκη</q>, <q>στο ψυγείο</q>, <q>στον καταψύκτη</q>, <q>στην κουζίνα</q>, <q>στο ράφι</q>, <q>στο πατάρι</q>, <q>στο υπόγειο</q>, <q>στο ντουλάπι</q>, <q>στη βιτρίνα</q></td></tr>
+<tr><td class="k">Κλείσιμο</td><td class="v"><q>κλείσε τη μέρα</q>, <q>κλείσε τη βάρδια</q>, <q>τέλος βάρδιας</q>, <q>κλείσιμο ημέρας</q>, <q>τέλος απογραφής</q>, <q>κλείσε την απογραφή</q></td></tr>
+<tr><td class="k">Αναίρεση</td><td class="v"><q>ακύρωσε το τελευταίο</q>, <q>σβήσε το τελευταίο</q>, <q>αναίρεση</q></td></tr>
+<tr><td class="k">Βοήθεια</td><td class="v"><q>βοήθεια</q>, <q>τι μπορώ να πω</q></td></tr>
+<tr><td class="k">«Ναι» στην κάρτα</td><td class="v"><q>ναι</q>, <q>εντάξει</q>, <q>οκ</q>, <q>σωστό</q>, <q>μάλιστα</q>, <q>βεβαίως</q>, <q>πέρασέ το</q>, <q>καταχώρησε</q>, <q>προχώρα</q></td></tr>
+<tr><td class="k">«Όχι» στην κάρτα</td><td class="v"><q>όχι</q>, <q>άκυρο</q>, <q>ακύρωσε</q>, <q>λάθος</q>, <q>σταμάτα</q>, <q>άσ’ το</q>, <q>περίμενε</q>, <q>μην το περάσεις</q></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================================================ 7. ΓΙΑ ΣΥΜΠΛΗΡΩΣΗ -->
+<div class="page-break"></div>
+<section id="ours">
+  <h2><span class="no">7</span>Οι λέξεις μας</h2>
+  <p class="fill-intro">
+    Γράψτε εδώ τις λέξεις και τις φράσεις που λέτε στο μαγαζί. Μετά περάστε τες στη σελίδα
+    <span class="ui">Λέξεις &amp; φράσεις</span> (ή πείτε <q>όταν λέω… εννοώ…</q>) και τσεκάρετε το κουτάκι.
+    <span class="sample">Π.χ. όταν λέμε «οικογενειακή», εννοούμε «μεγάλη μαργαρίτα».</span>
+  </p>
+  <table class="fill">
+    <thead><tr><th></th><th style="width:44%">Όταν λέμε…</th><th>…εννοούμε</th><th style="width:16mm;text-align:center">Πέρασε</th></tr></thead>
+    <tbody>
+      <tr><td class="nr">1</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">2</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">3</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">4</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">5</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">6</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">7</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">8</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">9</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">10</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">11</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">12</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">13</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">14</td><td></td><td></td><td><span class="chk"></span></td></tr>
+<tr><td class="nr">15</td><td></td><td></td><td><span class="chk"></span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+</main>
+</body>
+</html>

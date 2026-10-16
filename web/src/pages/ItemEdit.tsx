@@ -5,7 +5,7 @@ import { useMaster } from '../context/MasterData'
 import { errMsg, supabase } from '../lib/supabase'
 import type { Bom, BomLine, Item, ItemType } from '../lib/types'
 import { ITEM_TYPE_LABEL, UNITS, VAT_RATES } from '../lib/labels'
-import { fmtCost, round, toNum } from '../lib/format'
+import { fmtCost, parseAliases, round, toNum } from '../lib/format'
 import { Confirm, ErrorBox, Field, NumInput, PageTitle, Spinner, useToast } from '../components/ui'
 import { ItemPicker } from '../components/Pickers'
 
@@ -13,7 +13,7 @@ interface BomLineDraft { key: number; component_item_id: string | null; qty: str
 
 const emptyItem = (company_id: string): Omit<Item, 'id'> => ({
   company_id, code: '', name: '', item_type: 'raw', category: null, unit: 'kg', vat_rate: 13, sale_price: 0,
-  avg_cost: 0, make_to_order: false, pack_name: null, pack_qty: null, min_stock: null, is_active: true, notes: null,
+  avg_cost: 0, make_to_order: false, pack_name: null, pack_qty: null, min_stock: null, is_active: true, notes: null, aliases: [],
 })
 
 export function ItemEdit() {
@@ -32,6 +32,7 @@ export function ItemEdit() {
   const [error, setError] = useState<string | null>(null)
   const [askDelete, setAskDelete] = useState(false)
   const [seq, setSeq] = useState(1)
+  const [aliasText, setAliasText] = useState('')
 
   const newLine = (): BomLineDraft => { setSeq((s) => s + 1); return { key: seq, component_item_id: null, qty: '' } }
 
@@ -50,6 +51,7 @@ export function ItemEdit() {
       }
       if (!alive) return
       setItem(it as Item)
+      setAliasText(((it as Item).aliases ?? []).join(', '))
       if (b) setBom({ id: (b as Bom).id, output_qty: String((b as Bom).output_qty), name: (b as Bom).name })
       setLines(bl.map((l, i) => ({ key: i + 1, component_item_id: l.component_item_id, qty: String(l.qty) })))
       setSeq(bl.length + 1)
@@ -83,12 +85,14 @@ export function ItemEdit() {
         unit: item.unit,
         vat_rate: toNum(item.vat_rate),
         sale_price: toNum(item.sale_price),
-        make_to_order: item.item_type === 'finished' ? item.make_to_order : false,
+        // ημιέτοιμο "κατά παραγγελία" = φτιάχνεται αυτόματα όταν το χρειαστεί πώληση/παραγωγή
+        make_to_order: item.item_type === 'raw' ? false : item.make_to_order,
         pack_name: item.pack_name?.trim() || null,
         pack_qty: item.pack_qty ? toNum(item.pack_qty) : null,
         min_stock: item.min_stock !== null && item.min_stock !== undefined && String(item.min_stock) !== '' ? toNum(item.min_stock) : null,
         is_active: item.is_active,
         notes: item.notes?.trim() || null,
+        aliases: parseAliases(aliasText),
       }
       let itemId = item.id
       if (isNew) {
@@ -180,6 +184,9 @@ export function ItemEdit() {
           <Field label="Όνομα" className="sm:col-span-2">
             <input className="input" required value={item.name} onChange={(e) => set('name', e.target.value)} autoFocus={isNew} />
           </Field>
+          <Field label="Άλλα ονόματα (πώς το λέτε)" className="sm:col-span-2">
+            <input className="input" value={aliasText} onChange={(e) => setAliasText(e.target.value)} placeholder="χωρισμένα με κόμμα, π.χ. σκέτη, απλή" />
+          </Field>
           <Field label="Κατηγορία (προαιρετικό)">
             <input className="input" value={item.category ?? ''} onChange={(e) => set('category', e.target.value)} placeholder="π.χ. Τυριά, Αλλαντικά, Πίτσες" />
           </Field>
@@ -202,6 +209,15 @@ export function ItemEdit() {
             <label className="text-sm flex items-center gap-2 sm:col-span-2 mt-1">
               <input type="checkbox" checked={item.make_to_order} onChange={(e) => set('make_to_order', e.target.checked)} />
               <span>Φτιάχνεται κατά παραγγελία (λιανική): η πώληση καταναλώνει αυτόματα τη συνταγή</span>
+            </label>
+          )}
+          {item.item_type === 'semi' && (
+            <label className="text-sm flex items-start gap-2 sm:col-span-2 mt-1">
+              <input type="checkbox" className="mt-1" checked={item.make_to_order} onChange={(e) => set('make_to_order', e.target.checked)} />
+              <span>
+                Φτιάχνεται αυτόματα όταν χρειάζεται (δεν περνάς παραγωγή)
+                <span className="block text-xs text-stone-500">Π.χ. ζυμάρι: η πώληση ή η παραγωγή που το καταναλώνει το «φτιάχνει» πρώτα από τη συνταγή του.</span>
+              </span>
             </label>
           )}
           {item.item_type === 'raw' && (

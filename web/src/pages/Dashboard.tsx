@@ -4,7 +4,7 @@ import { useLoad } from '../lib/useLoad'
 import { supabase } from '../lib/supabase'
 import type { StockBalance } from '../lib/types'
 import { fmtMoney, fmtQty, monthStart, today } from '../lib/format'
-import { PageTitle, Spinner } from '../components/ui'
+import { MicIcon, PageTitle, Spinner } from '../components/ui'
 
 export function Dashboard() {
   const companyId = useCompanyId()
@@ -38,6 +38,14 @@ export function Dashboard() {
   return (
     <div>
       <PageTitle title={`Αρχική — ${company?.name ?? ''}`} />
+
+      <Link to="/voice" className="card mb-4 p-4 flex items-center gap-4 bg-red-700 border-red-700 text-white hover:bg-red-800 active:scale-[0.99] transition">
+        <span className="h-14 w-14 shrink-0 rounded-full bg-white/15 flex items-center justify-center"><MicIcon className="h-8 w-8" /></span>
+        <span className="min-w-0">
+          <span className="block text-xl font-semibold">Πες το</span>
+          <span className="block text-sm text-white/85">Πες ή γράψε τι έγινε: «efood δύο μαργαρίτες», «ήρθαν δέκα σακιά αλεύρι»…</span>
+        </span>
+      </Link>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-4">
         <Card label="Αξία αποθήκης" value={fmtMoney(d.stockValue)} to="/reports/stock" />
         <Card label="Πωλήσεις μήνα (καθ.)" value={fmtMoney(d.salesNet)} to="/reports/sales" />
@@ -49,7 +57,8 @@ export function Dashboard() {
         <div className="card p-4">
           <h2 className="font-semibold mb-2">Γρήγορες ενέργειες</h2>
           <div className="flex flex-wrap gap-2">
-            <Link to="/daily-sales" className="btn-primary">Πωλήσεις ημέρας</Link>
+            <Link to="/voice" className="btn-primary">🎤 Πες το</Link>
+            <Link to="/daily-sales" className="btn-secondary">Πωλήσεις ημέρας</Link>
             <Link to="/docs/purchase/new" className="btn-secondary">Νέα αγορά</Link>
             <Link to="/docs/production/new" className="btn-secondary">Νέα παραγωγή</Link>
             <Link to="/docs/sale/new" className="btn-secondary">Νέα πώληση χονδρικής</Link>

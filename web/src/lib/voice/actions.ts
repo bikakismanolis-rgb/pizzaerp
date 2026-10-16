@@ -1,0 +1,1100 @@
+import { supabase, errMsg } from '../supabase'
+import { createDraft, deleteDraft, postDoc, replaceLines, unpostDoc, type LineInput } from '../docs'
+import type { Doc, DocType, Item, ItemType, Partner, VoicePhrase } from '../types'
+import type { Command, EntityRef, TallyChannel } from './types'
+import { phraseKey } from './normalize'
+import { CHANNEL_LABEL, ITEM_TYPE_LABEL, TALLY_NOTES, docCode } from '../labels'
+import { fmtCost, fmtDate, fmtMoney, fmtQty, round } from '../format'
+import { friendlyMessage, tallyMessage } from '../errors'
+import {
+  addDays, localHour, phraseProblem, plural, removalNote, stockOps, stockTarget, stocktakeList, tallySteps,
+  type ChannelTotal, type PostedQty, type RunningState, type RunningStocktake, type StockOp, type TallyRow,
+} from '../voiceRules'
+
+export type { ChannelTotal, RunningState, RunningStocktake, TallyRow } from '../voiceRules'
+
+/**
+ * Εκτέλεση μιας επιβεβαιωμένης εντολής πάνω στη βάση. Καλείται ΜΟΝΟ μετά
+ * από ρητό "ναι" του χρήστη. Επιστρέφει μήνυμα και (όπου γίνεται) αναίρεση.
+ */
+
+export interface ExecEnv {
+  companyId: string
+  /** σημερινή ημερομηνία YYYY-MM-DD */
+  today: string
+  items: Item[]
+  partners: Partner[]
+  refreshMaster: () => Promise<void>
+  /** μετά από νέα / αλλαγμένη δική τους φράση */
+  refreshPhrases?: () => Promise<void>
+  /** τοπική ώρα τώρα (0–23)· για τους ελέγχους */
+  hour?: number
+}
+
+export interface ExecResult {
+  message: string
+  undo?: () => Promise<void>
+  navigateTo?: string
+  /** σύντομο κείμενο για ανάγνωση (αλλιώς «Έγινε.») */
+  spoken?: string
+}
+
+// ---------------------------------------------------------------------
+// Βοηθητικά
+// ---------------------------------------------------------------------
+
+/** Σφάλμα Supabase/JS → Error με ελληνικό μήνυμα */
+export function voiceError(e: unknown): Error {
+  const code = (e as { code?: string } | null)?.code
+  if (code === '23505') return new Error('Υπάρχει ήδη εγγραφή με τον ίδιο κωδικό.')
+  if (code === '23503') return new Error('Χρησιμοποιείται ήδη αλλού και δεν διαγράφεται.')
+  if (code === '42501') return new Error('Δεν έχετε δικαίωμα για αυτή την ενέργεια.')
+  if (code === 'PGRST202' || code === '42883' || code === 'PGRST205' || code === '42P01' || code === 'PGRST204' || code === '42703') {
+    return new Error('Η βάση δεν έχει την ενημέρωση για τις φωνητικές εντολές (0004_voice.sql).')
+  }
+  if (e instanceof Error) { const m = friendlyMessage(e.message); return m === e.message ? e : new Error(m) }
+  return new Error(errMsg(e))
+}
+
+function fail(e: unknown): never { throw voiceError(e) }
+
+async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+  const { data, error } = await supabase.rpc(fn, args)
+  if (error) fail(error)
+  return data as T
+}
+
+/** Το id μιας αναφοράς, ή σφάλμα αν δεν έχει επιλεγεί */
+function need(ref: EntityRef, what: string): string {
+  if (!ref.id) throw new Error(`Διάλεξε ${what} για «${ref.heard}».`)
+  return ref.id
+}
+
+function itemOf(env: ExecEnv, id: string): Item {
+  const it = env.items.find((i) => i.id === id)
+  if (!it) throw new Error('Δεν βρέθηκε το είδος (ανανέωσε τη σελίδα).')
+  return it
+}
+
+function partnerOf(env: ExecEnv, id: string): Partner {
+  const p = env.partners.find((x) => x.id === id)
+  if (!p) throw new Error('Δεν βρέθηκε ο συναλλασσόμενος (ανανέωσε τη σελίδα).')
+  return p
+}
+
+/** "3 Μαργαρίτα" για τεμάχια, "6 kg Μοτσαρέλα" για τα υπόλοιπα */
+export function qtyText(it: Pick<Item, 'unit' | 'name'>, qty: number): string {
+  return it.unit === 'τεμ' ? `${fmtQty(qty)} ${it.name}` : `${fmtQty(qty)} ${it.unit} ${it.name}`
+}
+
+const okQty = (q: number) => Number.isFinite(q) && q > 0
+
+/** Ελέγχει ότι δεν υπάρχουν ίδια είδη δύο φορές· ενώνει τις ποσότητες */
+function mergeLines<T extends { id: string; qty: number }>(lines: T[]): T[] {
+  const m = new Map<string, T>()
+  for (const l of lines) {
+    const cur = m.get(l.id)
+    if (cur) cur.qty = round(cur.qty + l.qty, 4)
+    else m.set(l.id, { ...l })
+  }
+  return [...m.values()]
+}
+
+async function docHead(id: string): Promise<Pick<Doc, 'id' | 'doc_no' | 'status' | 'total_net' | 'total_gross' | 'doc_type'> | null> {
+  const { data, error } = await supabase.from('doc').select('id, doc_no, status, total_net, total_gross, doc_type').eq('id', id).maybeSingle()
+  if (error) fail(error)
+  return data as Pick<Doc, 'id' | 'doc_no' | 'status' | 'total_net' | 'total_gross' | 'doc_type'> | null
+}
+
+/** Πρόχειρο → γραμμές → καταχώρηση. Αν κάτι αποτύχει, σβήνει το πρόχειρο. */
+async function postNew(env: ExecEnv, type: DocType, fields: Partial<Doc>, lines: LineInput[]) {
+  let id: string | null = null
+  try {
+    id = await createDraft(env.companyId, type, { doc_date: env.today, ...fields })
+    await replaceLines(env.companyId, id, lines)
+    await postDoc(id)
+  } catch (e) {
+    if (id) await deleteDraft(id).catch(() => { /* μένει πρόχειρο */ })
+    fail(e)
+  }
+  const head = await docHead(id!)
+  return { id: id!, docNo: head?.doc_no ?? 0, net: Number(head?.total_net ?? 0), gross: Number(head?.total_gross ?? 0) }
+}
+
+/** Αναίρεση καταχωρημένου παραστατικού: ακύρωση καταχώρησης + διαγραφή */
+function undoPosted(env: ExecEnv, id: string) {
+  return async () => {
+    const head = await docHead(id)
+    if (!head) return
+    try {
+      if (head.status === 'posted') await unpostDoc(id)
+      await deleteDraft(id)
+    } catch (e) { fail(e) }
+    await env.refreshMaster()
+  }
+}
+
+// ---------------------------------------------------------------------
+// Ανοιχτά πρόχειρα (μετρητής ημέρας, απογραφή σε εξέλιξη)
+// ---------------------------------------------------------------------
+interface DocWithLines { id: string; doc_no: number; doc_date: string; channel: string | null; doc_line: { item_id: string; qty: number; gross: number }[] }
+
+const TALLY_ORDER: TallyChannel[] = ['efood', 'wolt', 'box', 'phone', 'store']
+const dayLabel = (date: string, today: string) => (date === today ? '' : fmtDate(date).slice(0, 5) + ' ')
+
+/** Καταχωρημένες «Πωλήσεις ημέρας» (όχι άλλες πωλήσεις με κανάλι λιανικής, π.χ. τιμολόγιο σε πελάτη efood) */
+const postedTallies = (companyId: string, date: string) => supabase.from('doc')
+  .select('id, doc_no, doc_date, channel, doc_line(item_id, qty, gross)')
+  .eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', date)
+  .eq('status', 'posted').eq('is_auto', false).in('channel', TALLY_ORDER)
+  .eq('notes', TALLY_NOTES).is('partner_id', null)
+
+/** Ποσότητες ανά είδος μιας πώλησης / απογραφής */
+function byItem(lines: { item_id: string; qty: number }[]): Record<string, number> {
+  const m: Record<string, number> = {}
+  for (const l of lines) m[l.item_id] = round((m[l.item_id] ?? 0) + Number(l.qty), 4)
+  return m
+}
+
+/** Απογραφές σε εξέλιξη έως date, η παλιότερη πρώτη */
+async function runningStocktakes(companyId: string, date: string): Promise<RunningStocktake[]> {
+  const { data, error } = await supabase.from('doc').select('id, doc_no, doc_date, channel, doc_line(item_id, qty, gross)')
+    .eq('company_id', companyId).eq('doc_type', 'stocktake').eq('is_running', true).eq('status', 'draft')
+    .lte('doc_date', date).order('doc_date').order('doc_no')
+  if (error) fail(error)
+  return ((data ?? []) as unknown as DocWithLines[]).map((st) => {
+    const counted = byItem(st.doc_line)
+    return { id: st.id, docNo: st.doc_no, date: st.doc_date, count: Object.keys(counted).length, counted }
+  })
+}
+
+/** Υπάρχει κίνηση αποθήκης ή ανοιχτή πώληση ημέρας με ημερομηνία date; */
+async function movedOn(companyId: string, date: string): Promise<boolean> {
+  const [m, s] = await Promise.all([
+    supabase.from('stock_move').select('id').eq('company_id', companyId).eq('move_date', date).limit(1),
+    supabase.from('doc').select('id, doc_line(item_id)').eq('company_id', companyId).eq('doc_type', 'sale').eq('doc_date', date)
+      .eq('is_running', true).eq('status', 'draft').eq('is_auto', false),
+  ])
+  if (m.error) fail(m.error)
+  if (s.error) fail(s.error)
+  return (m.data ?? []).length > 0 || ((s.data ?? []) as unknown as { doc_line: unknown[] }[]).some((d) => d.doc_line.length > 0)
+}
+
+/** Χρειάζεται ο έλεγχος σημερινών κινήσεων; Μόνο αν μπορεί να συνεχίσει η χθεσινή απογραφή. */
+const needMoved = (sts: { date: string }[], date: string) => !sts.some((s) => s.date === date) && sts.some((s) => s.date === addDays(date, -1))
+
+/**
+ * Ανοιχτές πωλήσεις ημέρας ανά κανάλι (σημερινές και όσες έμειναν ανοιχτές
+ * από προηγούμενες μέρες), τα σημερινά σύνολα ανά κανάλι (καταχωρημένες
+ * «Πωλήσεις ημέρας» + ανοιχτές: η πρώτη μέτρηση ενός είδους καταχωρεί όσες
+ * πουλήθηκαν ως τότε) + οι απογραφές σε εξέλιξη.
+ */
+export async function loadRunning(companyId: string, date: string): Promise<RunningState> {
+  const [s, p, stocktakes] = await Promise.all([
+    supabase.from('doc').select('id, doc_no, doc_date, channel, doc_line(item_id, qty, gross)')
+      .eq('company_id', companyId).eq('doc_type', 'sale').lte('doc_date', date)
+      .eq('is_running', true).eq('status', 'draft').eq('is_auto', false),
+    postedTallies(companyId, date),
+    runningStocktakes(companyId, date),
+  ])
+  if (s.error) fail(s.error)
+  if (p.error) fail(p.error)
+  const sum = (d: DocWithLines, k: 'qty' | 'gross') => d.doc_line.reduce((a, l) => a + Number(l[k]), 0)
+  const rows: TallyRow[] = ((s.data ?? []) as unknown as DocWithLines[])
+    .filter((d) => d.channel && TALLY_ORDER.includes(d.channel as TallyChannel) && d.doc_line.length > 0)
+    .map((d) => ({
+      channel: d.channel as TallyChannel,
+      date: d.doc_date,
+      docId: d.id,
+      docNo: d.doc_no,
+      qty: round(sum(d, 'qty'), 4),
+      gross: round(sum(d, 'gross')),
+      items: byItem(d.doc_line),
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date) || TALLY_ORDER.indexOf(a.channel) - TALLY_ORDER.indexOf(b.channel))
+  const tally = rows.filter((r) => r.date === date)
+  // σύνολα ημέρας ανά κανάλι
+  const tot = new Map<TallyChannel, ChannelTotal>()
+  const at = (ch: TallyChannel) => tot.get(ch) ?? tot.set(ch, { channel: ch, qty: 0, gross: 0, postedQty: 0, postedItems: {} }).get(ch)!
+  for (const r of tally) { const x = at(r.channel); x.qty += r.qty; x.gross += r.gross }
+  for (const d of (p.data ?? []) as unknown as DocWithLines[]) {
+    if (!d.channel || !TALLY_ORDER.includes(d.channel as TallyChannel)) continue
+    const x = at(d.channel as TallyChannel)
+    const q = sum(d, 'qty')
+    x.qty += q; x.postedQty += q; x.gross += sum(d, 'gross')
+    for (const [id, n] of Object.entries(byItem(d.doc_line))) {
+      const cur = x.postedItems[id] ?? (x.postedItems[id] = { qty: 0, docs: [] })
+      cur.qty = round(cur.qty + n, 4)
+      if (!cur.docs.includes(d.doc_no)) cur.docs.push(d.doc_no)
+    }
+  }
+  const totals = [...tot.values()]
+    .map((x) => ({ ...x, qty: round(x.qty, 4), gross: round(x.gross), postedQty: round(x.postedQty, 4) }))
+    .filter((x) => x.qty > 0)
+    .sort((a, b) => TALLY_ORDER.indexOf(a.channel) - TALLY_ORDER.indexOf(b.channel))
+  // συνεχίζει η χθεσινή απογραφή; (μετά τα μεσάνυχτα, αν δεν έχει γραφτεί τίποτα σήμερα)
+  const movedToday = !needMoved(stocktakes, date) ? null : tally.length > 0 ? true : await movedOn(companyId, date)
+  return { tally, older: rows.filter((r) => r.date < date), totals, stocktakes, movedToday }
+}
+
+/** Καταχωρημένες «Πωλήσεις ημέρας» (date, κανάλι) ανά είδος */
+async function postedTallyItems(env: ExecEnv, channel: TallyChannel, date: string): Promise<Map<string, PostedQty>> {
+  const m = new Map<string, PostedQty>()
+  const { data, error } = await postedTallies(env.companyId, date).eq('channel', channel)
+  if (error) return m
+  for (const d of (data ?? []) as unknown as DocWithLines[]) {
+    for (const [id, n] of Object.entries(byItem(d.doc_line))) {
+      const cur = m.get(id) ?? { qty: 0, docs: [] }
+      cur.qty = round(cur.qty + n, 4)
+      if (!cur.docs.includes(d.doc_no)) cur.docs.push(d.doc_no)
+      m.set(id, cur)
+    }
+  }
+  return m
+}
+
+export interface SalePrice { price: number; partner: boolean }
+
+/**
+ * Τιμή χονδρικής (χωρίς ΦΠΑ) για γραμμές χωρίς ειπωμένη τιμή: του πελάτη,
+ * αλλιώς η γενική του είδους (όπως το item_price_for), για να φαίνεται στην
+ * κάρτα πριν από το «ναι».
+ */
+export async function resolveSalePrices(env: Pick<ExecEnv, 'items'>, partnerId: string, itemIds: string[]): Promise<Map<string, SalePrice>> {
+  const { data, error } = await supabase.from('partner_price').select('item_id, price').eq('partner_id', partnerId).in('item_id', itemIds)
+  if (error) fail(error)
+  const pp = new Map(((data ?? []) as { item_id: string; price: number }[]).map((r) => [r.item_id, Number(r.price)]))
+  const out = new Map<string, SalePrice>()
+  for (const id of itemIds) {
+    const p = pp.get(id)
+    out.set(id, p != null ? { price: p, partner: true } : { price: Number(env.items.find((i) => i.id === id)?.sale_price ?? 0), partner: false })
+  }
+  return out
+}
+
+async function tallyAdd(env: ExecEnv, channel: TallyChannel, date: string, itemId: string, delta: number): Promise<string | null> {
+  return rpc<string | null>('tally_add', { p_company: env.companyId, p_date: date, p_channel: channel, p_item: itemId, p_delta: delta })
+}
+
+/** add: πρόσθεση στη μέτρηση που υπάρχει (άλλος χώρος)· qty null: βγαίνει το είδος από την απογραφή */
+async function stocktakeCount(env: ExecEnv, date: string, itemId: string, qty: number | null, add = false): Promise<string | null> {
+  return rpc<string | null>('stocktake_count', { p_company: env.companyId, p_date: date, p_item: itemId, p_qty: qty, p_add: add })
+}
+
+/** Αναίρεση σε ανοιχτό πρόχειρο: μόνο αν δεν έχει καταχωρηθεί στο μεταξύ */
+async function assertStillOpen(docId: string | null, what: string) {
+  if (!docId) return
+  const head = await docHead(docId)
+  if (head && head.status === 'posted') {
+    throw new Error(`${what} ${docCode(head.doc_type, head.doc_no)} έχει ήδη καταχωρηθεί. Αναίρεση από τη λίστα παραστατικών (ακύρωση καταχώρησης).`)
+  }
+}
+
+// ---------------------------------------------------------------------
+// Νέα είδη / συναλλασσόμενοι (κωδικός αυτόματα)
+// ---------------------------------------------------------------------
+const ITEM_PREFIX: Record<ItemType, string> = { raw: 'ΠΥ', semi: 'ΗΜ', finished: 'ΠΡ' }
+
+const normName = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ς/g, 'σ').replace(/\s+/g, ' ').trim()
+
+async function nextCode(table: 'item' | 'partner', companyId: string, prefix: string): Promise<number> {
+  const { data, error } = await supabase.from(table).select('code').eq('company_id', companyId).like('code', prefix + '-%')
+  if (error) fail(error)
+  let max = 0
+  for (const r of (data ?? []) as { code: string }[]) {
+    const m = /^.+?-(\d+)$/.exec(r.code)
+    if (m) max = Math.max(max, Number(m[1]))
+  }
+  return max + 1
+}
+
+const pad = (n: number) => String(n).padStart(3, '0')
+
+/** Ίδιο όνομα στη βάση (χωρίς διάκριση πεζών): και όταν ο κατάλογος της οθόνης δεν έχει φορτώσει */
+async function sameNameOnServer(table: 'item' | 'partner', companyId: string, name: string): Promise<{ name: string; code: string } | null> {
+  if (/[%_*\\]/.test(name)) return null
+  const { data, error } = await supabase.from(table).select('name, code').eq('company_id', companyId).ilike('name', name).limit(1)
+  if (error) fail(error)
+  return ((data ?? []) as { name: string; code: string }[])[0] ?? null
+}
+
+/** Insert με αυτόματο κωδικό ΠΡΟΘΕΜΑ-NNN· αν πιαστεί ο κωδικός, δοκιμάζει τον επόμενο */
+async function insertWithCode<T>(table: 'item' | 'partner', companyId: string, prefix: string, row: Record<string, unknown>): Promise<T> {
+  let n = await nextCode(table, companyId, prefix)
+  for (let attempt = 0; attempt < 6; attempt++, n++) {
+    const { data, error } = await supabase.from(table).insert({ ...row, company_id: companyId, code: `${prefix}-${pad(n)}` }).select('*').single()
+    if (!error) return data as T
+    if (error.code !== '23505') fail(error)
+  }
+  throw new Error('Δεν βρέθηκε ελεύθερος κωδικός. Δοκίμασε ξανά.')
+}
+
+export interface NewItemSpec {
+  itemType: ItemType
+  name: string
+  unit: string
+  vatRate: number
+  salePrice: number | null
+  makeToOrder: boolean
+  packName: string | null
+  packQty: number | null
+}
+
+/** Νέο είδος με κωδικό ΠΥ/ΗΜ/ΠΡ-NNN */
+export async function createItem(env: ExecEnv, spec: NewItemSpec): Promise<Item> {
+  const name = spec.name.trim().replace(/\s+/g, ' ')
+  if (!name) throw new Error('Χρειάζεται όνομα.')
+  const same = env.items.find((i) => normName(i.name) === normName(name)) ?? await sameNameOnServer('item', env.companyId, name)
+  if (same) throw new Error(`Υπάρχει ήδη είδος «${same.name}» (${same.code}).`)
+  const isRaw = spec.itemType === 'raw'
+  const item = await insertWithCode<Item>('item', env.companyId, ITEM_PREFIX[spec.itemType], {
+    name,
+    item_type: spec.itemType,
+    unit: spec.unit || (isRaw ? 'kg' : 'τεμ'),
+    vat_rate: Number.isFinite(spec.vatRate) ? spec.vatRate : 13,
+    sale_price: spec.itemType === 'finished' && spec.salePrice != null && spec.salePrice >= 0 ? round(spec.salePrice, 4) : 0,
+    make_to_order: isRaw ? false : spec.makeToOrder,
+    pack_name: isRaw && spec.packName?.trim() ? spec.packName.trim() : null,
+    pack_qty: isRaw && spec.packQty && spec.packQty > 0 ? spec.packQty : null,
+    is_active: true,
+    aliases: [],
+  })
+  await env.refreshMaster()
+  return item
+}
+
+export interface NewPartnerSpec {
+  name: string
+  isCustomer: boolean
+  isSupplier: boolean
+  phone: string | null
+  vatNo: string | null
+  city: string | null
+}
+
+/** Νέος συναλλασσόμενος: ΠΕ-NNN για πελάτες, ΠΡ-NNN για σκέτους προμηθευτές */
+export async function createPartner(env: ExecEnv, spec: NewPartnerSpec): Promise<Partner> {
+  const name = spec.name.trim().replace(/\s+/g, ' ')
+  if (!name) throw new Error('Χρειάζεται όνομα.')
+  if (!spec.isCustomer && !spec.isSupplier) throw new Error('Διάλεξε πελάτης ή προμηθευτής.')
+  const same = env.partners.find((p) => normName(p.name) === normName(name)) ?? await sameNameOnServer('partner', env.companyId, name)
+  if (same) throw new Error(`Υπάρχει ήδη «${same.name}» (${same.code}).`)
+  const partner = await insertWithCode<Partner>('partner', env.companyId, spec.isCustomer ? 'ΠΕ' : 'ΠΡ', {
+    name,
+    is_customer: spec.isCustomer,
+    is_supplier: spec.isSupplier,
+    phone: spec.phone?.trim() || null,
+    vat_no: spec.vatNo?.trim() || null,
+    city: spec.city?.trim() || null,
+    is_active: true,
+    aliases: [],
+  })
+  await env.refreshMaster()
+  return partner
+}
+
+/** Διαγραφή είδους/συναλλασσόμενου που μόλις φτιάχτηκε (αναίρεση) */
+export function undoCreate(env: ExecEnv, table: 'item' | 'partner', id: string) {
+  return async () => {
+    const { error } = await supabase.from(table).delete().eq('id', id)
+    if (error) {
+      if (error.code === '23503') throw new Error(`Χρησιμοποιείται ήδη σε κινήσεις ή συνταγές. Κάν' το ανενεργό από τα ${table === 'item' ? 'Είδη' : 'Πελάτες & προμηθευτές'}.`)
+      fail(error)
+    }
+    await env.refreshMaster()
+  }
+}
+
+/** Προσθέτει μια φράση στα "άλλα ονόματα" (aliases), αν δεν υπάρχει ήδη */
+export async function addAlias(table: 'item' | 'partner', id: string, phrase: string): Promise<boolean> {
+  const p = phrase.trim().replace(/\s+/g, ' ')
+  if (!p) return false
+  const { data, error } = await supabase.from(table).select('name, aliases').eq('id', id).single()
+  if (error) fail(error)
+  const row = data as { name: string; aliases: string[] | null }
+  const cur = row.aliases ?? []
+  if (normName(row.name) === normName(p) || cur.some((a) => normName(a) === normName(p))) return false
+  const { error: eu } = await supabase.from(table).update({ aliases: [...cur, p] }).eq('id', id)
+  if (eu) fail(eu)
+  return true
+}
+
+/** Βγάζει ένα "άλλο όνομα" (χωρίς διάκριση τόνων / πεζών)· false αν δεν υπήρχε */
+export async function removeAlias(table: 'item' | 'partner', id: string, alias: string): Promise<boolean> {
+  const { data, error } = await supabase.from(table).select('aliases').eq('id', id).single()
+  if (error) fail(error)
+  const cur = (data as { aliases: string[] | null }).aliases ?? []
+  const next = cur.filter((a) => normName(a) !== normName(alias))
+  if (next.length === cur.length) return false
+  const { error: eu } = await supabase.from(table).update({ aliases: next }).eq('id', id)
+  if (eu) fail(eu)
+  return true
+}
+
+// ---------------------------------------------------------------------
+// Δικές τους φράσεις ("όταν λέω Χ εννοώ Υ")
+// ---------------------------------------------------------------------
+const cleanText = (s: string) => s.trim().replace(/\s+/g, ' ')
+const PHRASE_COLS = 'id, company_id, phrase, meaning'
+
+export interface PhraseSaved {
+  row: VoicePhrase
+  /** η φράση όπως ήταν πριν (αλλαγή υπάρχουσας), null = νέα */
+  old: { phrase: string; meaning: string } | null
+}
+
+async function listPhrases(companyId: string): Promise<VoicePhrase[]> {
+  const { data, error } = await supabase.from('voice_phrase').select(PHRASE_COLS).eq('company_id', companyId)
+  if (error) fail(error)
+  return (data ?? []) as VoicePhrase[]
+}
+
+async function updatePhrase(id: string, phrase: string, meaning: string): Promise<VoicePhrase> {
+  const { data, error } = await supabase.from('voice_phrase').update({ phrase, meaning }).eq('id', id).select(PHRASE_COLS).single()
+  if (error) {
+    if (error.code === '23505') throw new Error(`Υπάρχει ήδη η φράση «${phrase}».`)
+    fail(error)
+  }
+  return data as VoicePhrase
+}
+
+/**
+ * Νέα φράση ή αλλαγή υπάρχουσας (id). Ίδια φράση με άλλη γραφή (τόνοι,
+ * κεφαλαία) = η ίδια: αλλάζει η σημασία της αντί να γίνει δεύτερη.
+ */
+export async function savePhrase(companyId: string, phrase: string, meaning: string, id?: string): Promise<PhraseSaved> {
+  const p = cleanText(phrase)
+  const m = cleanText(meaning)
+  const why = phraseProblem(p, m)
+  if (why) throw new Error(why)
+  const rows = await listPhrases(companyId)
+  const key = phraseKey(p)
+  const same = rows.find((r) => r.id !== id && phraseKey(r.phrase) === key)
+  if (id) {
+    if (same) throw new Error(`Υπάρχει ήδη η φράση «${same.phrase}» (εννοεί «${same.meaning}»).`)
+    const cur = rows.find((r) => r.id === id)
+    return { row: await updatePhrase(id, p, m), old: cur ? { phrase: cur.phrase, meaning: cur.meaning } : null }
+  }
+  if (same) return { row: await updatePhrase(same.id, same.phrase, m), old: { phrase: same.phrase, meaning: same.meaning } }
+  const { data, error } = await supabase.from('voice_phrase').insert({ company_id: companyId, phrase: p, meaning: m }).select(PHRASE_COLS).single()
+  if (error) {
+    // ταυτόχρονα από άλλη συσκευή: αλλαγή της σημασίας της
+    if (error.code === '23505') {
+      const again = (await listPhrases(companyId)).find((r) => phraseKey(r.phrase) === key)
+      if (again) return { row: await updatePhrase(again.id, again.phrase, m), old: { phrase: again.phrase, meaning: again.meaning } }
+    }
+    fail(error)
+  }
+  return { row: data as VoicePhrase, old: null }
+}
+
+export async function deletePhrase(id: string): Promise<void> {
+  const { error } = await supabase.from('voice_phrase').delete().eq('id', id)
+  if (error) fail(error)
+}
+
+/** Αναίρεση αποθήκευσης: σβήσιμο της νέας ή επαναφορά της παλιάς σημασίας */
+export async function undoPhrase(saved: PhraseSaved): Promise<void> {
+  if (saved.old) await updatePhrase(saved.row.id, saved.old.phrase, saved.old.meaning)
+  else await deletePhrase(saved.row.id)
+}
+
+async function newPhrase(cmd: Cmd<'new_phrase'>, env: ExecEnv): Promise<ExecResult> {
+  const saved = await savePhrase(env.companyId, cmd.phrase, cmd.meaning)
+  await env.refreshPhrases?.()
+  const { row, old } = saved
+  if (old && old.meaning === row.meaning) return { message: `Το ξέρω ήδη: όταν λες «${row.phrase}» καταλαβαίνω «${row.meaning}».` }
+  return {
+    message: old
+      ? `Άλλαξε η φράση «${row.phrase}»: πριν καταλάβαινα «${old.meaning}», τώρα «${row.meaning}».`
+      : `Έμαθα: όταν λες «${row.phrase}» θα καταλαβαίνω «${row.meaning}». Όλες οι φράσεις: «Λέξεις & φράσεις».`,
+    spoken: 'Έγινε, το έμαθα.',
+    undo: async () => {
+      await undoPhrase(saved)
+      await env.refreshPhrases?.()
+    },
+  }
+}
+
+// ---------------------------------------------------------------------
+// Εκτέλεση
+// ---------------------------------------------------------------------
+export async function execute(cmd: Command, env: ExecEnv): Promise<ExecResult> {
+  switch (cmd.kind) {
+    case 'sale_tally': return saleTally(cmd, env)
+    case 'sale': return sale(cmd, env)
+    case 'purchase': return purchase(cmd, env)
+    case 'production': return production(cmd, env)
+    case 'stocktake': return stocktake(cmd, env)
+    case 'receipt':
+    case 'payment': return money(cmd, env)
+    case 'new_item': {
+      const it = await createItem(env, cmd)
+      const extra = it.item_type !== 'raw' ? ` Πες τώρα τη συνταγή, π.χ. «η ${it.name} έχει …».` : ''
+      return {
+        message: `Νέο είδος (${ITEM_TYPE_LABEL[it.item_type].toLowerCase()}) «${it.name}», κωδικός ${it.code}, σε ${it.unit}.${extra}`,
+        undo: undoCreate(env, 'item', it.id),
+      }
+    }
+    case 'new_partner': {
+      const p = await createPartner(env, cmd)
+      const role = p.is_customer && p.is_supplier ? 'πελάτης και προμηθευτής' : p.is_customer ? 'πελάτης' : 'προμηθευτής'
+      return { message: `Νέος ${role} «${p.name}», κωδικός ${p.code}.`, undo: undoCreate(env, 'partner', p.id) }
+    }
+    case 'recipe': return recipe(cmd, env)
+    case 'item_price': return itemPrice(cmd, env)
+    case 'partner_price': return partnerPrice(cmd, env)
+    case 'close_day': return closeDay(env)
+    case 'close_stocktake': return closeStocktake(env)
+    case 'query_stock': return queryStock(cmd, env)
+    case 'query_balance': return queryBalance(cmd, env)
+    case 'query_today': return { message: await todaySummary(env) }
+    case 'new_phrase': return newPhrase(cmd, env)
+    case 'help': return { message: 'Πες π.χ. «efood δύο μαργαρίτες», «αγόρασα από τον μύλο δέκα σακιά αλεύρι», «μέτρησα μοτσαρέλα έξι κιλά», «όταν λέω οικογενειακή εννοώ μεγάλη μαργαρίτα».' }
+    case 'undo': throw new Error('Η αναίρεση γίνεται από τη λίστα ενεργειών.')
+    case 'unknown': throw new Error('Δεν κατάλαβα την εντολή.')
+  }
+}
+
+type Cmd<K extends Command['kind']> = Extract<Command, { kind: K }>
+
+/** Ποσότητες ανά είδος στην ανοιχτή πώληση ημέρας (date, κανάλι) */
+async function tallyQtys(env: ExecEnv, channel: TallyChannel, date: string): Promise<Map<string, number>> {
+  const { data, error } = await supabase.from('doc').select('id, doc_line(item_id, qty)')
+    .eq('company_id', env.companyId).eq('doc_type', 'sale').eq('doc_date', date).eq('channel', channel)
+    .eq('is_running', true).eq('status', 'draft').eq('is_auto', false)
+  if (error) fail(error)
+  const m = new Map<string, number>()
+  for (const d of (data ?? []) as unknown as { doc_line: { item_id: string; qty: number }[] }[]) {
+    for (const l of d.doc_line) m.set(l.item_id, round((m.get(l.item_id) ?? 0) + Number(l.qty), 4))
+  }
+  return m
+}
+
+/** Πρόσθεση (qty > 0) ή αφαίρεση (qty < 0, «βγάλε μία μαργαρίτα») στον μετρητή ημέρας */
+async function saleTally(cmd: Cmd<'sale_tally'>, env: ExecEnv): Promise<ExecResult> {
+  const lines = mergeLines(cmd.lines.map((l) => ({ id: need(l.item, 'προϊόν'), qty: round(l.qty, 4) })))
+  if (lines.length === 0 || lines.some((l) => !Number.isFinite(l.qty)) || lines.every((l) => l.qty === 0)) {
+    throw new Error('Λείπει ή είναι λάθος κάποια ποσότητα.')
+  }
+  for (const l of lines) {
+    const it = itemOf(env, l.id)
+    // η τιμή της γραμμής μένει όλη τη μέρα: όχι σιωπηλά πωλήσεις με 0 €
+    if (l.qty > 0 && !(Number(it.sale_price) > 0)) throw new Error(`Το «${it.name}» δεν έχει τιμή πώλησης (θα γραφόταν 0 €). Βάλε πρώτα τιμή.`)
+  }
+  const date = env.today
+  const ch = CHANNEL_LABEL[cmd.channel]
+  // αφαιρέσεις: μέχρι όσα υπάρχουν (ο server σβήνει τη γραμμή στο 0)
+  const current = lines.some((l) => l.qty < 0) ? await tallyQtys(env, cmd.channel, date) : new Map<string, number>()
+  const steps = tallySteps(lines, current)
+  const todo = steps.filter((s) => s.delta !== 0)
+  // αφαιρέσεις που δεν γίνονται (όλες): οι καταχωρημένες δεν αλλάζουν από εδώ
+  const short = steps.filter((s) => s.asked < 0 && s.delta !== s.asked)
+  const posted = short.length ? await postedTallyItems(env, cmd.channel, date) : new Map<string, PostedQty>()
+  const shortNote = (s: (typeof steps)[number]) =>
+    removalNote(itemOf(env, s.id).name, cmd.channel, s.asked, -s.delta, posted.get(s.id)) ?? ''
+  if (todo.length === 0) throw new Error(short.map(shortNote).filter(Boolean).join(' ') || 'Δεν υπάρχει κάτι για αφαίρεση.')
+  const done: typeof todo = []
+  let docId: string | null = null
+  try {
+    for (const s of todo) {
+      docId = (await tallyAdd(env, cmd.channel, date, s.id, s.delta)) ?? docId
+      done.push(s)
+    }
+  } catch (e) {
+    // επαναφορά όσων πρόλαβαν να γίνουν
+    for (const s of done.reverse()) await tallyAdd(env, cmd.channel, date, s.id, -s.delta).catch(() => { /* ignore */ })
+    throw new Error(tallyMessage(voiceError(e).message))
+  }
+  const list = (xs: typeof todo) => xs.map((s) => qtyText(itemOf(env, s.id), Math.abs(s.delta))).join(', ')
+  const added = todo.filter((s) => s.delta > 0)
+  const removed = todo.filter((s) => s.delta < 0)
+  const notes = short.map(shortNote).filter(Boolean)
+  const parts = [
+    added.length ? `Μπήκαν στο ${ch}: ${list(added)}.` : '',
+    removed.length ? `Αφαιρέθηκαν από ${ch}: ${list(removed)}.` : '',
+    ...notes,
+  ].filter(Boolean)
+  // κάθε γραμμή αναιρείται μία φορά (και αν η αναίρεση σταματήσει στη μέση)
+  const reverted = new Set<string>()
+  return {
+    message: parts.join(' '),
+    undo: async () => {
+      await assertStillOpen(docId, 'Η πώληση ημέρας')
+      for (const s of [...todo].reverse()) {
+        if (reverted.has(s.id)) continue
+        await tallyAdd(env, cmd.channel, date, s.id, -s.delta)
+        reverted.add(s.id)
+      }
+    },
+  }
+}
+
+async function sale(cmd: Cmd<'sale'>, env: ExecEnv): Promise<ExecResult> {
+  const partnerId = need(cmd.partner, 'πελάτη')
+  const partner = partnerOf(env, partnerId)
+  if (cmd.lines.length === 0) throw new Error('Δεν υπάρχουν είδη.')
+  const lines: LineInput[] = []
+  for (const [i, l] of cmd.lines.entries()) {
+    const id = need(l.item, 'είδος')
+    const it = itemOf(env, id)
+    if (!okQty(l.qty)) throw new Error(`Λάθος ποσότητα για «${it.name}».`)
+    let price = l.unitPrice
+    if (price == null) {
+      price = Number((await rpc<number | null>('item_price_for', { p_item: id, p_partner: partnerId })) ?? it.sale_price)
+      // τιμή που δεν ειπώθηκε και δεν υπάρχει πουθενά: όχι σιωπηλά 0 €
+      if (!(price > 0)) throw new Error(`Δεν υπάρχει τιμή για «${it.name}» (ούτε του πελάτη ούτε γενική). Γράψε τιμή.`)
+    }
+    if (!(price >= 0)) throw new Error(`Λάθος τιμή για «${it.name}».`)
+    lines.push({ line_no: i + 1, role: 'item', item_id: id, qty: round(l.qty, 4), unit_price: round(price, 4), vat_rate: Number(it.vat_rate) })
+  }
+  const d = await postNew(env, 'sale', { partner_id: partnerId, channel: 'wholesale' }, lines)
+  await env.refreshMaster()
+  const list = lines.map((l) => qtyText(itemOf(env, l.item_id), l.qty)).join(', ')
+  return {
+    message: `Πώληση ${docCode('sale', d.docNo)} σε «${partner.name}»: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
+    undo: undoPosted(env, d.id),
+  }
+}
+
+async function purchase(cmd: Cmd<'purchase'>, env: ExecEnv): Promise<ExecResult> {
+  const partnerId = need(cmd.partner, 'προμηθευτή')
+  const partner = partnerOf(env, partnerId)
+  if (cmd.lines.length === 0) throw new Error('Δεν υπάρχουν είδη.')
+  const lines: LineInput[] = cmd.lines.map((l, i) => {
+    const id = need(l.item, 'είδος')
+    const it = itemOf(env, id)
+    if (!okQty(l.qty)) throw new Error(`Λάθος ποσότητα για «${it.name}».`)
+    const price = l.unitPrice ?? Number(it.avg_cost)
+    if (l.unitPrice == null && !(price > 0)) throw new Error(`Γράψε τιμή για «${it.name}» (δεν υπάρχει μέσο κόστος).`)
+    if (!(price >= 0)) throw new Error(`Λάθος τιμή για «${it.name}».`)
+    return { line_no: i + 1, role: 'item', item_id: id, qty: round(l.qty, 4), unit_price: round(price, 4), vat_rate: Number(it.vat_rate) }
+  })
+  const d = await postNew(env, 'purchase', { partner_id: partnerId, ref_no: cmd.refNo?.trim() || null }, lines)
+  await env.refreshMaster()
+  const list = lines.map((l) => qtyText(itemOf(env, l.item_id), l.qty)).join(', ')
+  return {
+    message: `Αγορά ${docCode('purchase', d.docNo)} από «${partner.name}»: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
+    undo: undoPosted(env, d.id),
+  }
+}
+
+async function production(cmd: Cmd<'production'>, env: ExecEnv): Promise<ExecResult> {
+  const id = need(cmd.item, 'προϊόν')
+  const it = itemOf(env, id)
+  if (it.item_type === 'raw') throw new Error('Οι πρώτες ύλες δεν παράγονται.')
+  if (!okQty(cmd.qty)) throw new Error('Λείπει η ποσότητα παραγωγής.')
+  // μόνο η γραμμή προϊόντος: ο server αναπτύσσει τη συνταγή στην καταχώρηση
+  const d = await postNew(env, 'production', {}, [{ line_no: 1, role: 'output', item_id: id, qty: round(cmd.qty, 4) }])
+  await env.refreshMaster()
+  const unit = cmd.qty > 0 ? d.net / cmd.qty : 0
+  return {
+    message: `Παραγωγή ${docCode('production', d.docNo)}: ${qtyText(it, cmd.qty)}. Κόστος ${fmtMoney(d.net)} (${fmtCost(unit)} ανά ${it.unit}).`,
+    undo: undoPosted(env, d.id),
+  }
+}
+
+/**
+ * Η απογραφή σε εξέλιξη όπου γράφονται τώρα οι μετρήσεις (σημερινή, ή η
+ * χθεσινή σε μέτρημα που πέρασε τα μεσάνυχτα: βλ. stockTarget) και όσες
+ * παλιότερες έμειναν ανοιχτές.
+ */
+async function stocktakeTarget(env: ExecEnv) {
+  const open = await runningStocktakes(env.companyId, env.today)
+  const hour = env.hour ?? localHour()
+  const moved = needMoved(open, env.today) ? await movedOn(env.companyId, env.today) : null
+  return stockTarget(open, env.today, { hour, movedToday: moved })
+}
+
+/** Μετρήσεις ανά είδος μιας απογραφής (όπως είναι τώρα στη βάση) */
+async function countsOf(docId: string | null): Promise<Map<string, number>> {
+  const m = new Map<string, number>()
+  if (!docId) return m
+  const { data, error } = await supabase.from('doc_line').select('item_id, qty').eq('doc_id', docId)
+  if (error) fail(error)
+  for (const l of (data ?? []) as { item_id: string; qty: number }[]) m.set(l.item_id, round((m.get(l.item_id) ?? 0) + Number(l.qty), 4))
+  return m
+}
+
+type RunningSale = { id: string; doc_no: number; doc_date: string; channel: TallyChannel | null }
+
+/** Ανοιχτές πωλήσεις ημέρας έως date (για να πούμε ποιες καταχώρησε η πρώτη μέτρηση) */
+async function runningSales(env: ExecEnv, date: string): Promise<RunningSale[]> {
+  const { data, error } = await supabase.from('doc').select('id, doc_no, doc_date, channel')
+    .eq('company_id', env.companyId).eq('doc_type', 'sale').eq('is_running', true).eq('status', 'draft')
+    .eq('is_auto', false).lte('doc_date', date)
+  if (error) return []
+  return (data ?? []) as RunningSale[]
+}
+
+/** Από αυτές, όσες έχουν πια καταχωρηθεί */
+async function nowPosted(sales: RunningSale[]): Promise<RunningSale[]> {
+  if (!sales.length) return []
+  const { data, error } = await supabase.from('doc').select('id, status').in('id', sales.map((s) => s.id))
+  if (error) return []
+  const posted = new Set(((data ?? []) as { id: string; status: string }[]).filter((d) => d.status === 'posted').map((d) => d.id))
+  return sales.filter((s) => posted.has(s.id))
+}
+
+const saleLabel = (s: { doc_date: string; channel: TallyChannel | null }, today: string) =>
+  dayLabel(s.doc_date, today) + (s.channel ? CHANNEL_LABEL[s.channel] : '—')
+
+/** "10 kg" / "3" (τεμάχια χωρίς μονάδα) */
+const amount = (it: Item, q: number) => (it.unit === 'τεμ' ? fmtQty(q) : `${fmtQty(q)} ${it.unit}`)
+
+/**
+ * Μετρήσεις στην ανοιχτή απογραφή. Κάθε γραμμή: πρόσθεση («άλλα 5»: άλλος
+ * χώρος) ή αντικατάσταση («σύνολο 40»)· χωρίς λέξη = πρόσθεση (σε είδος
+ * χωρίς μέτρηση είναι απλή μέτρηση). Η πρώτη μέτρηση ενός είδους κρατά τη
+ * στιγμή: ό,τι πουληθεί ή φτιαχτεί μετά μετράει για μετά.
+ */
+async function stocktake(cmd: Cmd<'stocktake'>, env: ExecEnv): Promise<ExecResult> {
+  const lines = cmd.lines.map((l) => ({ id: need(l.item, 'είδος'), qty: round(l.qty, 4), mode: l.mode }))
+  if (lines.length === 0) throw new Error('Δεν υπάρχουν μετρήσεις.')
+  for (const l of lines) if (!(Number.isFinite(l.qty) && l.qty >= 0)) throw new Error(`Λάθος μέτρηση για «${itemOf(env, l.id).name}».`)
+  const ops = stockOps(lines)
+  // η απογραφή όπου μπαίνουν (σημερινή, ή χθεσινή μόνο σε μέτρημα που πέρασε
+  // τα μεσάνυχτα) και οι μετρήσεις της πριν από αυτή τη φράση (για το μήνυμα
+  // και την αναίρεση)
+  const target = await stocktakeTarget(env)
+  const date = target.date
+  const prev = new Map<string, number>(Object.entries(target.doc?.counted ?? {}))
+  // πρώτη μέτρηση είδους: ο server καταχωρεί πρώτα τις ανοιχτές πωλήσεις ημέρας που το κινούν
+  const salesBefore = ops.some((o) => !prev.has(o.id)) ? await runningSales(env, date) : []
+
+  const done: StockOp[] = []
+  let docId: string | null = null
+  try {
+    for (const op of ops) {
+      docId = (await stocktakeCount(env, date, op.id, op.qty, op.add)) ?? docId
+      done.push(op)
+    }
+  } catch (e) {
+    // επαναφορά όσων πρόλαβαν να γίνουν
+    for (const op of done.reverse()) await stocktakeCount(env, date, op.id, prev.get(op.id) ?? null).catch(() => { /* ignore */ })
+    fail(e)
+  }
+  const after = await countsOf(docId).catch(() => new Map<string, number>())
+  const postedSales = await nowPosted(salesBefore)
+
+  const parts = ops.map((op) => {
+    const it = itemOf(env, op.id)
+    const was = prev.get(op.id)
+    const now = after.get(op.id) ?? (op.add ? round((was ?? 0) + op.qty, 4) : op.qty)
+    if (was === undefined) return qtyText(it, now)
+    if (op.add) return `${it.name} ${fmtQty(was)} + ${fmtQty(op.qty)} = ${amount(it, now)}`
+    return `${it.name} ${amount(it, now)} (αντί για ${fmtQty(was)})`
+  })
+  const totals = ops.filter((op) => prev.has(op.id) && after.has(op.id))
+    .map((op) => { const it = itemOf(env, op.id); return `${it.name} ${amount(it, after.get(op.id)!)}` })
+  const count = after.size
+  const when = date !== env.today ? ` (της ${fmtDate(date)}: το μέτρημα συνεχίζει μετά τα μεσάνυχτα)` : ''
+  const sold = postedSales.length
+    ? ` Οι πωλήσεις ημέρας ως τώρα (${postedSales.map((s) => saleLabel(s, env.today)).join(', ')}) καταχωρήθηκαν: μετράνε πριν από τη μέτρηση.`
+    : ''
+  // ξεχασμένη ανοιχτή απογραφή παλιότερης μέρας: δεν συνεχίζει, κλείνει μαζί με αυτή
+  const stale = target.stale.length
+    ? ` Είναι ανοιχτή και η απογραφή ${stocktakeList(target.stale)}: το «τέλος απογραφής» καταχωρεί και αυτή.`
+    : ''
+  const reverted = new Set<string>()
+  return {
+    message: `Απογραφή σε εξέλιξη${when}: ${parts.join(', ')}. Μετρημένα μέχρι τώρα: ${count} ${plural(count, 'είδος', 'είδη')}.${sold}${stale} Στο τέλος πες «τέλος απογραφής».`,
+    spoken: totals.length ? `Έγινε. Σύνολο: ${totals.join(', ')}.` : 'Έγινε.',
+    undo: async () => {
+      await assertStillOpen(docId, 'Η απογραφή')
+      const cur = await countsOf(docId)
+      for (const op of [...ops].reverse()) {
+        if (reverted.has(op.id)) continue
+        const was = prev.get(op.id) ?? null
+        const left = after.get(op.id)
+        const now = cur.get(op.id)
+        let target: number | null = was
+        // στο μεταξύ πρόσθεσε κι άλλη συσκευή: βγαίνει μόνο ό,τι προσθέσαμε εμείς
+        if (op.add && left !== undefined && now !== undefined && now !== left) {
+          const back = round(now - (left - (was ?? 0)), 4)
+          target = was === null && back <= 0 ? null : Math.max(0, back)
+        }
+        await stocktakeCount(env, date, op.id, target)
+        reverted.add(op.id)
+      }
+    },
+  }
+}
+
+async function money(cmd: Cmd<'receipt'> | Cmd<'payment'>, env: ExecEnv): Promise<ExecResult> {
+  const isReceipt = cmd.kind === 'receipt'
+  const partnerId = need(cmd.partner, isReceipt ? 'πελάτη' : 'προμηθευτή')
+  const partner = partnerOf(env, partnerId)
+  if (!okQty(cmd.amount)) throw new Error('Λείπει το ποσό.')
+  const d = await postNew(env, cmd.kind, { partner_id: partnerId, amount: round(cmd.amount, 2) }, [])
+  const { data } = await supabase.from('v_partner_balance').select('customer_balance, supplier_balance').eq('partner_id', partnerId).maybeSingle()
+  const bal = data as { customer_balance: number; supplier_balance: number } | null
+  const rest = bal ? ` Υπόλοιπο: ${fmtMoney(isReceipt ? bal.customer_balance : bal.supplier_balance)}.` : ''
+  return {
+    message: isReceipt
+      ? `Είσπραξη ${docCode('receipt', d.docNo)} από «${partner.name}»: ${fmtMoney(cmd.amount)}.${rest}`
+      : `Πληρωμή ${docCode('payment', d.docNo)} σε «${partner.name}»: ${fmtMoney(cmd.amount)}.${rest}`,
+    undo: undoPosted(env, d.id),
+  }
+}
+
+interface BomRow { id: string; output_qty: number }
+interface BomLineRow { component_item_id: string; qty: number }
+
+async function recipe(cmd: Cmd<'recipe'>, env: ExecEnv): Promise<ExecResult> {
+  const id = need(cmd.item, 'προϊόν')
+  const it = itemOf(env, id)
+  if (it.item_type === 'raw') throw new Error('Οι πρώτες ύλες δεν έχουν συνταγή.')
+  if (!okQty(cmd.outputQty)) throw new Error('Λάθος ποσότητα συνταγής.')
+  const lines = mergeLines(cmd.lines.map((l) => ({ id: need(l.item, 'υλικό'), qty: round(l.qty, 4) })))
+  if (lines.length === 0) throw new Error('Η συνταγή δεν έχει υλικά.')
+  for (const l of lines) {
+    const c = itemOf(env, l.id)
+    if (!okQty(l.qty)) throw new Error(`Λάθος ποσότητα για «${c.name}».`)
+    if (c.id === it.id) throw new Error('Το είδος δεν μπορεί να είναι υλικό του εαυτού του.')
+    if (c.item_type === 'finished') throw new Error(`Το «${c.name}» είναι έτοιμο προϊόν και δεν μπαίνει σε συνταγή.`)
+    if (it.item_type === 'semi' && c.item_type !== 'raw') throw new Error(`Το ημιέτοιμο «${it.name}» παίρνει μόνο πρώτες ύλες («${c.name}» δεν είναι).`)
+  }
+
+  // παλιά συνταγή, για αναίρεση
+  const { data: ob, error: eb } = await supabase.from('bom').select('id, output_qty').eq('item_id', id).eq('is_default', true).eq('is_active', true).maybeSingle()
+  if (eb) fail(eb)
+  const oldBom = ob as BomRow | null
+  let oldLines: BomLineRow[] = []
+  if (oldBom) {
+    const { data, error } = await supabase.from('bom_line').select('component_item_id, qty').eq('bom_id', oldBom.id).order('line_no')
+    if (error) fail(error)
+    oldLines = (data ?? []) as BomLineRow[]
+  }
+
+  const writeLines = async (bomId: string, ls: BomLineRow[]) => {
+    const { error: ed } = await supabase.from('bom_line').delete().eq('bom_id', bomId)
+    if (ed) fail(ed)
+    if (ls.length === 0) return
+    const { error: ei } = await supabase.from('bom_line').insert(
+      ls.map((l, i) => ({ company_id: env.companyId, bom_id: bomId, line_no: i + 1, component_item_id: l.component_item_id, qty: l.qty })),
+    )
+    if (ei) fail(ei)
+  }
+
+  let bomId: string
+  if (oldBom) {
+    bomId = oldBom.id
+    const { error } = await supabase.from('bom').update({ output_qty: round(cmd.outputQty, 4) }).eq('id', bomId)
+    if (error) fail(error)
+  } else {
+    const { data, error } = await supabase.from('bom')
+      .insert({ company_id: env.companyId, item_id: id, name: 'Βασική', output_qty: round(cmd.outputQty, 4), is_default: true, is_active: true })
+      .select('id').single()
+    if (error) fail(error)
+    bomId = (data as { id: string }).id
+  }
+  try {
+    await writeLines(bomId, lines.map((l) => ({ component_item_id: l.id, qty: l.qty })))
+  } catch (e) {
+    // επαναφορά
+    if (oldBom) {
+      await supabase.from('bom').update({ output_qty: oldBom.output_qty }).eq('id', bomId)
+      await writeLines(bomId, oldLines).catch(() => { /* ignore */ })
+    } else {
+      await supabase.from('bom').delete().eq('id', bomId)
+    }
+    throw e
+  }
+  await env.refreshMaster()
+
+  const cost = lines.reduce((s, l) => s + l.qty * Number(itemOf(env, l.id).avg_cost), 0)
+  const unitCost = cost / cmd.outputQty
+  const list = lines.map((l) => qtyText(itemOf(env, l.id), l.qty)).join(', ')
+  return {
+    message: `Συνταγή «${it.name}» για ${fmtQty(cmd.outputQty)} ${it.unit}: ${list}. Κόστος περίπου ${fmtCost(unitCost)} ανά ${it.unit}.`,
+    undo: async () => {
+      if (oldBom) {
+        const { error } = await supabase.from('bom').update({ output_qty: oldBom.output_qty }).eq('id', bomId)
+        if (error) fail(error)
+        await writeLines(bomId, oldLines)
+      } else {
+        const { error } = await supabase.from('bom').delete().eq('id', bomId)
+        if (error) {
+          // χρησιμοποιήθηκε ήδη σε παραγωγή: απενεργοποίηση αντί για διαγραφή
+          const { error: e2 } = await supabase.from('bom').update({ is_active: false, is_default: false }).eq('id', bomId)
+          if (e2) fail(e2)
+        }
+      }
+      await env.refreshMaster()
+    },
+  }
+}
+
+async function itemPrice(cmd: Cmd<'item_price'>, env: ExecEnv): Promise<ExecResult> {
+  const id = need(cmd.item, 'προϊόν')
+  const it = itemOf(env, id)
+  if (!(cmd.netPrice >= 0) || !Number.isFinite(cmd.netPrice)) throw new Error('Λάθος τιμή.')
+  const old = Number(it.sale_price)
+  const net = round(cmd.netPrice, 4)
+  const { error } = await supabase.from('item').update({ sale_price: net }).eq('id', id)
+  if (error) fail(error)
+  await env.refreshMaster()
+  const gross = net * (1 + Number(it.vat_rate) / 100)
+  return {
+    message: `Νέα τιμή «${it.name}»: ${fmtMoney(net)} χωρίς ΦΠΑ (${fmtMoney(gross)} με ΦΠΑ ${fmtQty(it.vat_rate)}%). Πριν ήταν ${fmtMoney(old)}.`,
+    undo: async () => {
+      const { error: e } = await supabase.from('item').update({ sale_price: old }).eq('id', id)
+      if (e) fail(e)
+      await env.refreshMaster()
+    },
+  }
+}
+
+async function partnerPrice(cmd: Cmd<'partner_price'>, env: ExecEnv): Promise<ExecResult> {
+  const partnerId = need(cmd.partner, 'πελάτη')
+  const itemId = need(cmd.item, 'προϊόν')
+  const p = partnerOf(env, partnerId)
+  const it = itemOf(env, itemId)
+  if (!(cmd.netPrice >= 0) || !Number.isFinite(cmd.netPrice)) throw new Error('Λάθος τιμή.')
+  const { data: old, error: eo } = await supabase.from('partner_price').select('id, price').eq('partner_id', partnerId).eq('item_id', itemId).maybeSingle()
+  if (eo) fail(eo)
+  const oldRow = old as { id: string; price: number } | null
+  const net = round(cmd.netPrice, 4)
+  const { error } = await supabase.from('partner_price')
+    .upsert({ company_id: env.companyId, partner_id: partnerId, item_id: itemId, price: net }, { onConflict: 'partner_id,item_id' })
+  if (error) fail(error)
+  return {
+    message: `Τιμή για «${p.name}»: ${it.name} ${fmtMoney(net)} χωρίς ΦΠΑ${oldRow ? ` (πριν ${fmtMoney(oldRow.price)})` : ''}.`,
+    undo: async () => {
+      const q = oldRow
+        ? supabase.from('partner_price').update({ price: oldRow.price }).eq('partner_id', partnerId).eq('item_id', itemId)
+        : supabase.from('partner_price').delete().eq('partner_id', partnerId).eq('item_id', itemId)
+      const { error: e } = await q
+      if (e) fail(e)
+    },
+  }
+}
+
+/**
+ * Καταχωρεί τις ανοιχτές πωλήσεις ημέρας: τις σημερινές και όσες έμειναν
+ * ανοιχτές από προηγούμενες μέρες (π.χ. βάρδια που πέρασε τα μεσάνυχτα).
+ * Χωρίς αναίρεση.
+ */
+async function closeDay(env: ExecEnv): Promise<ExecResult> {
+  const running = await loadRunning(env.companyId, env.today)
+  const all = [...running.older, ...running.tally]
+  if (all.length === 0) return { message: 'Δεν υπάρχουν ανοιχτές πωλήσεις ημέρας.' }
+  const ok: string[] = []
+  const bad: string[] = []
+  for (const t of all) {
+    const label = dayLabel(t.date, env.today) + CHANNEL_LABEL[t.channel]
+    try {
+      await postDoc(t.docId)
+      const head = await docHead(t.docId)
+      ok.push(`${label} ${fmtQty(t.qty)} τεμ (${fmtMoney(head?.total_gross ?? t.gross)})`)
+    } catch (e) {
+      bad.push(`${label}: ${voiceError(e).message}`)
+    }
+  }
+  await env.refreshMaster()
+  if (ok.length === 0) throw new Error('Δεν έκλεισε η μέρα. ' + bad.join(' · '))
+  return {
+    message: `Έκλεισε η μέρα: ${ok.join(', ')}.` + (bad.length ? ` Δεν έκλεισαν: ${bad.join(' · ')}.` : '') +
+      ' Δεν αναιρείται από εδώ (ακύρωση καταχώρησης από τις Πωλήσεις).',
+  }
+}
+
+/**
+ * Καταχωρεί τις απογραφές σε εξέλιξη (την παλιότερη πρώτη: και ξεχασμένη
+ * από προηγούμενη μέρα) και ανοίγει τη σελίδα της τελευταίας (διαφορές).
+ * Κάθε είδος μετράει τη στιγμή που μετρήθηκε: οι πωλήσεις της ημέρας μετά
+ * τη μέτρηση μένουν ανοιχτές και μετράνε για μετά. Ό,τι ήταν πριν (π.χ.
+ * ανοιχτές πωλήσεις προηγούμενης μέρας) το καταχωρεί πρώτα ο server. Αν
+ * μία αποτύχει, οι επόμενες μένουν ανοιχτές (η σειρά μετρήσεων μετράει).
+ */
+async function closeStocktake(env: ExecEnv): Promise<ExecResult> {
+  const before = await loadRunning(env.companyId, env.today)
+  const sts = before.stocktakes
+  if (!sts.length) throw new Error('Δεν υπάρχει απογραφή σε εξέλιξη.')
+  const done: RunningStocktake[] = []
+  let failed: { st: RunningStocktake; msg: string } | null = null
+  for (const st of sts) {
+    try { await postDoc(st.id); done.push(st) } catch (e) { failed = { st, msg: voiceError(e).message }; break }
+  }
+  const code = (st: RunningStocktake) => docCode('stocktake', st.docNo)
+  if (!done.length) {
+    if (sts.length === 1) throw new Error(failed!.msg)
+    throw new Error(`Δεν καταχωρήθηκε η απογραφή ${code(failed!.st)} (${fmtDate(failed!.st.date)}): ${failed!.msg}`)
+  }
+  // ποιες ανοιχτές πωλήσεις καταχωρήθηκαν μαζί τους
+  let closed: TallyRow[] = []
+  try {
+    const after = await loadRunning(env.companyId, env.today)
+    const still = new Set([...after.older, ...after.tally].map((t) => t.docId))
+    closed = [...before.older, ...before.tally].filter((t) => !still.has(t.docId))
+  } catch { /* μόνο για το μήνυμα */ }
+  await env.refreshMaster()
+  const label = (t: TallyRow) => dayLabel(t.date, env.today) + CHANNEL_LABEL[t.channel]
+  const what = (st: RunningStocktake) => `${code(st)} (${st.count} ${plural(st.count, 'είδος', 'είδη')}, ${fmtDate(st.date)})`
+  const rest = sts.slice(done.length + 1)
+  return {
+    message: `${done.length > 1 ? 'Καταχωρήθηκαν οι απογραφές' : 'Καταχωρήθηκε η απογραφή'} ${done.map(what).join(', ')}.` +
+      (closed.length ? ` Καταχωρήθηκαν και οι ανοιχτές πωλήσεις ${closed.map(label).join(', ')}: ήταν πριν από τη μέτρηση.` : '') +
+      (failed ? ` Δεν καταχωρήθηκε η ${code(failed.st)} (${fmtDate(failed.st.date)}): ${failed.msg}` +
+        (rest.length ? ` Έμειναν ανοιχτές: ${rest.map(code).join(', ')}.` : '') : '') +
+      ' Ό,τι πουλήθηκε ή φτιάχτηκε μετά από κάθε μέτρηση μετράει για μετά. Δεν αναιρείται από εδώ.',
+    navigateTo: `/docs/stocktake/${done[done.length - 1].id}`,
+  }
+}
+
+async function queryStock(cmd: Cmd<'query_stock'>, env: ExecEnv): Promise<ExecResult> {
+  const id = need(cmd.item, 'είδος')
+  const it = itemOf(env, id)
+  const { data, error } = await supabase.from('v_stock_balance').select('on_hand, min_stock, below_min').eq('item_id', id).maybeSingle()
+  if (error) fail(error)
+  const b = data as { on_hand: number; min_stock: number | null; below_min: boolean } | null
+  const onHand = Number(b?.on_hand ?? 0)
+  let msg = `«${it.name}»: ${fmtQty(onHand)} ${it.unit}.`
+  if (b?.below_min) msg += ` Κάτω από το ελάχιστο (${fmtQty(b.min_stock)} ${it.unit}).`
+  if (it.make_to_order) msg += it.item_type === 'semi' ? ' Φτιάχνεται αυτόματα όταν χρειάζεται.' : ' Φτιάχνεται κατά παραγγελία.'
+  return { message: msg }
+}
+
+async function queryBalance(cmd: Cmd<'query_balance'>, env: ExecEnv): Promise<ExecResult> {
+  const id = need(cmd.partner, 'συναλλασσόμενο')
+  const p = partnerOf(env, id)
+  const { data, error } = await supabase.from('v_partner_balance').select('customer_balance, supplier_balance').eq('partner_id', id).maybeSingle()
+  if (error) fail(error)
+  const b = data as { customer_balance: number; supplier_balance: number } | null
+  const parts: string[] = []
+  const cb = Number(b?.customer_balance ?? 0)
+  const sb = Number(b?.supplier_balance ?? 0)
+  if (p.is_customer) parts.push(cb > 0 ? `μας χρωστάει ${fmtMoney(cb)}` : cb < 0 ? `έχει πιστωτικό ${fmtMoney(-cb)}` : 'δεν μας χρωστάει τίποτα')
+  if (p.is_supplier) parts.push(sb > 0 ? `του χρωστάμε ${fmtMoney(sb)}` : sb < 0 ? `μας έχει πιστώσει ${fmtMoney(-sb)}` : 'δεν του χρωστάμε τίποτα')
+  return { message: `«${p.name}»: ${parts.join(' · ')}.` }
+}
+
+/** Σύνοψη πωλήσεων ημέρας (ανοιχτές + καταχωρημένες) ανά κανάλι και είδος */
+export async function todaySummary(env: Pick<ExecEnv, 'companyId' | 'today' | 'items'>): Promise<string> {
+  const { data, error } = await supabase.from('doc').select('id, channel, status, is_running, doc_line(item_id, qty, gross)')
+    .eq('company_id', env.companyId).eq('doc_type', 'sale').eq('doc_date', env.today).eq('is_auto', false)
+  if (error) fail(error)
+  // καταχωρημένες + ο μετρητής ημέρας (όχι πρόχειρα που δεν πέρασαν ακόμα)
+  const docs = ((data ?? []) as unknown as { channel: string | null; status: string; is_running: boolean; doc_line: { item_id: string; qty: number; gross: number }[] }[])
+    .filter((d) => d.status === 'posted' || d.is_running)
+  const byCh = new Map<string, number>()
+  const byItem = new Map<string, number>()
+  let qty = 0, gross = 0
+  for (const d of docs) {
+    const ch = d.channel ?? 'wholesale'
+    for (const l of d.doc_line) {
+      const q = Number(l.qty)
+      byCh.set(ch, (byCh.get(ch) ?? 0) + q)
+      byItem.set(l.item_id, (byItem.get(l.item_id) ?? 0) + q)
+      qty += q
+      gross += Number(l.gross)
+    }
+  }
+  if (qty === 0) return 'Σήμερα δεν έχουν περαστεί πωλήσεις.'
+  const label = (c: string) => CHANNEL_LABEL[c as keyof typeof CHANNEL_LABEL] ?? c
+  const chs = [...byCh].map(([c, q]) => `${label(c)} ${fmtQty(q)}`).join(', ')
+  const top = [...byItem].sort((a, b) => b[1] - a[1]).slice(0, 6)
+    .map(([id, q]) => `${env.items.find((i) => i.id === id)?.name ?? '?'} ${fmtQty(q)}`).join(', ')
+  return `Σήμερα: ${chs}. Σύνολο ${fmtQty(qty)} τεμ, ${fmtMoney(gross)} με ΦΠΑ. ${top}.`
+}

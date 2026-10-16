@@ -102,6 +102,12 @@ export function ProductionDoc() {
         </Field>
       </div>
 
+      {!posted && outItem?.item_type === 'semi' && outItem.make_to_order && (
+        <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
+          Το «{outItem.name}» γίνεται ήδη αυτόματα όταν το χρειάζεται μια πώληση ή παραγωγή. Πέρασε παραγωγή μόνο αν φτιάξατε απόθεμα από πριν.
+        </div>
+      )}
+
       <div className="card overflow-x-auto">
         <div className="flex items-center justify-between px-3 pt-3">
           <h2 className="font-semibold text-sm">Αναλώσεις (συστατικά)</h2>
