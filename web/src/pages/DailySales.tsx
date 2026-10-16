@@ -290,6 +290,19 @@ export function DailySales() {
 
   const isPast = date < today()
 
+  // παλιά μέρα με καταχωρημένη απογραφή μετά από αυτήν: τα προϊόντα που κινούν
+  // μετρημένα είδη δεν αλλάζουν πια εκείνη τη μέρα (κλειδωμένη περίοδος)
+  const [lockedBy, setLockedBy] = useState<{ doc_no: number; doc_date: string } | null>(null)
+  useEffect(() => {
+    setLockedBy(null)
+    if (!companyId || !isPast) return
+    let alive = true
+    supabase.from('doc').select('doc_no, doc_date').eq('company_id', companyId).eq('doc_type', 'stocktake')
+      .eq('status', 'posted').gt('doc_date', date).order('doc_date').order('doc_no').limit(1)
+      .then(({ data }) => { if (alive) setLockedBy(((data ?? []) as { doc_no: number; doc_date: string }[])[0] ?? null) })
+    return () => { alive = false }
+  }, [companyId, date, isPast])
+
   return (
     <div className="pb-24">
       <PageTitle title="Πωλήσεις ημέρας">
@@ -315,6 +328,12 @@ export function DailySales() {
         {isPast && running && (
           <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
             Παλιά ημέρα: κλείνει αυτόματα με την επόμενη σύνδεση ή με «Κλείσιμο ημέρας».
+          </div>
+        )}
+        {lockedBy && (
+          <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+            Μετά από αυτή τη μέρα καταχωρήθηκε η απογραφή {docCode('stocktake', lockedBy.doc_no)} ({fmtDate(lockedBy.doc_date)}):
+            όσα προϊόντα χρησιμοποιούν είδη που μέτρησε δεν αλλάζουν πια για τις {fmtDate(date)} (κλειδωμένη περίοδος).
           </div>
         )}
         {posted.length > 0 && (

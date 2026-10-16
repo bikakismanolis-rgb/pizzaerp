@@ -5,8 +5,13 @@ const NET_RE = /failed to fetch|networkerror|load failed|network request failed|
 
 export const isNetworkMessage = (msg: string | null | undefined): boolean => !!msg && NET_RE.test(msg)
 
-/** Το μήνυμα όπως είναι, εκτός από τα αγγλικά σφάλματα δικτύου */
-export const friendlyMessage = (msg: string): string => (isNetworkMessage(msg) ? NET_MSG : msg)
+/**
+ * Το μήνυμα όπως είναι, εκτός από τα αγγλικά σφάλματα δικτύου· οι ημερομηνίες
+ * των μηνυμάτων της βάσης «(2026-10-16)» γίνονται «(16/10/2026)».
+ */
+export const friendlyMessage = (msg: string): string => (
+  isNetworkMessage(msg) ? NET_MSG : msg.replace(/\((\d{4})-(\d{2})-(\d{2})\)/g, '($3/$2/$1)')
+)
 
 /**
  * tally_add σε μέρα πριν από καταχωρημένη απογραφή (μόνο τότε κλειδώνει: η

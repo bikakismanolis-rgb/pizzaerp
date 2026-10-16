@@ -40,7 +40,8 @@ export function TradeDoc({ docType }: { docType: DocType }) {
 
   // αρχικοποίηση από φορτωμένο παραστατικό
   useEffect(() => {
-    if (!doc) { if (rows.length === 0) addRow(); return }
+    // μία κενή γραμμή σε νέο (ασφαλές και όταν το effect τρέχει δύο φορές)
+    if (!doc) { const k = nextKey(); setRows((r) => r.length ? r : [{ key: k, item_id: null, qty: '', unit_price: '', discount_pct: '0', vat_rate: '13' }]); return }
     setDate(doc.doc_date); setPartnerId(doc.partner_id); setChannel(doc.channel); setRefNo(doc.ref_no ?? ''); setNotes(doc.notes ?? '')
     const itemRows = lines.filter((l) => l.role === 'item')
     setRows(itemRows.map((l, i) => ({ key: i + 1, item_id: l.item_id, qty: String(l.qty), unit_price: String(l.unit_price), discount_pct: String(l.discount_pct), vat_rate: String(l.vat_rate) })))

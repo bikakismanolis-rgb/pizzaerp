@@ -1278,8 +1278,9 @@ end $$;
 -- δωμάτιο· p_qty null: αφαίρεση γραμμής). Η πρώτη μέτρηση του είδους
 -- κρατά τη στιγμή (stock_cut), αφού πρώτα καταχωρήσει τις πρόχειρες
 -- πωλήσεις ημέρας ως σήμερα που το κινούν· οι επόμενες προσθέσεις /
--- διορθώσεις κρατούν την ίδια στιγμή. Επιστρέφει το id της απογραφής ή
--- null αν άδειασε (και διαγράφηκε).
+-- διορθώσεις κρατούν την ίδια στιγμή. Σε απογραφή παλιότερης ημερομηνίας
+-- η πρώτη μέτρηση γίνεται μόνο αν το είδος δεν έχει ήδη κινήσεις μετά από
+-- αυτήν. Επιστρέφει το id της απογραφής ή null αν άδειασε (και διαγράφηκε).
 -- ---------------------------------------------------------------------
 create or replace function public.stocktake_count(
   p_company uuid, p_date date, p_item uuid, p_qty numeric, p_add boolean default false)
@@ -1295,6 +1296,7 @@ declare
   v_qty   numeric;
   v_cut   bigint;
   v_lock  record;
+  v_later date;
 begin
   if p_company is null or not public.is_member(p_company) then
     raise exception 'Δεν έχετε πρόσβαση στην εταιρεία';
@@ -1345,6 +1347,28 @@ begin
       raise exception 'Μη έγκυρη ποσότητα';
     end if;
     if v_line is null then
+      -- μέτρηση τώρα σε απογραφή παλιότερης ημερομηνίας (π.χ. ξεχασμένη από
+      -- χθες): ό,τι γράφτηκε ήδη με μεταγενέστερη ημερομηνία (κινήσεις ή ανοιχτές
+      -- πωλήσεις ημέρας που το κινούν) έγινε πριν από τη μέτρηση, αλλά θα
+      -- μετρούσε για μετά, δηλαδή δύο φορές
+      select min(m.move_date) into v_later
+        from public.stock_move m
+       where m.company_id = p_company and m.item_id = p_item and m.move_date > p_date;
+      if v_later is null then
+        select min(x.doc_date) into v_later
+          from public.doc x
+         where x.company_id = p_company and x.doc_type = 'sale' and x.status = 'draft' and not x.is_auto
+           and (x.is_running or (x.notes = 'Πωλήσεις ημέρας' and x.channel in ('efood','wolt','box','phone','store')))
+           and x.doc_date > p_date
+           and exists (select 1
+                         from public.doc_line xl
+                         cross join lateral public._item_tree(xl.item_id) t(item_id)
+                        where xl.doc_id = x.id and t.item_id = p_item);
+      end if;
+      if v_later is not null then
+        raise exception 'Το είδος "%" έχει ήδη κινήσεις της % (μετά την ημερομηνία της απογραφής, %): μετρημένο τώρα, θα μετρούσαν δύο φορές. Μέτρησέ το σε απογραφή με τη σημερινή ημερομηνία.',
+          v_item.name, to_char(v_later, 'DD/MM/YYYY'), to_char(p_date, 'DD/MM/YYYY');
+      end if;
       -- πρώτη μέτρηση του είδους: ό,τι πουλήθηκε ως τώρα είναι πριν από αυτήν
       perform public._post_day_tallies(p_company, p_date, array[p_item], array[p_item]);
       v_cut := public._move_mark();

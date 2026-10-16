@@ -692,7 +692,9 @@ export function Voice() {
         <div className="card p-3 sm:p-4 mb-3 border-red-200 shadow">
           <div className="text-xs text-stone-500 break-words">Άκουσα: «{pending.interp.text}»</div>
           <div className="text-lg leading-snug font-medium mt-1">{sentence}</div>
-          {pending.interp.confidence < 0.5 && !why && Object.keys(pending.picked).length === 0 && Object.keys(pending.edited).length === 0 && (
+          {/* σε μέτρημα (απογραφή σε εξέλιξη) το σκέτο «αλεύρι 10 κιλά» είναι μέτρηση: όχι «δεν είμαι σίγουρος» */}
+          {pending.interp.confidence < 0.5 && !why && Object.keys(pending.picked).length === 0 && Object.keys(pending.edited).length === 0 &&
+            !(pending.cmd.kind === 'stocktake' && (running?.stocktakes.length ?? 0) > 0) && (
             <div className="text-xs text-amber-700 mt-1">Δεν είμαι σίγουρος: έλεγξε τα στοιχεία πριν πεις ναι.</div>
           )}
           {issues.length + notes.length > 0 && (

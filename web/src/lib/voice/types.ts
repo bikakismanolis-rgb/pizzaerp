@@ -84,9 +84,9 @@ export type Command =
   | { kind: 'item_price'; item: EntityRef; netPrice: number; heardGross: boolean }
   /** ειδική τιμή πελάτη (χωρίς ΦΠΑ) */
   | { kind: 'partner_price'; partner: EntityRef; item: EntityRef; netPrice: number }
-  /** κλείσιμο (καταχώρηση) των σημερινών πωλήσεων λιανικής */
   /** δική τους φράση: "όταν λέω «οικογενειακή» εννοώ «μεγάλη μαργαρίτα»" */
   | { kind: 'new_phrase'; phrase: string; meaning: string }
+  /** κλείσιμο (καταχώρηση) των ανοιχτών πωλήσεων ημέρας */
   | { kind: 'close_day' }
   /** καταχώρηση της ανοιχτής απογραφής */
   | { kind: 'close_stocktake' }

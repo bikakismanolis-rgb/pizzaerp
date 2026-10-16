@@ -83,7 +83,8 @@ export function VoiceWords() {
     const t = test.trim()
     if (!t || !ready) return null
     const interp = interpret(t, ctx)
-    const rewritten = applyPhrases(t, testRules)
+    // με τον κατάλογο: όπως το interpret (δεν κόβει μεγαλύτερα ονόματα, π.χ. «Ζυμάρι 400γρ»)
+    const rewritten = applyPhrases(t, testRules, ctx)
     // χωρίς το «Να το περάσω;»: εδώ δεν περνάει τίποτα
     return { interp, rewritten: rewritten !== t ? rewritten : null, sentence: describe(interp, ctx).replace(/\s*Να [^.;]*;$/, '') }
   }, [test, ctx, testRules, ready])

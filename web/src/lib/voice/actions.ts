@@ -5,7 +5,7 @@ import type { Command, EntityRef, TallyChannel } from './types'
 import { phraseKey } from './normalize'
 import { CHANNEL_LABEL, ITEM_TYPE_LABEL, TALLY_NOTES, docCode } from '../labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round } from '../format'
-import { NET_MSG, isNetworkMessage, tallyMessage } from '../errors'
+import { friendlyMessage, tallyMessage } from '../errors'
 import {
   addDays, localHour, phraseProblem, plural, removalNote, stockOps, stockTarget, stocktakeList, tallySteps,
   type ChannelTotal, type PostedQty, type RunningState, type RunningStocktake, type StockOp, type TallyRow,
@@ -52,7 +52,7 @@ export function voiceError(e: unknown): Error {
   if (code === 'PGRST202' || code === '42883' || code === 'PGRST205' || code === '42P01' || code === 'PGRST204' || code === '42703') {
     return new Error('Η βάση δεν έχει την ενημέρωση για τις φωνητικές εντολές (0004_voice.sql).')
   }
-  if (e instanceof Error) return isNetworkMessage(e.message) ? new Error(NET_MSG) : e
+  if (e instanceof Error) { const m = friendlyMessage(e.message); return m === e.message ? e : new Error(m) }
   return new Error(errMsg(e))
 }
 

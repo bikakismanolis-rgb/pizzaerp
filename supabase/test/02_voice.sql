@@ -8,7 +8,8 @@
 -- την ίδια μέρα, κλειδώματα πριν/μετά τη μέτρηση, δικές τους φράσεις,
 -- κλείδωμα όσων είναι ήδη μέσα σε μέτρηση σε εξέλιξη, πρόχειρες πωλήσεις
 -- ημέρας στη μέτρηση, αξία διαφοράς τη στιγμή της μέτρησης, ζυμάρια του
--- πρωινού σε πίτσες όλης της μέρας, στιγμή που δεν πάει πίσω.
+-- πρωινού σε πίτσες όλης της μέρας, στιγμή που δεν πάει πίσω, μέτρηση σε
+-- ξεχασμένη απογραφή προηγούμενης μέρας.
 \set ON_ERROR_STOP on
 \pset format aligned
 
@@ -49,7 +50,7 @@ declare
   d30   constant date := '2026-09-30';
   c uuid; c2 uuid;
   flour uuid; water uuid; yeast uuid; salt uuid; oil uuid; mozz uuid; sauce uuid; box uuid;
-  dough uuid; marg uuid; pep uuid; special uuid; foreign_item uuid;
+  dough uuid; marg uuid; pep uuid; special uuid; foreign_item uuid; napkin uuid;
   mill uuid; hotel uuid;
   b_dough uuid; b_marg uuid; b_special uuid; b_pep uuid;
   d uuid; s1 uuid; p1 uuid; p2 uuid; a1 uuid; a2 uuid; a3 uuid;
@@ -462,10 +463,14 @@ begin
   t15 := public.tally_add(c, d15, 'store', marg, 1);            -- 15/9 = "σήμερα": μένει ανοιχτό
   insert into public.doc (company_id, doc_type, doc_date, channel, is_running) values (c, 'sale', d13, 'box', true) returning id into t13;  -- κενό
   -- απογραφή σε εξέλιξη: δεν κλείνει ποτέ αυτόματα (είδος που δεν κινεί ο
-  -- μετρητής της 10/9, αλλιώς η πρώτη μέτρηση θα τον καταχωρούσε)
-  st := public.stocktake_count(c, d10, special, 50);
+  -- μετρητής της 10/9, αλλιώς η πρώτη μέτρηση θα τον καταχωρούσε, ούτε
+  -- κινείται μετά τις 10/9: αλλιώς η μέτρηση "τώρα" με ημερομηνία 10/9 δεν γίνεται)
+  insert into public.item (company_id, code, name, item_type, unit) values (c, 'ΠΥ-099', 'Χαρτοπετσέτες', 'raw', 'τεμ') returning id into napkin;
+  perform pg_temp.expect_fail(format('select public.stocktake_count(%L, %L, %L, %L)', c, d10, special, 50),
+    'Το είδος "Special κατεψυγμένη" έχει ήδη κινήσεις της 12/09/2026%', 'μέτρηση με ημερομηνία πριν από κινήσεις του είδους');
+  st := public.stocktake_count(c, d10, napkin, 50);
   if not exists (select 1 from public.doc where id = t10 and status = 'draft' and is_running) then
-    raise exception 'ΑΠΟΤΥΧΙΑ: μέτρηση κατεψυγμένης καταχώρησε μετρητή που δεν την κινεί';
+    raise exception 'ΑΠΟΤΥΧΙΑ: μέτρηση είδους καταχώρησε μετρητή που δεν το κινεί';
   end if;
 
   n := 0; n2 := 0;
@@ -579,7 +584,7 @@ begin
   end if;
   if public.stocktake_count(c, d20, flour, null) is not null then raise exception 'ΑΠΟΤΥΧΙΑ: αφαίρεση χωρίς απογραφή'; end if;
   -- και η απογραφή σε εξέλιξη της 10/9 φεύγει
-  t2 := public.stocktake_count(c, d10, special, null);
+  t2 := public.stocktake_count(c, d10, napkin, null);
   if t2 is not null or exists (select 1 from public.doc where id = st) then
     raise exception 'ΑΠΟΤΥΧΙΑ: καθάρισμα απογραφής 10/9';
   end if;
@@ -1426,6 +1431,50 @@ begin
   perform public.post_document(st2);
   if (select diff_qty from public.doc_line where doc_id = st2) <> -0.1 then raise exception 'ΑΠΟΤΥΧΙΑ: βραδινή μέτρηση 15/3'; end if;
   raise notice 'OK η στιγμή δεν πάει πίσω: πρωί %, βράδυ %', cut1, cut2;
+
+  -- -------------------------------------------------------------------
+  -- 30. Μέτρηση τώρα σε απογραφή παλιότερης ημερομηνίας (ξεχασμένη από
+  --     χθες) ενώ το είδος έχει ήδη κινήσεις ή ανοιχτές πωλήσεις ημέρας με
+  --     μεταγενέστερη ημερομηνία: δεν γίνεται (θα μετρούσαν δύο φορές).
+  --     Χωρίς τίποτα της νέας μέρας (μέτρημα μετά τα μεσάνυχτα) γίνεται.
+  -- -------------------------------------------------------------------
+  declare
+    oreg uuid; basil uuid; pie uuid;
+  begin
+    insert into public.item (company_id, code, name, item_type, unit) values (c, 'ΠΥ-030', 'Ρίγανη', 'raw', 'kg') returning id into oreg;
+    insert into public.item (company_id, code, name, item_type, unit) values (c, 'ΠΥ-031', 'Βασιλικός', 'raw', 'kg') returning id into basil;
+    insert into public.item (company_id, code, name, item_type, unit, sale_price) values (c, 'ΠΡ-030', 'Τυρόπιτα', 'finished', 'τεμ', 2) returning id into pie;
+    insert into public.doc (company_id, doc_type, doc_date, partner_id) values (c, 'purchase', '2027-04-02', mill) returning id into pm;
+    insert into public.doc_line (doc_id, line_no, item_id, qty, unit_price, vat_rate) values (pm, 1, oreg, 1, 10, 13);
+    perform public.post_document(pm);                                 -- σήμερα (2/4): αγορά ρίγανης
+    perform public.tally_add(c, '2027-04-02', 'store', pie, 2);       -- σήμερα: ανοιχτή πώληση
+    -- χθεσινή απογραφή που έμεινε ανοιχτή
+    st := public.stocktake_count(c, '2027-04-01', basil, 0.5);        -- μετά τα μεσάνυχτα, τίποτα της 2/4: γίνεται
+    perform pg_temp.expect_fail(format('select public.stocktake_count(%L, %L, %L, %L)', c, '2027-04-01', oreg, 1),
+      'Το είδος "Ρίγανη" έχει ήδη κινήσεις της 02/04/2027%', 'χθεσινή απογραφή, σημερινή αγορά');
+    perform pg_temp.expect_fail(format('select public.stocktake_count(%L, %L, %L, %L)', c, '2027-04-01', pie, 3),
+      'Το είδος "Τυρόπιτα" έχει ήδη κινήσεις της 02/04/2027%', 'χθεσινή απογραφή, σημερινή ανοιχτή πώληση');
+    if (select count(*) from public.doc_line where doc_id = st) <> 1
+       or not exists (select 1 from public.doc where id = st and status = 'draft' and is_running) then
+      raise exception 'ΑΠΟΤΥΧΙΑ: η χθεσινή απογραφή άλλαξε';
+    end if;
+    perform public.stocktake_count(c, '2027-04-01', basil, 0.2, true); -- ίδιο είδος, ήδη μετρημένο: συνεχίζει
+    -- στη σημερινή απογραφή γίνονται
+    st2 := public.stocktake_count(c, '2027-04-02', oreg, 0.9);
+    perform public.stocktake_count(c, '2027-04-02', pie, 0);
+    if (select status from public.doc d2 join public.doc_line dl on dl.doc_id = d2.id
+         where d2.doc_date = '2027-04-02' and d2.channel = 'store' and dl.item_id = pie) <> 'posted' then
+      raise exception 'ΑΠΟΤΥΧΙΑ: η σημερινή πώληση πριν από τη μέτρηση δεν καταχωρήθηκε';
+    end if;
+    perform public.post_document(st);
+    perform public.post_document(st2);
+    if (select qty from public.doc_line where doc_id = st) <> 0.7
+       or (select diff_qty from public.doc_line where doc_id = st2 and item_id = oreg) <> -0.1
+       or public.item_on_hand(oreg) <> 0.9 then
+      raise exception 'ΑΠΟΤΥΧΙΑ: μετρήσεις 1/4 - 2/4';
+    end if;
+  end;
+  raise notice 'OK μέτρηση σε ξεχασμένη απογραφή παλιότερης μέρας μόνο χωρίς κινήσεις μετά';
 
   raise notice 'ΟΛΑ ΟΚ (φωνή)';
 end $$;
