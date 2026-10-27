@@ -108,6 +108,7 @@ export function Modal({ open, title, onClose, children, wide = false }: {
   return (
     <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/40 p-4 overflow-y-auto" onMouseDown={onClose}>
       <div
+        role="dialog" aria-modal="true" aria-label={title}
         className={'card w-full mt-8 ' + (wide ? 'max-w-3xl' : 'max-w-lg')}
         onMouseDown={(e) => e.stopPropagation()}
       >

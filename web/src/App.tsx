@@ -11,6 +11,7 @@ const VivaReturn = lazy(() => import('./pages/shop/PayPages').then((m) => ({ def
 const TestPay = lazy(() => import('./pages/shop/PayPages').then((m) => ({ default: m.TestPay })))
 const ReceiptPage = lazy(() => import('./pages/shop/ReceiptPage').then((m) => ({ default: m.ReceiptPage })))
 const PrivacyPage = lazy(() => import('./pages/shop/PrivacyPage').then((m) => ({ default: m.PrivacyPage })))
+const DriverPage = lazy(() => import('./pages/shop/DriverPage').then((m) => ({ default: m.DriverPage })))
 const HotelOrder = lazy(() => import('./pages/shop/HotelOrder').then((m) => ({ default: m.HotelOrder })))
 
 const pageSpinner = <div className="min-h-screen flex items-center justify-center"><Spinner /></div>
@@ -28,6 +29,7 @@ export default function App() {
             <Route path="/pay/test" element={<TestPay />} />
             <Route path="/r/:token" element={<ReceiptPage />} />
             <Route path="/h/:token" element={<HotelOrder />} />
+            <Route path="/d/:token" element={<DriverPage />} />
             <Route path="*" element={<StaffApp />} />
           </Routes>
         </Suspense>

@@ -9,8 +9,9 @@ import {
 } from '../lib/online'
 import {
   acceptOrder, autoReceiptOn, cancelOrder, defaultMinutes, doneOrder, loadOrders, loadShop, refundOrder, rejectOrder, runOrderVoice,
-  setShopOpen, type OrderResult,
+  sendOrder, setShopOpen, type OrderResult,
 } from '../lib/orders/orderActions'
+import type { DriverRow } from '../lib/delivery/api'
 import { listNos } from '../lib/orders/orderPick'
 import { parseOrderVoice } from '../lib/orders/orderVoice'
 import { beep, unlockAudio, useWakeLock } from '../lib/orders/alarm'
@@ -55,6 +56,7 @@ export function Orders() {
   const [shop, setShop] = useState<OnlineShop | null | 'missing' | undefined>(undefined)
   const [orders, setOrders] = useState<OnlineOrder[]>([])
   const [b2b, setB2b] = useState<B2bOrder[]>([])
+  const [drivers, setDrivers] = useState<DriverRow[]>([])
   const [autoReceipt, setAutoReceipt] = useState(false)
   const [autoPrint, setAutoPrintState] = useState(autoPrintOn)
   const [month, setMonth] = useState<Month | null>(null)
@@ -93,16 +95,19 @@ export function Orders() {
       if (my !== loadSeq.current) return
       setShop(s)
       if (s === 'missing') return
-      const [os, m, bo, src] = await Promise.all([
+      const [os, m, bo, src, dr] = await Promise.all([
         loadOrders(companyId),
         supabase.from('v_online_month').select('orders, total').eq('company_id', companyId).eq('month', monthStart()).maybeSingle(),
         loadB2b(companyId),
         // βάση χωρίς το 0006: καμία πηγή
         supabase.from('v_online_source').select('source, orders, total').eq('company_id', companyId).eq('month', monthStart()),
+        // βάση χωρίς το 0007: κανένας διανομέας
+        supabase.from('v_driver_today').select('*').eq('company_id', companyId).order('name'),
       ])
       if (my !== loadSeq.current) return
       setOrders(os)
       setB2b(bo)
+      setDrivers(dr.error ? [] : ((dr.data ?? []) as DriverRow[]).map((d) => ({ ...d, on_way: Number(d.on_way), cash_open: Number(d.cash_open) })))
       const sources = (src.error ? [] : (src.data ?? []) as Month['sources']).map((x) => ({ ...x, orders: Number(x.orders), total: Number(x.total) }))
         .sort((a, b) => b.orders - a.orders)
       setMonth(m.data ? { orders: Number(m.data.orders), total: Number(m.data.total), sources } : { orders: 0, total: 0, sources: [] })
@@ -311,6 +316,7 @@ export function Orders() {
           title="Τύπωμα του δελτίου κουζίνας όταν γίνεται δεκτή μια παραγγελία (σε αυτή τη συσκευή)">
           🖨 {autoPrint ? 'Τύπωμα στην αποδοχή' : 'Χωρίς τύπωμα'}
         </button>
+        <Link to="/orders/drivers" className="btn-secondary">Διανομείς</Link>
         <Link to="/orders/customers" className="btn-secondary">Πελάτες</Link>
         <Link to="/orders/settings" className="btn-secondary">Ρυθμίσεις site</Link>
       </PageTitle>
@@ -398,6 +404,12 @@ export function Orders() {
               <button className="btn-primary h-12 px-6 text-base" disabled={!!busy} onClick={() => act(o.id, () => doneOrder(o))}>
                 {o.mode === 'delivery' ? '🛵 Έφυγε' : '✅ Παραδόθηκε'}
               </button>
+              {o.mode === 'delivery' && drivers.filter((d) => d.is_active).map((d) => (
+                <button key={d.driver_id} className="btn-secondary h-12" disabled={!!busy} onClick={() => act(o.id, () => sendOrder(o, d))}
+                  title={`Έφυγε με ${d.name}`}>
+                  🛵 {d.name}
+                </button>
+              ))}
               <button className="btn-ghost h-12 ml-auto" disabled={!!busy} onClick={() => setCancelFor(o)}>Ακύρωση…</button>
             </div>
             <div className="mt-2"><FiscalBox compact order={o.id} /></div>
@@ -437,6 +449,17 @@ export function Orders() {
         </>
       )}
 
+      {/* Διανομείς: στον δρόμο και μετρητά */}
+      {drivers.some((d) => d.on_way > 0 || d.cash_open > 0) && (
+        <div className="card p-4 mb-4 text-sm flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="font-semibold">Διανομείς:</span>
+          {drivers.filter((d) => d.on_way > 0 || d.cash_open > 0).map((d) => (
+            <span key={d.driver_id}>🛵 {d.name}{d.on_way > 0 && <> · <b>{d.on_way}</b> στον δρόμο</>}{d.cash_open > 0 && <> · {fmtMoney(d.cash_open)} μετρητά</>}</span>
+          ))}
+          <Link className="underline ml-auto" to="/orders/drivers">Εκκαθάριση</Link>
+        </div>
+      )}
+
       {/* Μήνας */}
       {month && shop && (
         <div className="card p-4 mb-4 text-sm">
@@ -468,7 +491,15 @@ export function Orders() {
                 <tr key={o.id}>
                   <td className="w-12 font-semibold">#{o.order_no}</td>
                   <td>{clock(o.created_at)}</td>
-                  <td>{o.customer_name}</td>
+                  <td>
+                    {o.customer_name}
+                    {o.driver_id && (
+                      <div className="text-xs text-stone-500">
+                        🛵 {drivers.find((d) => d.driver_id === o.driver_id)?.name ?? 'διανομέας'}
+                        {o.status === 'done' && (o.delivered_at ? ` · παραδόθηκε ${clock(o.delivered_at)}` : ' · στον δρόμο')}
+                      </div>
+                    )}
+                  </td>
                   <td>
                     <span className={'badge ' + (o.status === 'done' ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700')}>{ORDER_STATUS_LABEL[o.status]}</span>
                     {o.reason && <span className="text-xs text-stone-500"> · {o.reason}</span>}

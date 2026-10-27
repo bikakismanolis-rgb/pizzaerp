@@ -133,6 +133,12 @@ export async function receiptOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Pro
   }
 }
 
+/** «Έφυγε με τον Νίκο» (0007) */
+export async function sendOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, driver: { driver_id: string; name: string }): Promise<OrderResult> {
+  await call('order_send', { p_order: o.id, p_driver: driver.driver_id })
+  return { ok: true, text: `Έφυγε η ${o.order_no} · ${driver.name}.` }
+}
+
 export async function doneOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promise<OrderResult> {
   await call('order_done', { p_order: o.id })
   return { ok: true, text: `Έφυγε η ${o.order_no}.` }

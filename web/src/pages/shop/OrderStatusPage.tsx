@@ -4,7 +4,9 @@ import { errMsg, supabase } from '../../lib/supabase'
 import { callFunction } from '../../lib/edge'
 import { fmtMoney } from '../../lib/format'
 import { clock, DISCOUNT_LABEL, loyaltyCard, MODE_LABEL, nestLines, PAYMENT_LABEL, readyAt, type OrderStatusInfo } from '../../lib/online'
+import { loadTrack, type TrackInfo } from '../../lib/delivery/api'
 import { Centered, ShopHeader, telHref, UUID_RE } from './shared'
+import { TrackMap } from './TrackMap'
 
 /**
  * «Πού είναι η παραγγελία μου» (/s/:slug/o/:token): ανανεώνεται μόνη της.
@@ -17,6 +19,8 @@ export function OrderStatusPage() {
   const [error, setError] = useState<string | null>(null)
   const [payMsg, setPayMsg] = useState<string | null>(null)
   const [paying, setPaying] = useState(false)
+  // διανομή: ποιος τη φέρνει, πού είναι, πότε παραδόθηκε (0007)
+  const [track, setTrack] = useState<TrackInfo | null>(null)
   const returned = useRef(false)
 
   const load = useCallback(async () => {
@@ -24,7 +28,11 @@ export function OrderStatusPage() {
     const { data, error: e } = await supabase.rpc('order_status', { p_token: token })
     if (e) { setError(errMsg(e)); return }
     setError(null)
-    setInfo((data as OrderStatusInfo | null) ?? null)
+    const i = (data as OrderStatusInfo | null) ?? null
+    setInfo(i)
+    if (i && i.mode === 'delivery' && i.status === 'done') {
+      try { setTrack(await loadTrack(token)) } catch { setTrack(null) } // βάση χωρίς το 0007
+    }
   }, [token])
 
   // επιστροφή από το Stripe: ρωτάμε τον server τι έγινε, μετά καθαρό URL
@@ -45,15 +53,18 @@ export function OrderStatusPage() {
     }
   }, [params, setParams, load])
 
+  // στον δρόμο με διανομέα: ανανέωση ώσπου να παραδοθεί (ως 3 ώρες)
+  const coming = !!info && info.status === 'done' && info.mode === 'delivery' && !!track?.driver && !track.delivered_at
+    && !!info.done_at && Date.now() - new Date(info.done_at).getTime() < 3 * 3600000
   const live = !info || ['new', 'accepted', 'awaiting_payment'].includes(info.status)
-    || info.pay_status === 'refund_pending'
+    || info.pay_status === 'refund_pending' || coming
   useEffect(() => {
     if (!live) return
-    const iv = window.setInterval(load, info?.status === 'awaiting_payment' ? 5000 : 15000)
+    const iv = window.setInterval(load, info?.status === 'awaiting_payment' || coming ? 8000 : 15000)
     const h = () => { if (document.visibilityState === 'visible') load() }
     document.addEventListener('visibilitychange', h)
     return () => { window.clearInterval(iv); document.removeEventListener('visibilitychange', h) }
-  }, [live, load, info?.status])
+  }, [live, load, info?.status, coming])
   useEffect(() => { if (info) document.title = `Παραγγελία #${info.order_no} · ${info.shop.name}` }, [info])
 
   const payAgain = async () => {
@@ -113,9 +124,17 @@ export function OrderStatusPage() {
         : <>Ετοιμάζεται.</>
       break
     case 'done':
-      icon = info.mode === 'delivery' ? '🛵' : '✅'
-      title = info.mode === 'delivery' ? 'Έφυγε, έρχεται!' : 'Παραδόθηκε'
-      text = info.mode === 'delivery' ? <>Ο διανομέας είναι καθ' οδόν.</> : <>Καλή όρεξη!</>
+      if (info.mode === 'delivery' && track?.delivered_at) {
+        icon = '✅'
+        title = 'Παραδόθηκε'
+        text = <>Στις {clock(track.delivered_at)}. Καλή όρεξη!</>
+      } else {
+        icon = info.mode === 'delivery' ? '🛵' : '✅'
+        title = info.mode === 'delivery' ? 'Έφυγε, έρχεται!' : 'Παραδόθηκε'
+        text = info.mode === 'delivery'
+          ? <>{track?.driver ? <>Τη φέρνει: <b>{track.driver}</b>{info.done_at ? ` (έφυγε ${clock(info.done_at)})` : ''}.</> : <>Ο διανομέας είναι καθ' οδόν.</>}</>
+          : <>Καλή όρεξη!</>
+      }
       break
     case 'rejected':
       icon = '😔'
@@ -151,6 +170,13 @@ export function OrderStatusPage() {
           {info.pay_test && info.payment === 'online' && <p className="text-xs text-amber-800 mt-2">Δοκιμαστική πληρωμή: δεν χρεώθηκε τίποτα.</p>}
           {live && <p className="text-xs text-stone-400 mt-3">Η σελίδα ανανεώνεται μόνη της.</p>}
         </div>
+
+        {coming && track?.pos && (
+          <div className="card p-3 mt-3">
+            <TrackMap lat={track.pos.lat} lng={track.pos.lng} />
+            <div className="text-xs text-stone-500 mt-1">Η θέση του διανομέα, {clock(track.pos.at)}. Ανανεώνεται μόνη της.</div>
+          </div>
+        )}
 
         {info.receipt && (
           <Link to={`/r/${info.receipt}`} className="card p-4 mt-3 flex items-center gap-3 text-sm">

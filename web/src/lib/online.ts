@@ -150,6 +150,9 @@ export interface OnlineOrder {
   discount_pct?: number
   discount?: number
   source?: string | null
+  /** διανομέας (0007) και πότε παραδόθηκε */
+  driver_id?: string | null
+  delivered_at?: string | null
   customer_name: string
   phone: string
   address: string | null

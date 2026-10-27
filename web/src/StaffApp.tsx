@@ -34,6 +34,7 @@ const VoiceWords = lazy(() => import('./pages/VoiceWords').then((m) => ({ defaul
 // online παραγγελίες: η κουζίνα και οι ρυθμίσεις του site
 const Orders = lazy(() => import('./pages/Orders').then((m) => ({ default: m.Orders })))
 const ShopSettings = lazy(() => import('./pages/ShopSettings').then((m) => ({ default: m.ShopSettings })))
+const Drivers = lazy(() => import('./pages/Drivers').then((m) => ({ default: m.Drivers })))
 const SiteCustomers = lazy(() => import('./pages/SiteCustomers').then((m) => ({ default: m.SiteCustomers })))
 // παραστατικά: λίστα και ρυθμίσεις
 const FiscalList = lazy(() => import('./pages/Fiscal').then((m) => ({ default: m.FiscalList })))
@@ -64,6 +65,7 @@ function CompanyGate() {
           <Route path="orders" element={<Suspense fallback={<Spinner />}><Orders /></Suspense>} />
           <Route path="orders/settings" element={<Suspense fallback={<Spinner />}><ShopSettings /></Suspense>} />
           <Route path="orders/customers" element={<Suspense fallback={<Spinner />}><SiteCustomers /></Suspense>} />
+          <Route path="orders/drivers" element={<Suspense fallback={<Spinner />}><Drivers /></Suspense>} />
           <Route path="fiscal" element={<Suspense fallback={<Spinner />}><FiscalList /></Suspense>} />
           <Route path="fiscal/settings" element={<Suspense fallback={<Spinner />}><FiscalSettingsPage /></Suspense>} />
           <Route path="daily-sales" element={<DailySales />} />

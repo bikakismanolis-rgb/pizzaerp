@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { EXAMPLES } from './examples'
 import { ORDER_EXAMPLES } from '../orders/orderExamples'
+import { DRIVER_EXAMPLES } from '../delivery/driverExamples'
+import { parseDriverVoice } from '../delivery/driverVoice'
 import guide from '../../../../docs/pes-to-odigos.html?raw'
 
 /**
@@ -47,5 +49,20 @@ describe('οδηγός: online παραγγελίες', () => {
     expect(orderCells.length).toBeGreaterThan(5)
     expect(orderCells.filter((p) => !orderSays.has(p))).toEqual([])
     expect([...orderSays].filter((s) => !orderCells.includes(s))).toEqual([])
+  })
+})
+
+// διανομείς: η φωνή στο κινητό τους
+const driverCells = [...guide.matchAll(/<td class="dsay">([\s\S]*?)<\/td>/g)].map((m) => text(m[1]))
+const driverSays = new Set(DRIVER_EXAMPLES.map((x) => x.say))
+
+describe('οδηγός: διανομείς', () => {
+  it('ίδιες φράσεις με τα παραδείγματα (driverExamples.ts)', () => {
+    expect(driverCells.length).toBeGreaterThan(3)
+    expect(driverCells.filter((p) => !driverSays.has(p))).toEqual([])
+    expect([...driverSays].filter((s) => !driverCells.includes(s))).toEqual([])
+  })
+  it.each(DRIVER_EXAMPLES.map((x) => [x.say, x.expect] as const))('%s', (say, cmd) => {
+    expect(parseDriverVoice(say)).toEqual(cmd)
   })
 })
