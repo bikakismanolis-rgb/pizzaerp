@@ -124,6 +124,8 @@ export function TradeDoc({ docType }: { docType: DocType }) {
           <Field label="Κανάλι">
             <select className="input" value={channel ?? ''} disabled={locked} onChange={(e) => setChannel(e.target.value as Doc['channel'])}>
               {(['wholesale', 'efood', 'wolt', 'box', 'phone', 'store'] as const).map((c) => <option key={c} value={c}>{CHANNEL_LABEL[c]}</option>)}
+              {/* το site το γράφει μόνο η αποδοχή online παραγγελίας */}
+              {channel === 'site' && <option value="site">{CHANNEL_LABEL.site}</option>}
             </select>
           </Field>
         )}

@@ -1,7 +1,8 @@
 export type ItemType = 'raw' | 'semi' | 'finished'
 export type DocType = 'purchase' | 'sale' | 'production' | 'stocktake' | 'receipt' | 'payment'
 export type DocStatus = 'draft' | 'posted'
-export type Channel = 'wholesale' | 'efood' | 'wolt' | 'box' | 'phone' | 'store'
+/** 'site': online παραγγελία από τη σελίδα του μαγαζιού (0005), μία πώληση ανά παραγγελία */
+export type Channel = 'wholesale' | 'efood' | 'wolt' | 'box' | 'phone' | 'store' | 'site'
 export type LineRole = 'item' | 'output' | 'input'
 
 export interface Company {
@@ -31,6 +32,10 @@ export interface Item {
   notes: string | null
   /** άλλα ονόματα με τα οποία το λένε (για τις φωνητικές εντολές) */
   aliases: string[]
+  /** φαίνεται στη σελίδα παραγγελιών (0005· λείπει σε βάση χωρίς το 0005) */
+  online?: boolean
+  /** περιγραφή για τον πελάτη του site */
+  description?: string | null
 }
 
 export interface Partner {

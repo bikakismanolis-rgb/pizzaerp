@@ -26,6 +26,12 @@ import { Stocktakes } from './pages/reports/Stocktakes'
 // «Πες το»: ξεχωριστό κομμάτι (parser + φωνή), φορτώνει όταν χρειαστεί
 const Voice = lazy(() => import('./pages/Voice').then((m) => ({ default: m.Voice })))
 const VoiceWords = lazy(() => import('./pages/VoiceWords').then((m) => ({ default: m.VoiceWords })))
+// online παραγγελίες: η κουζίνα και οι ρυθμίσεις του site
+const Orders = lazy(() => import('./pages/Orders').then((m) => ({ default: m.Orders })))
+const ShopSettings = lazy(() => import('./pages/ShopSettings').then((m) => ({ default: m.ShopSettings })))
+// η σελίδα του πελάτη: χωρίς login, χωρίς τίποτα από την υπόλοιπη εφαρμογή
+const Shop = lazy(() => import('./pages/shop/Shop').then((m) => ({ default: m.Shop })))
+const OrderStatusPage = lazy(() => import('./pages/shop/OrderStatusPage').then((m) => ({ default: m.OrderStatusPage })))
 
 function Gate() {
   const { session, loading } = useAuth()
@@ -49,6 +55,8 @@ function CompanyGate() {
           <Route index element={<Dashboard />} />
           <Route path="voice" element={<Suspense fallback={<Spinner />}><Voice /></Suspense>} />
           <Route path="voice/words" element={<Suspense fallback={<Spinner />}><VoiceWords /></Suspense>} />
+          <Route path="orders" element={<Suspense fallback={<Spinner />}><Orders /></Suspense>} />
+          <Route path="orders/settings" element={<Suspense fallback={<Spinner />}><ShopSettings /></Suspense>} />
           <Route path="daily-sales" element={<DailySales />} />
           <Route path="items" element={<Items />} />
           <Route path="items/:id" element={<ItemEdit />} />
@@ -70,14 +78,18 @@ function CompanyGate() {
   )
 }
 
+const pageSpinner = <div className="min-h-screen flex items-center justify-center"><Spinner /></div>
+
 export default function App() {
   return (
     <ToastProvider>
-      <AuthProvider>
-        <BrowserRouter>
-          <Gate />
-        </BrowserRouter>
-      </AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/s/:slug" element={<Suspense fallback={pageSpinner}><Shop /></Suspense>} />
+          <Route path="/s/:slug/o/:token" element={<Suspense fallback={pageSpinner}><OrderStatusPage /></Suspense>} />
+          <Route path="*" element={<AuthProvider><Gate /></AuthProvider>} />
+        </Routes>
+      </BrowserRouter>
     </ToastProvider>
   )
 }

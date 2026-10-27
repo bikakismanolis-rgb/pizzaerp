@@ -62,6 +62,8 @@ export function ItemEdit() {
 
   const set = <K extends keyof Item>(k: K, v: Item[K]) => setItem((s) => ({ ...s, [k]: v }))
   const hasBom = item.item_type !== 'raw'
+  // η βάση έχει online παραγγελίες (0005): αλλιώς ούτε φαίνονται ούτε στέλνονται τα πεδία
+  const hasOnline = 'online' in item || items.some((i) => 'online' in i)
 
   // Εκτίμηση κόστους συνταγής από τα τρέχοντα μέσα κόστη
   const outQty = toNum(bom.output_qty)
@@ -93,6 +95,10 @@ export function ItemEdit() {
         is_active: item.is_active,
         notes: item.notes?.trim() || null,
         aliases: parseAliases(aliasText),
+        ...(hasOnline ? {
+          online: item.item_type === 'finished' && !!item.online,
+          description: item.description?.trim() || null,
+        } : {}),
       }
       let itemId = item.id
       if (isNew) {
@@ -210,6 +216,20 @@ export function ItemEdit() {
               <input type="checkbox" checked={item.make_to_order} onChange={(e) => set('make_to_order', e.target.checked)} />
               <span>Φτιάχνεται κατά παραγγελία (λιανική): η πώληση καταναλώνει αυτόματα τη συνταγή</span>
             </label>
+          )}
+          {item.item_type === 'finished' && hasOnline && (
+            <>
+              <label className="text-sm flex items-center gap-2 sm:col-span-2">
+                <input type="checkbox" checked={!!item.online} onChange={(e) => set('online', e.target.checked)} />
+                <span>Στο site (φαίνεται στη σελίδα online παραγγελιών)</span>
+              </label>
+              {item.online && (
+                <Field label="Περιγραφή για τον πελάτη (προαιρετικό)" className="sm:col-span-2">
+                  <input className="input" maxLength={300} value={item.description ?? ''} onChange={(e) => set('description', e.target.value)}
+                    placeholder="π.χ. Σάλτσα ντομάτας, μοτσαρέλα, βασιλικός" />
+                </Field>
+              )}
+            </>
           )}
           {item.item_type === 'semi' && (
             <label className="text-sm flex items-start gap-2 sm:col-span-2 mt-1">

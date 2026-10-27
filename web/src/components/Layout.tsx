@@ -5,6 +5,7 @@ import { useCompany } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { supabase } from '../lib/supabase'
 import { CHANNEL_LABEL } from '../lib/labels'
+import { NEW_ORDERS_EVENT } from '../lib/online'
 import { fmtDate, today } from '../lib/format'
 import type { Channel } from '../lib/types'
 import { MicIcon, useToast } from './ui'
@@ -13,7 +14,7 @@ interface NavItem { to: string; label: string }
 interface NavGroup { title: string; items: NavItem[] }
 
 const NAV: NavGroup[] = [
-  { title: '', items: [{ to: '/voice', label: '🎤 Πες το' }, { to: '/', label: 'Αρχική' }] },
+  { title: '', items: [{ to: '/voice', label: '🎤 Πες το' }, { to: '/orders', label: '🛎️ Παραγγελίες' }, { to: '/', label: 'Αρχική' }] },
   {
     title: 'Κινήσεις',
     items: [
@@ -114,15 +115,49 @@ function useAutoCloseRunning(companyId: string | undefined) {
   }, [companyId, day, nonce])
 }
 
+// ---------------------------------------------------------------------
+// Νέες online παραγγελίες: αριθμός στο μενού, από όποια σελίδα κι αν είσαι.
+// Βάση χωρίς 0005: σιωπηλά τίποτα.
+// ---------------------------------------------------------------------
+function useNewOrders(companyId: string | undefined): number {
+  const [n, setN] = useState(0)
+  useEffect(() => {
+    if (!companyId) return
+    let alive = true
+    let off = false
+    const check = async () => {
+      if (off || document.visibilityState !== 'visible') return
+      const { count, error } = await supabase.from('online_order').select('id', { count: 'exact', head: true })
+        .eq('company_id', companyId).eq('status', 'new')
+      if (!alive) return
+      if (error) { off = true; return }
+      setN(count ?? 0)
+    }
+    void check()
+    const iv = window.setInterval(check, 30000)
+    document.addEventListener('visibilitychange', check)
+    const fromOrders = (e: Event) => { const v = (e as CustomEvent<number>).detail; if (typeof v === 'number') setN(v) }
+    window.addEventListener(NEW_ORDERS_EVENT, fromOrders)
+    return () => {
+      alive = false
+      window.clearInterval(iv)
+      document.removeEventListener('visibilitychange', check)
+      window.removeEventListener(NEW_ORDERS_EVENT, fromOrders)
+    }
+  }, [companyId])
+  return n
+}
+
 export function Layout() {
   const [open, setOpen] = useState(false)
   const { signOut, user } = useAuth()
   const { company, companies, select } = useCompany()
   const { pathname } = useLocation()
   useAutoCloseRunning(company?.id)
-  // το στρογγυλό μικρόφωνο: όχι στο «Πες το» και όχι στις Πωλήσεις ημέρας (έχουν
-  // δικό τους «Πες το» και τα +/− θα κρύβονταν από κάτω του)
-  const showMic = !/^\/voice\/?$/.test(pathname) && !pathname.startsWith('/daily-sales')
+  const newOrders = useNewOrders(company?.id)
+  // το στρογγυλό μικρόφωνο: όχι στο «Πες το», στις Πωλήσεις ημέρας και στις
+  // Παραγγελίες (έχουν δικό τους μικρόφωνο / τα κουμπιά θα κρύβονταν από κάτω του)
+  const showMic = !/^\/voice\/?$/.test(pathname) && !pathname.startsWith('/daily-sales') && !/^\/orders\/?$/.test(pathname)
 
   const nav = (
     <nav className="flex flex-col gap-4 p-3 text-sm">
@@ -140,6 +175,9 @@ export function Layout() {
               }
             >
               {it.label}
+              {it.to === '/orders' && newOrders > 0 && (
+                <span className="ml-2 inline-flex min-w-[1.25rem] justify-center rounded-full bg-amber-400 px-1.5 text-xs font-bold text-amber-950">{newOrders}</span>
+              )}
             </NavLink>
           ))}
         </div>
@@ -188,7 +226,10 @@ export function Layout() {
         <header className="md:hidden sticky top-0 z-30 bg-white border-b border-stone-200 flex items-center gap-3 px-2 py-1">
           <button className="btn-ghost h-11 w-11 p-0 text-xl" onClick={() => setOpen(true)} aria-label="Μενού">☰</button>
           <div className="font-bold text-red-700">🍕 Pizza ERP</div>
-          <div className="text-xs text-stone-500 truncate">{company?.name}</div>
+          <div className="text-xs text-stone-500 truncate flex-1">{company?.name}</div>
+          {newOrders > 0 && !pathname.startsWith('/orders') && (
+            <Link to="/orders" className="rounded-full bg-amber-400 text-amber-950 text-xs font-bold px-3 py-1.5 mr-1">🛎️ {newOrders} νέ{newOrders === 1 ? 'α' : 'ες'}</Link>
+          )}
         </header>
         <main className={'flex-1 p-3 md:p-6 max-w-7xl w-full mx-auto ' + (showMic ? 'pb-24 md:pb-6' : '')}>
           <Outlet />
