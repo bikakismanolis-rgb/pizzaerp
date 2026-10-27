@@ -1,7 +1,7 @@
 import { errMsg, supabase } from '../supabase'
 import { today } from '../format'
 import { callFunction } from '../edge'
-import { fiscalCode, loadFiscalSettings, makeFiscal, type FiscalDoc } from '../fiscal'
+import { fiscalCode, FISCAL_KIND_LABEL, loadFiscalSettings, makeFiscal, type FiscalDoc } from '../fiscal'
 import { clock, type OnlineOrder, type OnlineShop } from '../online'
 import type { OrderVoiceCommand } from './orderVoice'
 import { byNo, listNos, pickOrder, readText, STATUS_PHRASE } from './orderPick'
@@ -117,6 +117,12 @@ export async function rejectOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, reaso
 /** Απόδειξη για την παραγγελία (από τον πάροχο· «με το χέρι» μένει πρόχειρη για αριθμό) */
 export async function receiptOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promise<OrderResult & { doc?: FiscalDoc }> {
   try {
+    // ήδη έχει (και δεν πιστώθηκε): το λέμε, δεν είναι σφάλμα
+    const { data: had } = await supabase.from('fiscal_doc').select('*').eq('online_order_id', o.id)
+    const docs = (had ?? []) as FiscalDoc[]
+    const issued = docs.find((d) => (d.kind === 'receipt' || d.kind === 'invoice') && d.status === 'issued'
+      && !docs.some((c) => c.related_id === d.id && c.status === 'issued'))
+    if (issued) return { ok: true, doc: issued, text: `Η ${o.order_no} έχει ήδη ${FISCAL_KIND_LABEL[issued.kind].toLowerCase()} ${fiscalCode(issued)}.` }
     const d = await makeFiscal('receipt', { order: o.id })
     if (d.status === 'issued') return { ok: true, doc: d, text: `Βγήκε η απόδειξη ${fiscalCode(d)} για την ${o.order_no}.` }
     return { ok: true, doc: d, text: `Γράψε τον αριθμό της απόδειξης της ${o.order_no} (από την ταμειακή) στην οθόνη Παραγγελίες.` }
