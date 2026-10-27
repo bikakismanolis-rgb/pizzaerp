@@ -13,6 +13,11 @@ import { DocShell } from './DocShell'
 
 interface Row { key: number; item_id: string | null; qty: string; unit_price: string; discount_pct: string; vat_rate: string }
 
+/** η τελευταία καταχωρημένη πώληση στον πελάτη */
+interface LastSale { id: string; doc_no: number; doc_date: string; doc_line: { item_id: string; qty: number; line_no: number; role: string }[] }
+
+const NO_ID = '00000000-0000-0000-0000-000000000000'
+
 /** Αγορά ή Πώληση: κοινή δομή με γραμμές (είδος, ποσότητα, τιμή, ΦΠΑ) */
 export function TradeDoc({ docType }: { docType: DocType }) {
   const { id } = useParams()
@@ -78,8 +83,42 @@ export function TradeDoc({ docType }: { docType: DocType }) {
     return { net: round(net), vat: round(vat), gross: round(net + vat) }
   }, [rows])
 
+  // χονδρική: πελάτης (υπόλοιπο, τελευταία πώληση για «όπως την προηγούμενη»)
+  const wholesale = isSale && channel === 'wholesale'
+  const [cust, setCust] = useState<{ balance: number; last: LastSale | null } | null>(null)
+  useEffect(() => {
+    if (!wholesale || !partnerId) { setCust(null); return }
+    let alive = true
+    ;(async () => {
+      const [b, l] = await Promise.all([
+        supabase.from('v_partner_balance').select('customer_balance').eq('partner_id', partnerId).maybeSingle(),
+        supabase.from('doc').select('id, doc_no, doc_date, doc_line(item_id, qty, line_no, role)')
+          .eq('doc_type', 'sale').eq('partner_id', partnerId).eq('status', 'posted').neq('id', doc?.id ?? NO_ID)
+          .order('doc_date', { ascending: false }).order('doc_no', { ascending: false }).limit(1).maybeSingle(),
+      ])
+      if (!alive) return
+      setCust({ balance: Number(b.data?.customer_balance ?? 0), last: (l.data as LastSale | null) ?? null })
+    })()
+    return () => { alive = false }
+  }, [wholesale, partnerId, doc?.id, doc?.status])
+
+  const copyLast = () => {
+    const last = cust?.last
+    if (!last) return
+    const lines = last.doc_line.filter((l) => l.role === 'item').sort((a, b) => a.line_no - b.line_no)
+    const fresh = lines.map((l, i) => ({
+      key: seq + i, item_id: l.item_id, qty: String(l.qty), unit_price: '', discount_pct: '0',
+      vat_rate: String(itemById.get(l.item_id)?.vat_rate ?? 13),
+    }))
+    setSeq(seq + fresh.length)
+    setRows(fresh)
+    // τιμές του πελάτη όπως ισχύουν σήμερα (όχι οι παλιές της πώλησης)
+    for (const r of fresh) applyPrice(r.key, r.item_id)
+  }
+
   const validRows = rows.filter((r) => r.item_id && toNum(r.qty) > 0)
-  const canSave = validRows.length > 0 && (!isSale ? !!partnerId : true)
+  // αγορά: προμηθευτής· χονδρική: πελάτης (αλλιώς δεν φαίνεται τι χρωστάει)
+  const canSave = validRows.length > 0 && (!isSale || wholesale ? !!partnerId : true)
 
   const buildFields = (): Partial<Doc> => ({
     doc_date: date,
@@ -130,6 +169,22 @@ export function TradeDoc({ docType }: { docType: DocType }) {
           </Field>
         )}
         {!isSale && <Field label="Αρ. παραστατικού προμηθευτή"><input className="input" value={refNo} disabled={locked} onChange={(e) => setRefNo(e.target.value)} /></Field>}
+        {wholesale && !partnerId && !locked && (
+          <div className="sm:col-span-2 lg:col-span-4 text-xs text-amber-800">Η χονδρική θέλει πελάτη, για να γράφεται τι χρωστάει.</div>
+        )}
+        {wholesale && partnerId && cust && (
+          <div className="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 text-sm">
+            <span>
+              Υπόλοιπο πελάτη: <b className={cust.balance > 0 ? 'text-red-700' : ''}>{fmtMoney(cust.balance)}</b>
+              {cust.balance > 0 && <span className="text-stone-500"> (μας χρωστάει)</span>}
+            </span>
+            {cust.last && !locked && (
+              <button type="button" className="btn-secondary" onClick={copyLast}>
+                Όπως την προηγούμενη (ΠΩ-{cust.last.doc_no}, {fmtDate(cust.last.doc_date)})
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="card overflow-x-auto">
