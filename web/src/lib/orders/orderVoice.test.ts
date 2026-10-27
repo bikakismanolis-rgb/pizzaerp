@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'vitest'
 import { parseOrderVoice } from './orderVoice'
+import { ORDER_EXAMPLES } from './orderExamples'
+
+// οι φράσεις του οδηγού: ίδιο αποτέλεσμα στην οθόνη «Παραγγελίες» και στο «Πες το»
+describe('παραδείγματα του οδηγού', () => {
+  test.each(ORDER_EXAMPLES.map((e) => [e.say, e.expect] as const))('%s', (say, cmd) => {
+    expect(parseOrderVoice(say)).toEqual(cmd)
+    expect(parseOrderVoice(say, { strict: true })).toEqual(cmd)
+  })
+})
 
 describe('αποδοχή', () => {
   test.each([

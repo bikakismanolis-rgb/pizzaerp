@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { EXAMPLES } from './examples'
+import { ORDER_EXAMPLES } from '../orders/orderExamples'
 import guide from '../../../../docs/pes-to-odigos.html?raw'
 
 /**
@@ -34,5 +35,17 @@ describe('οδηγός «Πες το»', () => {
     const shown = new Set(cells)
     const missing = [...says].filter((s) => !shown.has(s))
     expect(missing).toEqual([])
+  })
+})
+
+// online παραγγελίες: δικός τους κατανοητής, δικά τους παραδείγματα
+const orderCells = [...guide.matchAll(/<td class="osay">([\s\S]*?)<\/td>/g)].map((m) => text(m[1]))
+const orderSays = new Set(ORDER_EXAMPLES.map((x) => x.say))
+
+describe('οδηγός: online παραγγελίες', () => {
+  it('ίδιες φράσεις με τα παραδείγματα (orderExamples.ts)', () => {
+    expect(orderCells.length).toBeGreaterThan(5)
+    expect(orderCells.filter((p) => !orderSays.has(p))).toEqual([])
+    expect([...orderSays].filter((s) => !orderCells.includes(s))).toEqual([])
   })
 })
