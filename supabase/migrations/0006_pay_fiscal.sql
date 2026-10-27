@@ -937,6 +937,16 @@ as $$
     from public.online_shop s where s.slug = lower(btrim(coalesce(p_slug, '')));
 $$;
 
+-- ρυθμίσεις πληρωμών μιας εταιρείας (για τα webhooks, που δεν έχουν παραγγελία)
+create or replace function public.shop_pay_settings(p_company uuid)
+returns jsonb
+language sql stable security definer
+set search_path = public
+as $$
+  select jsonb_build_object('company_id', s.company_id, 'slug', s.slug, 'pay_provider', s.pay_provider, 'pay_live', s.pay_live)
+    from public.online_shop s where s.company_id = p_company;
+$$;
+
 -- η παραγγελία για νέα / ξανά πληρωμή (με id ή με το token του πελάτη)
 create or replace function public.payment_context(p_order uuid default null, p_token uuid default null)
 returns jsonb
@@ -1654,12 +1664,12 @@ grant execute on function public.secret_set(uuid, text, text), public.secret_nam
   public.partner_order_link(uuid, text), public.b2b_seen(uuid) to authenticated;
 
 -- μόνο ο server
-revoke execute on function public.service_secrets(uuid), public.shop_checkout_info(text),
+revoke execute on function public.service_secrets(uuid), public.shop_checkout_info(text), public.shop_pay_settings(uuid),
   public.payment_context(uuid, uuid), public.payment_start(uuid, text, text, numeric), public.payment_abort(uuid, text),
   public.payment_confirm(text, text, text, numeric, jsonb), public.payment_failed(text, text, text, jsonb),
   public.payment_lookup(text, text), public.refunds_due(uuid), public.payment_refunded(uuid, boolean, text, jsonb),
   public.fiscal_begin(uuid), public.fiscal_done(uuid, boolean, jsonb) from public, anon, authenticated;
-grant execute on function public.service_secrets(uuid), public.shop_checkout_info(text),
+grant execute on function public.service_secrets(uuid), public.shop_checkout_info(text), public.shop_pay_settings(uuid),
   public.payment_context(uuid, uuid), public.payment_start(uuid, text, text, numeric), public.payment_abort(uuid, text),
   public.payment_confirm(text, text, text, numeric, jsonb), public.payment_failed(text, text, text, jsonb),
   public.payment_lookup(text, text), public.refunds_due(uuid), public.payment_refunded(uuid, boolean, text, jsonb),
