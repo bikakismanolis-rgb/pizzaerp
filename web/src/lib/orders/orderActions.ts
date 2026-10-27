@@ -18,6 +18,8 @@ export interface OrderResult {
   text: string
   /** για ανάγνωση φωναχτά (αν διαφέρει) */
   speech?: string
+  /** η παραγγελία που έγινε δεκτή (για τύπωμα) */
+  acceptedId?: string
 }
 
 /** Το site της εταιρείας· 'missing' = η βάση δεν έχει το 0005 */
@@ -83,13 +85,13 @@ export async function acceptOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, minut
   if (minutes) rememberMinutes(minutes)
   const base = `Δεκτή η ${o.order_no}${minutes ? `, σε ${minutes} λεπτά` : ''}.`
   if (r.stock_note) {
-    return { ok: true, text: `${base} Η πώληση ΠΩ-${r.doc_no} δεν πέρασε στην αποθήκη: ${r.stock_note}`, speech: `${base} Προσοχή, δεν πέρασε στην αποθήκη.` }
+    return { ok: true, acceptedId: o.id, text: `${base} Η πώληση ΠΩ-${r.doc_no} δεν πέρασε στην αποθήκη: ${r.stock_note}`, speech: `${base} Προσοχή, δεν πέρασε στην αποθήκη.` }
   }
   if (opts.autoReceipt) {
     const rc = await receiptOrder(o)
-    if (!rc.ok) return { ok: true, text: `${base} ${rc.text}`, speech: `${base} Η απόδειξη δεν βγήκε.` }
+    if (!rc.ok) return { ok: true, acceptedId: o.id, text: `${base} ${rc.text}`, speech: `${base} Η απόδειξη δεν βγήκε.` }
   }
-  return { ok: true, text: base }
+  return { ok: true, acceptedId: o.id, text: base }
 }
 
 /** Επιστροφή χρημάτων (online πληρωμή) μετά από απόρριψη / ακύρωση, ή ξανά */

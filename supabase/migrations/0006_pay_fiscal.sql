@@ -14,13 +14,18 @@
 -- πρόγραμμα και γράφεται εδώ ο αριθμός του. «test»: δοκιμαστικός πάροχος,
 -- χωρίς φορολογική αξία.
 --
+-- Επιβράβευση: έκπτωση στην πρώτη απευθείας παραγγελία (καλωσόρισμα) και
+-- σε κάθε Ν-οστή από το ίδιο τηλέφωνο, γραμμένη ως έκπτωση στις γραμμές
+-- της πώλησης. Πηγή της παραγγελίας (QR σακούλας, φυλλάδιο). Απόρρητο:
+-- διαγραφή στοιχείων πελάτη κατόπιν αιτήματος, και αυτόματα μετά από 24 μήνες.
+--
 -- Extras (π.χ. «extra μοτσαρέλα»): έτοιμα είδη με συνταγή που μπαίνουν
 -- πάνω σε πίτσα· γραμμές της παραγγελίας με parent_line. Υπηρεσίες (π.χ.
 -- μεταφορικά): είδη χωρίς απόθεμα· τα μεταφορικά γίνονται γραμμή της πώλησης.
 --
 -- Αλλάζει μία function του 0004: _post_sale (οι υπηρεσίες δεν κινούν
 -- αποθήκη). Και τις place_order / order_accept / order_reject /
--- order_cancel / shop_menu / order_status του 0005.
+-- order_cancel / shop_menu / order_status / shop_set_open του 0005.
 -- Ξανατρέχει χωρίς σφάλμα.
 -- =====================================================================
 
@@ -75,6 +80,18 @@ alter table public.online_shop drop constraint if exists online_shop_captcha_che
 alter table public.online_shop add constraint online_shop_captcha_check
   check (captcha_site_key is null or captcha_site_key ~ '^[A-Za-z0-9_-]{8,100}$');
 
+-- επιβράβευση (κλειστή εξ ορισμού): % στην πρώτη απευθείας παραγγελία ενός
+-- τηλεφώνου, και % σε κάθε loyalty_every-οστή (π.χ. κάθε 5η −20%)
+alter table public.online_shop add column if not exists welcome_pct numeric(4,1);
+alter table public.online_shop add column if not exists loyalty_every int;
+alter table public.online_shop add column if not exists loyalty_pct numeric(4,1);
+alter table public.online_shop drop constraint if exists online_shop_discount_check;
+alter table public.online_shop add constraint online_shop_discount_check
+  check ((welcome_pct is null or welcome_pct between 1 and 50)
+     and (loyalty_every is null or loyalty_every between 2 and 50)
+     and (loyalty_pct is null or loyalty_pct between 1 and 50)
+     and ((loyalty_every is null) = (loyalty_pct is null)));
+
 -- ---------------------------------------------------------------------
 -- Παραγγελίες: online πληρωμή, αναμονή πληρωμής, extras
 -- ---------------------------------------------------------------------
@@ -88,6 +105,21 @@ alter table public.online_order add constraint online_order_payment_check check 
 alter table public.online_order drop constraint if exists online_order_pay_status_check;
 alter table public.online_order add constraint online_order_pay_status_check
   check (pay_status in ('none','pending','failed','paid','refund_pending','refunded','refund_failed'));
+
+-- έκπτωση (καλωσόρισμα / επιβράβευση) στα είδη, όχι στα μεταφορικά:
+-- total = items_total - discount + delivery_fee. source: από πού ήρθε (QR)
+alter table public.online_order add column if not exists discount_kind text;
+alter table public.online_order add column if not exists discount_pct numeric(4,1) not null default 0;
+alter table public.online_order add column if not exists discount numeric(10,2) not null default 0;
+alter table public.online_order add column if not exists source text;
+alter table public.online_order drop constraint if exists online_order_discount_check;
+alter table public.online_order add constraint online_order_discount_check
+  check ((discount_kind is null and discount_pct = 0 and discount = 0)
+      or (discount_kind in ('welcome','loyalty') and discount_pct between 1 and 50 and discount >= 0));
+alter table public.online_order drop constraint if exists online_order_source_check;
+alter table public.online_order add constraint online_order_source_check
+  check (source is null or source ~ '^[a-z0-9_-]{1,20}$');
+create index if not exists online_order_company_created on public.online_order (company_id, created_at);
 
 alter table public.online_order_line add column if not exists parent_line int;
 
@@ -407,6 +439,12 @@ as $$
            'pay_online', s.pay_provider <> 'none',
            'pay_test', s.pay_provider = 'test',
            'captcha_site_key', s.captcha_site_key,
+           'welcome_pct', s.welcome_pct,
+           'loyalty_every', s.loyalty_every,
+           'loyalty_pct', s.loyalty_pct,
+           -- για τη σελίδα απορρήτου: ποιος κρατά τα στοιχεία
+           'company', (select jsonb_build_object('name', c.name, 'vat_no', c.vat_no, 'address', c.address)
+                         from public.company c where c.id = s.company_id),
            'items', coalesce((
              select jsonb_agg(jsonb_build_object(
                       'id', x.id, 'name', x.name, 'description', x.description,
@@ -433,8 +471,10 @@ $$;
 -- (μόνο μέσω server: η παραγγελία περιμένει την πληρωμή), CAPTCHA (αν το
 -- μαγαζί έχει κλειδί, μόνο μέσω server που έχει ελέγξει το token).
 -- p_order: { name, phone, mode, address, payment: cash|card|online, notes,
---   lines: [{ item_id, qty, note, extras: [item_id, ...] }] }
--- Επιστρέφει { token, order_no, order_id, total }.
+--   source, lines: [{ item_id, qty, note, extras: [item_id, ...] }] }
+-- Έκπτωση (αν το μαγαζί έχει): καλωσόρισμα στην πρώτη παραγγελία του
+-- τηλεφώνου, επιβράβευση σε κάθε Ν-οστή. Μία έκπτωση ανά παραγγελία.
+-- Επιστρέφει { token, order_no, order_id, total, discount }.
 -- =====================================================================
 create or replace function public.place_order(p_slug text, p_order jsonb)
 returns jsonb
@@ -469,6 +509,11 @@ declare
   v_parent   int;
   v_sum      numeric := 0;
   v_count    int := 0;
+  v_prev     int;
+  v_dkind    text;
+  v_dpct     numeric := 0;
+  v_disc     numeric := 0;
+  v_src      text;
   v_fee      numeric := 0;
   v_date     date := (now() at time zone 'Europe/Athens')::date;
   v_status   text := 'new';
@@ -555,6 +600,11 @@ begin
     end if;
     v_status := 'awaiting_payment';
     v_pstatus := 'pending';
+  end if;
+  -- από πού ήρθε (QR σακούλας, φυλλάδιο...)· άγνωστο = τίποτα
+  v_src := lower(btrim(coalesce(p_order->>'source', '')));
+  if v_src !~ '^[a-z0-9_-]{1,20}$' then
+    v_src := null;
   end if;
   v_notes := nullif(btrim(coalesce(p_order->>'notes', '')), '');
   if char_length(coalesce(v_notes, '')) > 300 then
@@ -665,13 +715,32 @@ begin
     raise exception 'Το κατάστημα έχει πολλές παραγγελίες αυτή τη στιγμή. Δοκίμασε σε λίγο ή πάρε τηλέφωνο.';
   end if;
 
+  -- επιβράβευση: πόσες έχει ήδη αυτό το τηλέφωνο (όχι απορριφθείσες,
+  -- ακυρωμένες, ληγμένες ή με αποτυχημένη / εγκαταλειμμένη πληρωμή)
+  if s.welcome_pct is not null or s.loyalty_every is not null then
+    select count(*) into v_prev from public.online_order
+     where company_id = s.company_id and phone = v_phone
+       and (status in ('new', 'accepted', 'done')
+            or (status = 'awaiting_payment' and pay_status = 'pending' and created_at > now() - interval '30 minutes'));
+    if v_prev = 0 and s.welcome_pct is not null then
+      v_dkind := 'welcome';
+      v_dpct := s.welcome_pct;
+    elsif s.loyalty_every is not null and (v_prev + 1) % s.loyalty_every = 0 then
+      v_dkind := 'loyalty';
+      v_dpct := s.loyalty_pct;
+    end if;
+    v_disc := round(v_sum * v_dpct / 100, 2);
+  end if;
+
   select coalesce(max(o.order_no), 0) + 1 into v_no
     from public.online_order o where o.company_id = s.company_id and o.order_date = v_date;
 
   insert into public.online_order (company_id, order_date, order_no, status, mode, payment, pay_status, customer_name, phone,
-                                   address, notes, items_total, delivery_fee, total, handled_by)
+                                   address, notes, items_total, delivery_fee, total, handled_by,
+                                   discount_kind, discount_pct, discount, source)
   values (s.company_id, v_date, v_no, v_status, v_mode, v_pay, v_pstatus, v_name, v_phone,
-          v_addr, v_notes, round(v_sum, 2), v_fee, round(v_sum + v_fee, 2), null)
+          v_addr, v_notes, round(v_sum, 2), v_fee, round(v_sum - v_disc + v_fee, 2), null,
+          v_dkind, v_dpct, v_disc, v_src)
   returning id, token into v_id, v_token;
 
   insert into public.online_order_line (company_id, order_id, line_no, item_id, name, qty, unit_price, note, parent_line)
@@ -679,7 +748,8 @@ begin
     from unnest(v_ids, v_names, v_qtys, v_prices, v_notesl, v_parents) with ordinality
          as x2(item_id, name, qty, price, note, parent, ord);
 
-  return jsonb_build_object('token', v_token, 'order_no', v_no, 'order_id', v_id, 'total', round(v_sum + v_fee, 2));
+  return jsonb_build_object('token', v_token, 'order_no', v_no, 'order_id', v_id,
+                            'total', round(v_sum - v_disc + v_fee, 2), 'discount', v_disc);
 end $$;
 
 -- =====================================================================
@@ -708,6 +778,15 @@ as $$
            'accepted_at', o.accepted_at,
            'done_at', o.done_at,
            'paid_at', o.paid_at,
+           'discount', o.discount,
+           'discount_pct', o.discount_pct,
+           'discount_kind', o.discount_kind,
+           -- κάρτα επιβράβευσης: πόσες μετράνε από αυτό το τηλέφωνο (και η τωρινή)
+           'loyalty', case when s.loyalty_every is not null and o.phone <> '' then jsonb_build_object(
+                        'every', s.loyalty_every, 'pct', s.loyalty_pct,
+                        'count', (select count(*) from public.online_order o2
+                                   where o2.company_id = o.company_id and o2.phone = o.phone
+                                     and o2.status in ('new', 'accepted', 'done'))) end,
            'receipt', (select f.public_token from public.fiscal_doc f
                         where f.online_order_id = o.id and f.kind = 'receipt' and f.status = 'issued'
                           and not exists (select 1 from public.fiscal_doc c
@@ -772,6 +851,11 @@ declare
   v_note text;
   v_del  uuid;
   v_vat  numeric;
+  v_diff numeric;
+  v_net  numeric;
+  v_got  numeric;
+  ln     record;
+  k      int;
 begin
   select * into o from public.online_order where id = p_order for update;
   if not found or not public.is_member(o.company_id) then
@@ -787,11 +871,15 @@ begin
   perform public._lock_postings(o.company_id);
   insert into public.doc (company_id, doc_type, doc_date, status, channel, notes)
   values (o.company_id, 'sale', o.order_date, 'draft', 'site',
-          format('Online παραγγελία #%s (%s)', o.order_no, to_char(o.order_date, 'DD/MM')))
+          format('Online παραγγελία #%s (%s)', o.order_no, to_char(o.order_date, 'DD/MM'))
+          || case o.discount_kind when 'welcome' then format(' · έκπτωση καλωσορίσματος %s%%', trim_scale(o.discount_pct))
+                                  when 'loyalty' then format(' · έκπτωση επιβράβευσης %s%%', trim_scale(o.discount_pct))
+                                  else '' end)
   returning id, doc_no into v_doc, v_no;
-  insert into public.doc_line (doc_id, line_no, role, item_id, qty, unit_price, vat_rate)
+  -- η έκπτωση στις γραμμές των ειδών (όχι στα μεταφορικά)
+  insert into public.doc_line (doc_id, line_no, role, item_id, qty, unit_price, discount_pct, vat_rate)
   select v_doc, row_number() over (order by min(ol.line_no)), 'item', ol.item_id, sum(ol.qty),
-         round(ol.unit_price / (1 + i.vat_rate / 100), 4), i.vat_rate
+         round(ol.unit_price / (1 + i.vat_rate / 100), 4), o.discount_pct, i.vat_rate
     from public.online_order_line ol
     join public.item i on i.id = ol.item_id
    where ol.order_id = o.id
@@ -802,6 +890,28 @@ begin
     insert into public.doc_line (doc_id, line_no, role, item_id, qty, unit_price, vat_rate)
     select v_doc, coalesce(max(dl.line_no), 0) + 1, 'item', v_del, 1, round(o.delivery_fee / (1 + v_vat / 100), 4), v_vat
       from public.doc_line dl where dl.doc_id = v_doc;
+  end if;
+
+  -- η πώληση (και η απόδειξη) = ακριβώς ό,τι πληρώνει ο πελάτης: τα
+  -- στρογγυλέματα του ΦΠΑ ανά γραμμή (και της έκπτωσης) μπαίνουν στην τιμή
+  -- (4 δεκαδικά) μιας γραμμής είδους, πριν από την καταχώρηση
+  select o.total - sum(dl.gross) into v_diff from public.doc_line dl where dl.doc_id = v_doc;
+  if v_diff <> 0 and abs(v_diff) <= 0.10 then
+    <<fix>>
+    for ln in select dl.id, dl.qty, dl.unit_price, dl.discount_pct, dl.vat_rate, dl.gross from public.doc_line dl
+               where dl.doc_id = v_doc and dl.item_id is distinct from v_del and dl.qty > 0 and dl.discount_pct < 100
+               order by dl.gross desc loop
+      for k in -2..2 loop
+        v_net := round((ln.gross + v_diff) / (1 + ln.vat_rate / 100), 2) + k * 0.01;
+        continue when v_net <= 0 or v_net + round(v_net * ln.vat_rate / 100, 2) <> ln.gross + v_diff;
+        update public.doc_line
+           set unit_price = round(v_net / (ln.qty * (1 - ln.discount_pct / 100)), 4)
+         where id = ln.id
+        returning gross into v_got;
+        exit fix when v_got = ln.gross + v_diff;
+        update public.doc_line set unit_price = ln.unit_price where id = ln.id;
+      end loop;
+    end loop;
   end if;
 
   begin
@@ -1635,8 +1745,133 @@ begin
 end $$;
 
 -- =====================================================================
+-- Πελάτες του site, πηγή παραγγελιών, απόρρητο
+-- =====================================================================
+
+-- από πού ήρθαν οι παραγγελίες του μήνα (QR σακούλας, φυλλάδιο, '' = χωρίς)
+create or replace view public.v_online_source
+with (security_invoker = true) as
+select o.company_id,
+       date_trunc('month', o.order_date)::date as month,
+       coalesce(o.source, '') as source,
+       count(*) as orders,
+       coalesce(sum(o.total), 0) as total
+  from public.online_order o
+ where o.status in ('accepted', 'done')
+ group by o.company_id, date_trunc('month', o.order_date), coalesce(o.source, '');
+revoke all on public.v_online_source from anon;
+grant select on public.v_online_source to authenticated;
+
+-- οι πελάτες του site ανά τηλέφωνο (για το μαγαζί· όχι όσοι διαγράφηκαν)
+create or replace view public.v_site_customer
+with (security_invoker = true) as
+select o.company_id,
+       o.phone,
+       (array_agg(o.customer_name order by o.created_at desc))[1] as name,
+       (array_agg(o.address order by o.created_at desc) filter (where o.address is not null))[1] as address,
+       count(*) filter (where o.status in ('accepted', 'done')) as orders,
+       coalesce(sum(o.total) filter (where o.status in ('accepted', 'done')), 0) as total,
+       min(o.created_at) as first_at,
+       max(o.created_at) as last_at
+  from public.online_order o
+ where o.phone <> ''
+ group by o.company_id, o.phone;
+revoke all on public.v_site_customer from anon;
+grant select on public.v_site_customer to authenticated;
+
+-- σβήνει τα στοιχεία των παραγγελιών που διάλεξε το where (όνομα, τηλέφωνο,
+-- διεύθυνση, σημειώσεις, ό,τι έστειλε ο πάροχος πληρωμών). Η πώληση μένει.
+create or replace function public._forget_orders(p_ids uuid[])
+returns int
+language plpgsql
+set search_path = public
+as $$
+declare n int;
+begin
+  update public.online_order_line set note = null where order_id = any(p_ids) and note is not null;
+  update public.online_payment set raw = null where order_id = any(p_ids) and raw is not null;
+  update public.online_order
+     set customer_name = 'Διαγράφηκε', phone = '', address = null, notes = null
+   where id = any(p_ids);
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- «σβήστε τα στοιχεία μου»: όλες οι παραγγελίες ενός τηλεφώνου (ο owner)
+create or replace function public.customer_forget(p_company uuid, p_phone text)
+returns int
+language plpgsql security definer
+set search_path = public
+as $$
+declare
+  v_phone text := btrim(coalesce(p_phone, ''));
+  v_ids   uuid[];
+begin
+  if p_company is null or not public.is_owner(p_company) then
+    raise exception 'Μόνο ο ιδιοκτήτης σβήνει στοιχεία πελατών';
+  end if;
+  if v_phone = '' then
+    raise exception 'Γράψε το τηλέφωνο του πελάτη';
+  end if;
+  if exists (select 1 from public.online_order where company_id = p_company and phone = v_phone
+               and status in ('awaiting_payment', 'new', 'accepted')) then
+    raise exception 'Ο πελάτης έχει παραγγελία σε εξέλιξη· σβήσε τα στοιχεία του όταν τελειώσει.';
+  end if;
+  select array_agg(id) into v_ids from public.online_order where company_id = p_company and phone = v_phone;
+  if v_ids is null then
+    raise exception 'Δεν βρέθηκαν παραγγελίες με αυτό το τηλέφωνο';
+  end if;
+  return public._forget_orders(v_ids);
+end $$;
+
+-- αυτόματα: στοιχεία πελατών παλιότερα από 24 μήνες (τρέχει όταν ανοίγει το site)
+create or replace function public._privacy_cleanup(p_company uuid)
+returns int
+language plpgsql
+set search_path = public
+as $$
+declare v_ids uuid[];
+begin
+  select array_agg(id) into v_ids from public.online_order
+   where company_id = p_company and created_at < now() - interval '24 months' and phone <> ''
+     and status not in ('awaiting_payment', 'new', 'accepted');
+  if v_ids is null then
+    return 0;
+  end if;
+  return public._forget_orders(v_ids);
+end $$;
+
+-- άνοιγμα / κλείσιμο του site (όπως στο 0005) + το καθάρισμα των παλιών
+create or replace function public.shop_set_open(p_company uuid, p_open boolean)
+returns timestamptz
+language plpgsql security definer
+set search_path = public
+as $$
+declare v_until timestamptz;
+begin
+  if p_company is null or not public.is_member(p_company) then
+    raise exception 'Δεν έχετε πρόσβαση στην εταιρεία';
+  end if;
+  update public.online_shop
+     set open_until = case when coalesce(p_open, false) then public._shop_open_until(closes_at) end
+   where company_id = p_company
+  returning open_until into v_until;
+  if not found then
+    raise exception 'Δεν έχει στηθεί ακόμα το site. Άνοιξε τις «Ρυθμίσεις site».';
+  end if;
+  if coalesce(p_open, false) then
+    perform public._privacy_cleanup(p_company);
+  end if;
+  return v_until;
+end $$;
+
+-- =====================================================================
 -- Δικαιώματα
 -- =====================================================================
+revoke execute on function public._forget_orders(uuid[]) from public, anon, authenticated;
+revoke execute on function public._privacy_cleanup(uuid) from public, anon, authenticated;
+revoke execute on function public.customer_forget(uuid, text) from public, anon;
+grant execute on function public.customer_forget(uuid, text) to authenticated;
 revoke execute on function public._is_service() from public, anon, authenticated;
 revoke execute on function public._delivery_item(uuid) from public, anon, authenticated;
 revoke execute on function public._order_refund_mark(uuid) from public, anon, authenticated;

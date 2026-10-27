@@ -4,7 +4,7 @@ import { useCompany } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { errMsg, supabase } from '../lib/supabase'
 import { fmtMoney, round, toNum } from '../lib/format'
-import { grossPrice, PAY_PROVIDER_LABEL, shopUrl, slugify, slugValid, type OnlineShop, type PayProvider } from '../lib/online'
+import { grossPrice, PAY_PROVIDER_LABEL, shopUrl, slugify, slugValid, SOURCES, type OnlineShop, type PayProvider } from '../lib/online'
 import { loadShop } from '../lib/orders/orderActions'
 import { qrSvg } from '../lib/qr'
 import { ErrorBox, Field, NumInput, PageTitle, Spinner, useToast } from '../components/ui'
@@ -127,16 +127,21 @@ export function ShopSettings() {
     await refresh()
   }
 
+  // QR ανά πηγή (?src=bag κλπ): η μηνιαία σύνοψη δείχνει από πού ήρθαν οι παραγγελίες
+  const [qrSource, setQrSource] = useState(SOURCES[0].value)
   const printFlyer = () => {
     if (!shop || shop === 'missing') return
-    const url = shopUrl(shop.slug)
+    const src = SOURCES.find((x) => x.value === qrSource) ?? SOURCES[0]
+    const url = `${shopUrl(shop.slug)}?src=${src.value}`
     const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string))
+    const perk = shop.welcome_pct ? `<div class="perk">−${Number(shop.welcome_pct)}% στην πρώτη σου απευθείας παραγγελία</div>` : ''
     const card = `
       <div class="card">
         <div class="title">${esc(shop.title)}</div>
-        <div class="big">Παράγγειλε απευθείας από εμάς</div>
+        <div class="big">${esc(src.flyer)}</div>
+        ${perk}
         <div class="qr">${qrSvg(url)}</div>
-        <div class="url">${esc(url.replace(/^https?:\/\//, ''))}</div>
+        <div class="url">${esc(shopUrl(shop.slug).replace(/^https?:\/\//, ''))}</div>
         ${shop.phone ? `<div class="phone">📞 ${esc(shop.phone)}</div>` : ''}
       </div>`
     const w = window.open('', '_blank')
@@ -149,6 +154,7 @@ export function ShopSettings() {
         .card { border: 1px dashed #999; border-radius: 4mm; padding: 6mm; text-align: center; break-inside: avoid; }
         .title { font-size: 16pt; font-weight: 700; color: #b91c1c; }
         .big { font-size: 13pt; margin: 2mm 0 3mm; }
+        .perk { font-size: 14pt; font-weight: 800; color: #047857; margin-bottom: 2mm; }
         .qr svg { width: 45mm; height: 45mm; }
         .url { font-size: 10pt; margin-top: 2mm; word-break: break-all; }
         .phone { font-size: 11pt; margin-top: 1mm; }
@@ -228,6 +234,9 @@ export function ShopSettings() {
                 <a className="text-red-700 underline break-all" href={shopUrl(shop.slug)} target="_blank" rel="noreferrer">{shopUrl(shop.slug)}</a>
                 <p className="text-stone-600 mt-2">Τύπωσε το QR και βάλ' το σε κάθε σακούλα που φεύγει από efood / Wolt: «την επόμενη φορά παράγγειλε απευθείας».</p>
                 <div className="flex flex-wrap gap-2 mt-2">
+                  <select className="input w-auto" value={qrSource} onChange={(e) => setQrSource(e.target.value)} aria-label="Για πού είναι τα QR">
+                    {SOURCES.map((x) => <option key={x.value} value={x.value}>{x.label}</option>)}
+                  </select>
                   <button className="btn-secondary" onClick={printFlyer}>Εκτύπωση QR (4 ανά σελίδα)</button>
                   <button className="btn-ghost" onClick={() => { void navigator.clipboard?.writeText(shopUrl(shop.slug)).then(() => toast.ok('Αντιγράφηκε')) }}>Αντιγραφή</button>
                 </div>
@@ -262,6 +271,10 @@ export function ShopSettings() {
               Extra (π.χ. «Extra μοτσαρέλα»): είδος με «Είναι extra» τσεκαρισμένο· ο πελάτης το διαλέγει πάνω στις πίτσες που φτιάχνονται κατά παραγγελία.
             </p>
           </div>
+
+          {shop && 'welcome_pct' in shop && company && (
+            <RewardsCard shop={shop} companyId={company.id} onSaved={(row) => { setShop(row); setForm(toForm(row)) }} />
+          )}
 
           {shop && shop.pay_provider !== undefined && company && (
             <PayCard shop={shop} companyId={company.id} onSaved={(row) => { setShop(row); setForm(toForm(row)) }} />
@@ -386,6 +399,63 @@ function PayCard({ shop, companyId, onSaved }: { shop: OnlineShop; companyId: st
       <p className="text-xs text-stone-500">
         Οι online πληρωμές και το CAPTCHA θέλουν τις Edge Functions ανεβασμένες στο Supabase (βλ. README). Τα κλειδιά δεν φαίνονται ποτέ ξανά στον browser.
       </p>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------
+// Επιβράβευση: καλωσόρισμα και κάθε Ν-οστή παραγγελία (0006)
+// ---------------------------------------------------------------------
+function RewardsCard({ shop, companyId, onSaved }: { shop: OnlineShop; companyId: string; onSaved: (s: OnlineShop) => void }) {
+  const toast = useToast()
+  const [welcome, setWelcome] = useState(shop.welcome_pct ? String(Number(shop.welcome_pct)) : '')
+  const [every, setEvery] = useState(shop.loyalty_every ? String(shop.loyalty_every) : '')
+  const [pct, setPct] = useState(shop.loyalty_pct ? String(Number(shop.loyalty_pct)) : '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const save = async () => {
+    setError(null)
+    const w = welcome.trim() === '' ? null : round(toNum(welcome), 1)
+    const e = every.trim() === '' ? null : Math.round(toNum(every))
+    const p = pct.trim() === '' ? null : round(toNum(pct), 1)
+    if (w !== null && (w < 1 || w > 50)) { setError('Το καλωσόρισμα θέλει από 1% ως 50% (ή κενό για καθόλου).'); return }
+    if ((e === null) !== (p === null)) { setError('Για επιβράβευση γράψε και κάθε πόσες παραγγελίες και πόσο %.'); return }
+    if (e !== null && (e < 2 || e > 50)) { setError('Κάθε 2 ως 50 παραγγελίες.'); return }
+    if (p !== null && (p < 1 || p > 50)) { setError('Η επιβράβευση θέλει από 1% ως 50%.'); return }
+    setBusy(true)
+    const { data, error: er } = await supabase.from('online_shop')
+      .update({ welcome_pct: w, loyalty_every: e, loyalty_pct: p }).eq('company_id', companyId).select('*')
+    setBusy(false)
+    if (er) { setError(errMsg(er)); return }
+    const row = (data ?? [])[0] as OnlineShop | undefined
+    if (!row) { setError('Μόνο ο ιδιοκτήτης αλλάζει την επιβράβευση.'); return }
+    onSaved(row)
+    toast.ok('Αποθηκεύτηκε η επιβράβευση')
+  }
+
+  return (
+    <div className="card p-4 grid gap-3">
+      <h2 className="font-semibold">Επιβράβευση πελατών</h2>
+      <p className="text-xs text-stone-600">
+        Για να προτιμούν το site από τις πλατφόρμες. Μετράει ανά τηλέφωνο, χωρίς λογαριασμό. Η έκπτωση είναι μόνο στα προϊόντα (όχι στα
+        μεταφορικά) και γράφεται ως έκπτωση στη γραμμή της πώλησης και της απόδειξης. Κενό = καθόλου.
+      </p>
+      <ErrorBox text={error} />
+      <Field label="Έκπτωση στην πρώτη απευθείας παραγγελία (%)">
+        <NumInput value={welcome} onChange={setWelcome} min={0} placeholder="π.χ. 10" />
+        <div className="text-xs text-stone-500 mt-1">Γράφεται και στα QR που τυπώνεις για τις σακούλες.</div>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Κάθε πόσες παραγγελίες">
+          <NumInput value={every} onChange={setEvery} min={0} placeholder="π.χ. 5" />
+        </Field>
+        <Field label="Έκπτωση (%)">
+          <NumInput value={pct} onChange={setPct} min={0} placeholder="π.χ. 20" />
+        </Field>
+      </div>
+      {every && pct && <p className="text-sm text-emerald-800">Ο πελάτης βλέπει: «⭐ Κάθε {every}η παραγγελία −{pct}%», με κάρτα σφραγίδων στη σελίδα της παραγγελίας.</p>}
+      <div className="flex justify-end"><button className="btn-primary" disabled={busy} onClick={save}>Αποθήκευση επιβράβευσης</button></div>
     </div>
   )
 }

@@ -11,6 +11,7 @@ export type OrderMode = 'delivery' | 'pickup'
 export type OrderPayment = 'cash' | 'card' | 'online'
 export type PayStatus = 'none' | 'pending' | 'failed' | 'paid' | 'refund_pending' | 'refunded' | 'refund_failed'
 export type PayProvider = 'none' | 'test' | 'viva' | 'stripe'
+export type DiscountKind = 'welcome' | 'loyalty'
 
 /** Ένα είδος του μενού όπως το βλέπει ο πελάτης (τιμή με ΦΠΑ) */
 export interface MenuItem {
@@ -44,6 +45,13 @@ export interface ShopMenu {
   pay_online?: boolean
   pay_test?: boolean
   captcha_site_key?: string | null
+  /** έκπτωση στην πρώτη απευθείας παραγγελία (%) */
+  welcome_pct?: number | null
+  /** κάθε πόσες παραγγελίες έκπτωση, και πόση (%) */
+  loyalty_every?: number | null
+  loyalty_pct?: number | null
+  /** για τη σελίδα απορρήτου */
+  company?: { name: string; vat_no: string | null; address: string | null } | null
 }
 
 export interface OrderInputLine { item_id: string; qty: number; note?: string | null; extras?: string[] }
@@ -55,6 +63,8 @@ export interface OrderInput {
   address: string | null
   payment: OrderPayment
   notes: string | null
+  /** από πού ήρθε (QR σακούλας, φυλλάδιο…) */
+  source?: string | null
   lines: OrderInputLine[]
 }
 
@@ -70,6 +80,11 @@ export interface OrderStatusInfo {
   /** public token της απόδειξης, αν έχει εκδοθεί */
   receipt?: string | null
   paid_at?: string | null
+  discount?: number
+  discount_pct?: number
+  discount_kind?: DiscountKind | null
+  /** κάρτα επιβράβευσης: πόσες παραγγελίες μετράνε από αυτό το τηλέφωνο (μαζί με αυτή) */
+  loyalty?: { every: number; pct: number; count: number } | null
   name: string
   items_total: number
   delivery_fee: number
@@ -103,6 +118,9 @@ export interface OnlineShop {
   pay_live?: boolean
   captcha_site_key?: string | null
   delivery_item_id?: string | null
+  welcome_pct?: number | null
+  loyalty_every?: number | null
+  loyalty_pct?: number | null
 }
 
 export interface OnlineOrderLine {
@@ -128,6 +146,10 @@ export interface OnlineOrder {
   payment: OrderPayment
   pay_status?: PayStatus
   paid_at?: string | null
+  discount_kind?: DiscountKind | null
+  discount_pct?: number
+  discount?: number
+  source?: string | null
   customer_name: string
   phone: string
   address: string | null
@@ -175,6 +197,29 @@ export const PAY_PROVIDER_LABEL: Record<PayProvider, string> = {
   test: 'Δοκιμαστική (χωρίς χρήματα)',
   viva: 'Viva.com (κάρτα, Apple/Google Pay, IRIS)',
   stripe: 'Stripe (κάρτα, Apple/Google Pay)',
+}
+
+export const DISCOUNT_LABEL: Record<DiscountKind, string> = { welcome: 'καλωσορίσματος', loyalty: 'επιβράβευσης' }
+
+/** Πηγές για τα QR (το ?src= της σελίδας του μαγαζιού) */
+export const SOURCES: { value: string; label: string; flyer: string }[] = [
+  { value: 'bag', label: 'Σακούλες (efood / Wolt)', flyer: 'Την επόμενη φορά παράγγειλε απευθείας από εμάς' },
+  { value: 'flyer', label: 'Φυλλάδια', flyer: 'Παράγγειλε απευθείας από εμάς' },
+  { value: 'shop', label: 'Στο μαγαζί (ταμείο, βιτρίνα)', flyer: 'Παράγγειλε online από εμάς' },
+]
+export const SOURCE_RE = /^[a-z0-9_-]{1,20}$/
+export const sourceLabel = (src: string): string => (src ? SOURCES.find((x) => x.value === src)?.label ?? src : 'Χωρίς QR')
+
+/**
+ * Κάρτα επιβράβευσης: count = παραγγελίες ως τώρα (μαζί με την τελευταία).
+ * filled: σφραγίδες στην κάρτα, nextDiscount: η επόμενη έχει έκπτωση,
+ * left: πόσες ακόμα ως την παραγγελία με έκπτωση (1 = η επόμενη).
+ */
+export function loyaltyCard(count: number, every: number): { filled: number; nextDiscount: boolean; left: number } {
+  const mod = count % every
+  const filled = count > 0 && mod === 0 ? every : mod
+  const left = every - mod
+  return { filled, nextDiscount: left === 1, left }
 }
 
 /** Χρόνοι αποδοχής που προτείνει η κουζίνα (λεπτά) */

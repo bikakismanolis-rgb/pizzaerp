@@ -81,7 +81,10 @@ export function ReceiptPage() {
           <tbody>
             {doc.lines.map((l) => (
               <tr key={l.line_no} className="border-b border-stone-100 align-top">
-                <td className="py-1">{l.description}<span className="text-stone-400"> {l.vat_rate}%</span></td>
+                <td className="py-1">
+                  {l.description}<span className="text-stone-400"> {l.vat_rate}%</span>
+                  {Number(l.discount_pct) > 0 && <span className="block text-xs text-emerald-800">έκπτωση {Number(l.discount_pct)}%</span>}
+                </td>
                 <td className="py-1 text-right tabular-nums">{fmtQty(l.qty)}</td>
                 <td className="py-1 text-right tabular-nums">{fmtMoney(l.qty ? l.gross / l.qty : 0)}</td>
                 <td className="py-1 text-right tabular-nums">{fmtMoney(l.gross)}</td>

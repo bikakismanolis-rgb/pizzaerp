@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { errMsg, supabase } from '../../lib/supabase'
 import { callFunction } from '../../lib/edge'
 import { fmtMoney } from '../../lib/format'
-import { clock, MODE_LABEL, nestLines, PAYMENT_LABEL, readyAt, type OrderStatusInfo } from '../../lib/online'
+import { clock, DISCOUNT_LABEL, loyaltyCard, MODE_LABEL, nestLines, PAYMENT_LABEL, readyAt, type OrderStatusInfo } from '../../lib/online'
 import { Centered, ShopHeader, telHref, UUID_RE } from './shared'
 
 /**
@@ -183,15 +183,42 @@ export function OrderStatusPage() {
               </li>
             ))}
           </ul>
+          {Number(info.discount) > 0 && info.discount_kind && (
+            <div className="flex justify-between pt-2 text-emerald-800">
+              <span>Έκπτωση {DISCOUNT_LABEL[info.discount_kind]} {Number(info.discount_pct)}%</span>
+              <span className="tabular-nums">−{fmtMoney(info.discount)}</span>
+            </div>
+          )}
           {Number(info.delivery_fee) > 0 && (
             <div className="flex justify-between pt-2"><span>Μεταφορικά</span><span className="tabular-nums">{fmtMoney(info.delivery_fee)}</span></div>
           )}
           <div className="flex justify-between pt-2 text-base font-semibold"><span>Σύνολο</span><span className="tabular-nums">{fmtMoney(info.total)}</span></div>
         </div>
 
+        {info.loyalty && ['new', 'accepted', 'done'].includes(info.status) && <LoyaltyCard {...info.loyalty} />}
+
         <div className="text-center mt-4">
           <Link className="btn-secondary" to={`/s/${info.shop.slug}`}>Νέα παραγγελία</Link>
         </div>
+      </div>
+    </div>
+  )
+}
+
+/** Κάρτα σφραγίδων: «Κάθε 5η παραγγελία −20%» */
+function LoyaltyCard({ every, pct, count }: { every: number; pct: number; count: number }) {
+  const k = loyaltyCard(Number(count), Number(every))
+  return (
+    <div className="card p-4 mt-3 text-center">
+      <div className="text-sm font-medium">⭐ Κάθε {every}η παραγγελία −{Number(pct)}%</div>
+      <div className="flex justify-center gap-1.5 my-2" aria-label={`${k.filled} από ${every}`}>
+        {Array.from({ length: Number(every) }, (_, i) => (
+          <span key={i} className={'h-6 w-6 rounded-full border-2 ' + (i < k.filled ? 'bg-amber-400 border-amber-500' : 'border-stone-300')} />
+        ))}
+      </div>
+      <div className="text-sm text-stone-600">
+        {k.nextDiscount ? <b className="text-emerald-800">Η επόμενη παραγγελία σου έχει −{Number(pct)}%!</b>
+          : `Μετά από ${k.left - 1} ακόμα, η επόμενη έχει −${Number(pct)}%.`}
       </div>
     </div>
   )

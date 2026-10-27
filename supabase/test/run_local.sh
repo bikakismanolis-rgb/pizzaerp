@@ -19,6 +19,7 @@ sudo -u postgres psql -d pizza_test -f supabase/test/01_scenario.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/02_voice.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/04_orders.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/05_pay_fiscal.sql
+sudo -u postgres psql -d pizza_test -f supabase/test/06_loyalty_privacy.sql
 # το 0004 και το 0005 πρέπει να ξανατρέχουν χωρίς σφάλμα, και πάνω σε
 # υπάρχοντα δεδομένα (και online πωλήσεις)
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_test -f supabase/migrations/0004_voice.sql
@@ -50,6 +51,7 @@ echo "OK: αναβάθμιση -> 0005, και ξανά 0004 / 0005"
 # παραστατικά (το 04 πάνω στο 0006 το τρέχει ήδη η νέα εγκατάσταση)
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_upgrade -f supabase/migrations/0006_pay_fiscal.sql
 sudo -u postgres psql -d pizza_upgrade -f supabase/test/05_pay_fiscal.sql
+sudo -u postgres psql -d pizza_upgrade -f supabase/test/06_loyalty_privacy.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_upgrade -f supabase/migrations/0005_online.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_upgrade -f supabase/migrations/0006_pay_fiscal.sql
 echo "OK: αναβάθμιση -> 0006, και ξανά 0005 / 0006"

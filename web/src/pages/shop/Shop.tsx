@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { errMsg, supabase } from '../../lib/supabase'
 import { callFunction } from '../../lib/edge'
 import { fmtMoney, round } from '../../lib/format'
 import {
-  MODE_LABEL, phoneLooksValid,
-  type MenuExtra, type MenuItem, type OrderInput, type OrderMode, type OrderPayment, type ShopMenu,
+  MODE_LABEL, phoneLooksValid, SOURCE_RE,
+  type MenuExtra, type MenuItem, type OrderInput, type OrderMode, type OrderPayment, type OrderStatusInfo, type ShopMenu,
 } from '../../lib/online'
 import { Centered, ShopHeader, readStore, telHref, writeStore } from './shared'
 import { Turnstile } from './Turnstile'
@@ -13,8 +13,9 @@ import { Turnstile } from './Turnstile'
 /**
  * Η σελίδα του μαγαζιού για τον πελάτη (/s/:slug): μενού, καλάθι (με extras
  * ανά πίτσα), στοιχεία, πληρωμή (μετρητά, κάρτα στην πόρτα, online).
- * Χωρίς λογαριασμό· τιμές και έλεγχοι στη βάση. Με CAPTCHA ή online
- * πληρωμή η παραγγελία περνά από τον server (Edge Function shop-checkout).
+ * Χωρίς λογαριασμό· τιμές, εκπτώσεις και έλεγχοι στη βάση. Με CAPTCHA ή
+ * online πληρωμή η παραγγελία περνά από τον server (Edge Function
+ * shop-checkout). ?src=bag (QR σακούλας κλπ): από πού ήρθε.
  */
 
 interface CartLine { key: string; item_id: string; qty: number; note: string; extras: string[] }
@@ -24,6 +25,8 @@ interface Customer { name: string; phone: string; address: string; mode: OrderMo
 const CUSTOMER_KEY = 'pizza-shop.customer'
 const cartKey = (slug: string) => `pizza-shop.cart.${slug}`
 export const lastOrderKey = (slug: string) => `pizza-shop.last.${slug}`
+const sourceKey = (slug: string) => `pizza-shop.src.${slug}`
+const digits = (p: string) => p.replace(/\D/g, '').replace(/^(00)?30(?=\d{10}$)/, '')
 
 const emptyCustomer: Customer = { name: '', phone: '', address: '', mode: 'delivery', payment: 'cash' }
 
@@ -42,6 +45,7 @@ function loadCart(slug: string): CartLine[] {
 
 export function Shop() {
   const { slug = '' } = useParams()
+  const [params] = useSearchParams()
   const nav = useNavigate()
   const [menu, setMenu] = useState<ShopMenu | null | undefined>(undefined)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -55,6 +59,14 @@ export function Shop() {
   const [captcha, setCaptcha] = useState<string | null>(null)
   const captchaReset = useRef<() => void>(() => {})
   const last = readStore<{ token: string; no: number } | null>('local', lastOrderKey(slug), null)
+  // κάρτα επιβράβευσης από την τελευταία παραγγελία της συσκευής (με το token της)
+  const [prev, setPrev] = useState<{ phone: string; count: number } | null>(null)
+
+  // QR σακούλας / φυλλάδιο: κρατιέται για όλη την επίσκεψη
+  useEffect(() => {
+    const src = (params.get('src') ?? '').toLowerCase()
+    if (SOURCE_RE.test(src)) writeStore('session', sourceKey(slug), src)
+  }, [params, slug])
 
   const load = useCallback(async () => {
     const { data, error: e } = await supabase.rpc('shop_menu', { p_slug: slug })
@@ -72,6 +84,17 @@ export function Shop() {
   }, [load])
   useEffect(() => { if (menu) document.title = menu.name }, [menu])
   useEffect(() => { writeStore('session', cartKey(slug), cart) }, [slug, cart])
+  const lastToken = last?.token
+  const asked = useRef<string | null>(null)
+  useEffect(() => {
+    if (step !== 'checkout' || !lastToken || !menu?.loyalty_every || asked.current === lastToken) return
+    asked.current = lastToken
+    const phone = readStore<Partial<Customer>>('local', CUSTOMER_KEY, {}).phone ?? ''
+    supabase.rpc('order_status', { p_token: lastToken }).then(({ data }) => {
+      const l = (data as OrderStatusInfo | null)?.loyalty
+      if (l && phone) setPrev({ phone: digits(phone), count: Number(l.count) })
+    })
+  }, [step, lastToken, menu?.loyalty_every])
 
   // τρόποι πληρωμής του μαγαζιού (βάση χωρίς 0006: μετρητά και κάρτα)
   const payments = useMemo(() => {
@@ -105,7 +128,12 @@ export function Shop() {
   const count = lines.reduce((s, l) => s + l.qty, 0)
   const itemsTotal = round(lines.reduce((s, l) => s + l.total, 0))
   const fee = menu && cust.mode === 'delivery' ? Number(menu.delivery_fee) : 0
-  const total = round(itemsTotal + fee)
+  // έκπτωση που ξέρουμε σίγουρα (επιβράβευση από την κάρτα)· την τελική τη βγάζει η βάση
+  const loyaltyNow = !!menu?.loyalty_every && !!prev && prev.phone === digits(cust.phone)
+    && (prev.count + 1) % Number(menu.loyalty_every) === 0
+  const discount = loyaltyNow ? round(itemsTotal * Number(menu!.loyalty_pct) / 100) : 0
+  const welcomeMaybe = !!menu?.welcome_pct && !last
+  const total = round(itemsTotal - discount + fee)
   const belowMin = !!menu && itemsTotal < Number(menu.min_order)
   const extrasOn = (it: MenuItem) => !!it.extras_ok && (menu?.extras?.length ?? 0) > 0
 
@@ -146,6 +174,7 @@ export function Shop() {
       address: cust.mode === 'delivery' ? cust.address.trim() : null,
       payment: cust.payment,
       notes: notes.trim() || null,
+      source: readStore<string | null>('session', sourceKey(slug), null),
       lines: lines.map((l) => ({ item_id: l.item.id, qty: l.qty, note: l.note.trim() || null, extras: l.extrasFull.map((x) => x.id) })),
     }
     setSending(true)
@@ -160,7 +189,11 @@ export function Shop() {
       }
       writeStore('local', CUSTOMER_KEY, cust)
       writeStore('local', lastOrderKey(slug), { token: r.token, no: r.order_no })
+      // και κατευθείαν στο storage: με τη μετάβαση η σελίδα φεύγει πριν γραφτεί το άδειο καλάθι
+      writeStore('session', cartKey(slug), [])
       setCart([])
+      setPrev(null)
+      asked.current = null
       if (r.redirect) {
         // πληρωμή στον πάροχο (ή στη δοκιμαστική σελίδα)· γυρίζει στη σελίδα της παραγγελίας
         window.location.assign(r.redirect)
@@ -200,6 +233,12 @@ export function Shop() {
           <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mt-3">
             Αυτή τη στιγμή δεν δεχόμαστε online παραγγελίες.
             {menu.phone && <> Πάρε μας τηλέφωνο: <a className="underline font-medium" href={telHref(menu.phone)}>{menu.phone}</a></>}
+          </div>
+        )}
+        {step === 'menu' && (menu.welcome_pct || menu.loyalty_every) && (
+          <div className="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm px-3 py-2 mt-3 grid gap-0.5">
+            {menu.welcome_pct && !last && <div>🎁 <b>−{Number(menu.welcome_pct)}%</b> στην πρώτη σου απευθείας παραγγελία</div>}
+            {menu.loyalty_every && <div>⭐ Κάθε <b>{menu.loyalty_every}η</b> παραγγελία <b>−{Number(menu.loyalty_pct)}%</b></div>}
           </div>
         )}
         {last && (
@@ -336,8 +375,18 @@ export function Shop() {
 
             <div className="card p-4 text-sm grid gap-1">
               <div className="flex justify-between"><span>Προϊόντα</span><span className="tabular-nums">{fmtMoney(itemsTotal)}</span></div>
+              {discount > 0 && (
+                <div className="flex justify-between text-emerald-800">
+                  <span>⭐ Επιβράβευση −{Number(menu.loyalty_pct)}% ({menu.loyalty_every}η παραγγελία)</span><span className="tabular-nums">−{fmtMoney(discount)}</span>
+                </div>
+              )}
               {fee > 0 && <div className="flex justify-between"><span>Μεταφορικά</span><span className="tabular-nums">{fmtMoney(fee)}</span></div>}
               <div className="flex justify-between text-base font-semibold"><span>Σύνολο</span><span className="tabular-nums">{fmtMoney(total)}</span></div>
+              {welcomeMaybe && (
+                <div className="text-emerald-800 text-xs mt-1">
+                  🎁 Αν είναι η πρώτη σου παραγγελία από αυτό το τηλέφωνο, έχεις −{Number(menu.welcome_pct)}% στα προϊόντα (θα το δεις στην επιβεβαίωση{cust.payment === 'online' ? ' και στην πληρωμή' : ''}).
+                </div>
+              )}
               {belowMin && <div className="text-amber-800 mt-1">Η ελάχιστη παραγγελία είναι {fmtMoney(menu.min_order)}.</div>}
             </div>
 
@@ -346,7 +395,8 @@ export function Shop() {
               {sending ? 'Αποστολή...' : cust.payment === 'online' ? `Πληρωμή · ${fmtMoney(total)}` : `Στείλε την παραγγελία · ${fmtMoney(total)}`}
             </button>
             <p className="text-xs text-stone-500 text-center -mt-2">
-              Το μαγαζί τη βλέπει αμέσως και σου λέει σε πόση ώρα θα είναι έτοιμη. Τα στοιχεία σου πάνε μόνο στο μαγαζί.
+              Το μαγαζί τη βλέπει αμέσως και σου λέει σε πόση ώρα θα είναι έτοιμη. Τα στοιχεία σου πάνε μόνο στο μαγαζί,
+              για την παραγγελία (<Link className="underline" to={`/s/${slug}/privacy`}>απόρρητο</Link>).
             </p>
           </form>
         )}

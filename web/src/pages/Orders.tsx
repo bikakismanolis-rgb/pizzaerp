@@ -4,8 +4,8 @@ import { useCompanyId } from '../context/CompanyContext'
 import { supabase } from '../lib/supabase'
 import { fmtDate, fmtMoney, monthStart } from '../lib/format'
 import {
-  clock, fmtPhone, minutesSince, MODE_LABEL, nestLines, NEW_ORDERS_EVENT, ORDER_STATUS_LABEL, orderSpeech, PAY_STATUS_LABEL, PAYMENT_LABEL,
-  READY_MINUTES, readyAt, REJECT_REASONS, shopIsOpen, shopUrl, type OnlineOrder, type OnlineShop,
+  clock, DISCOUNT_LABEL, fmtPhone, minutesSince, MODE_LABEL, nestLines, NEW_ORDERS_EVENT, ORDER_STATUS_LABEL, orderSpeech, PAY_STATUS_LABEL,
+  PAYMENT_LABEL, READY_MINUTES, readyAt, REJECT_REASONS, shopIsOpen, shopUrl, sourceLabel, type OnlineOrder, type OnlineShop,
 } from '../lib/online'
 import {
   acceptOrder, autoReceiptOn, cancelOrder, defaultMinutes, doneOrder, loadOrders, loadShop, refundOrder, rejectOrder, runOrderVoice,
@@ -14,6 +14,7 @@ import {
 import { listNos } from '../lib/orders/orderPick'
 import { parseOrderVoice } from '../lib/orders/orderVoice'
 import { beep, unlockAudio, useWakeLock } from '../lib/orders/alarm'
+import { autoPrintOn, printHtml, setAutoPrint, ticketHtml } from '../lib/orders/ticket'
 import { cancelSpeech, speak, ttsSupported, useSpeechRecognition } from '../lib/voice/speech'
 import { ErrorBox, MicIcon, Modal, PageTitle, Spinner, useToast } from '../components/ui'
 import { FiscalBox } from '../components/FiscalBox'
@@ -32,7 +33,7 @@ const POLL_MS = 20000
 
 const readSound = () => { try { return localStorage.getItem(SOUND_KEY) !== '0' } catch { return true } }
 
-interface Month { orders: number; total: number }
+interface Month { orders: number; total: number; sources: { source: string; orders: number; total: number }[] }
 
 /** Παραγγελία ξενοδοχείου από τον σύνδεσμο (0006): πρόχειρη πώληση χονδρικής */
 interface B2bOrder {
@@ -55,6 +56,7 @@ export function Orders() {
   const [orders, setOrders] = useState<OnlineOrder[]>([])
   const [b2b, setB2b] = useState<B2bOrder[]>([])
   const [autoReceipt, setAutoReceipt] = useState(false)
+  const [autoPrint, setAutoPrintState] = useState(autoPrintOn)
   const [month, setMonth] = useState<Month | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -91,15 +93,19 @@ export function Orders() {
       if (my !== loadSeq.current) return
       setShop(s)
       if (s === 'missing') return
-      const [os, m, bo] = await Promise.all([
+      const [os, m, bo, src] = await Promise.all([
         loadOrders(companyId),
         supabase.from('v_online_month').select('orders, total').eq('company_id', companyId).eq('month', monthStart()).maybeSingle(),
         loadB2b(companyId),
+        // βάση χωρίς το 0006: καμία πηγή
+        supabase.from('v_online_source').select('source, orders, total').eq('company_id', companyId).eq('month', monthStart()),
       ])
       if (my !== loadSeq.current) return
       setOrders(os)
       setB2b(bo)
-      setMonth(m.data ? { orders: Number(m.data.orders), total: Number(m.data.total) } : { orders: 0, total: 0 })
+      const sources = (src.error ? [] : (src.data ?? []) as Month['sources']).map((x) => ({ ...x, orders: Number(x.orders), total: Number(x.total) }))
+        .sort((a, b) => b.orders - a.orders)
+      setMonth(m.data ? { orders: Number(m.data.orders), total: Number(m.data.total), sources } : { orders: 0, total: 0, sources: [] })
       setError(null)
     } catch (e) {
       if (my === loadSeq.current) setError(e instanceof Error ? e.message : String(e))
@@ -225,6 +231,22 @@ export function Orders() {
 
   const toggleOpen = (open: boolean) => act('shop', () => setShopOpen(companyId, open))
 
+  // δελτίο κουζίνας: με το κουμπί, ή μόνο του στην αποδοχή (ρύθμιση της συσκευής)
+  const shopTitle = shop && shop !== 'missing' ? shop.title : ''
+  const printOrder = (o: OnlineOrder) => printHtml(ticketHtml(o, shopTitle))
+  const printFresh = async (id: string) => {
+    try {
+      const o = (await loadOrders(companyId)).find((x) => x.id === id)
+      if (o) printOrder(o)
+    } catch { /* το τύπωμα δεν είναι κρίσιμο */ }
+  }
+  const accept = (o: OnlineOrder, m: number) => act(o.id, async () => {
+    const r = await acceptOrder(o, m, { autoReceipt })
+    if (r.ok && autoPrint && r.acceptedId) void printFresh(r.acceptedId)
+    return r
+  })
+  const toggleAutoPrint = () => { const v = !autoPrint; setAutoPrintState(v); setAutoPrint(v) }
+
   const toggleSound = () => {
     const v = !soundOn
     setSoundOn(v)
@@ -250,6 +272,7 @@ export function Orders() {
     if (cmd.kind === 'stop') { cancelSpeech(); setAnswer(null); return }
     setBusy('voice')
     const r = await runOrderVoice(cmd, companyId)
+    if (r.ok && autoPrint && r.acceptedId) void printFresh(r.acceptedId)
     setBusy(null)
     setAnswer(r)
     if (r.text) void speak(r.speech ?? r.text)
@@ -284,6 +307,11 @@ export function Orders() {
         <button className={soundOn ? 'btn-secondary' : 'btn-danger'} onClick={toggleSound} aria-pressed={soundOn}>
           {soundOn ? '🔊 Ήχος' : '🔇 Χωρίς ήχο'}
         </button>
+        <button className="btn-secondary" onClick={toggleAutoPrint} aria-pressed={autoPrint}
+          title="Τύπωμα του δελτίου κουζίνας όταν γίνεται δεκτή μια παραγγελία (σε αυτή τη συσκευή)">
+          🖨 {autoPrint ? 'Τύπωμα στην αποδοχή' : 'Χωρίς τύπωμα'}
+        </button>
+        <Link to="/orders/customers" className="btn-secondary">Πελάτες</Link>
         <Link to="/orders/settings" className="btn-secondary">Ρυθμίσεις site</Link>
       </PageTitle>
       <ErrorBox text={error} />
@@ -344,13 +372,13 @@ export function Orders() {
       )}
       <div className="grid gap-3 lg:grid-cols-2 mb-6">
         {fresh.map((o) => (
-          <OrderCard key={o.id} o={o} now={now} tone="new">
+          <OrderCard key={o.id} o={o} now={now} tone="new" onPrint={() => printOrder(o)}>
             <div className="text-xs text-stone-500 mb-1">Δεκτή, έτοιμη σε:</div>
             <div className="flex flex-wrap gap-2">
               {READY_MINUTES.map((m) => (
                 <button key={m} disabled={!!busy}
                   className={(m === minutes ? 'btn-primary' : 'btn-secondary') + ' h-12 min-w-[3.5rem] text-base'}
-                  onClick={() => { setMinutes(m); void act(o.id, () => acceptOrder(o, m, { autoReceipt })) }}>
+                  onClick={() => { setMinutes(m); void accept(o, m) }}>
                   {m}'
                 </button>
               ))}
@@ -365,7 +393,7 @@ export function Orders() {
       {cooking.length === 0 && <p className="text-sm text-stone-500 mb-4">Τίποτα σε ετοιμασία.</p>}
       <div className="grid gap-3 lg:grid-cols-2 mb-6">
         {cooking.map((o) => (
-          <OrderCard key={o.id} o={o} now={now} tone="cooking">
+          <OrderCard key={o.id} o={o} now={now} tone="cooking" onPrint={() => printOrder(o)}>
             <div className="flex flex-wrap gap-2">
               <button className="btn-primary h-12 px-6 text-base" disabled={!!busy} onClick={() => act(o.id, () => doneOrder(o))}>
                 {o.mode === 'delivery' ? '🛵 Έφυγε' : '✅ Παραδόθηκε'}
@@ -415,6 +443,11 @@ export function Orders() {
           <div>
             Αυτόν τον μήνα από το site: <b>{month.orders}</b> {month.orders === 1 ? 'παραγγελία' : 'παραγγελίες'}, <b>{fmtMoney(month.total)}</b>.
           </div>
+          {month.sources.some((x) => x.source) && (
+            <div className="text-stone-600 mt-1">
+              Από πού: {month.sources.map((x) => `${sourceLabel(x.source)} ${x.orders}`).join(' · ')}
+            </div>
+          )}
           {shop.compare_fee_pct ? (
             <div className="text-emerald-800 mt-1">
               Σε πλατφόρμα με προμήθεια {Number(shop.compare_fee_pct)}% θα πλήρωνες περίπου <b>{fmtMoney(month.total * Number(shop.compare_fee_pct) / 100)}</b>.
@@ -468,7 +501,7 @@ export function Orders() {
 }
 
 // ---------------------------------------------------------------------
-function OrderCard({ o, now, tone, children }: { o: OnlineOrder; now: number; tone: 'new' | 'cooking'; children: ReactNode }) {
+function OrderCard({ o, now, tone, onPrint, children }: { o: OnlineOrder; now: number; tone: 'new' | 'cooking'; onPrint: () => void; children: ReactNode }) {
   const at = readyAt(o)
   const ago = minutesSince(o.created_at, now)
   return (
@@ -483,7 +516,13 @@ function OrderCard({ o, now, tone, children }: { o: OnlineOrder; now: number; to
           </div>
         </div>
         <div className="text-right text-sm">
-          <div className="font-semibold tabular-nums">{fmtMoney(o.total)}</div>
+          <div className="flex items-center justify-end gap-1">
+            <button className="btn-ghost px-1.5 py-0.5" onClick={onPrint} aria-label={`Τύπωσε την #${o.order_no}`} title="Τύπωσε">🖨</button>
+            <span className="font-semibold tabular-nums">{fmtMoney(o.total)}</span>
+          </div>
+          {Number(o.discount) > 0 && o.discount_kind && (
+            <div className="text-xs text-emerald-800">−{Number(o.discount_pct)}% {DISCOUNT_LABEL[o.discount_kind]}</div>
+          )}
           <div className={o.payment === 'online' ? 'text-emerald-800 font-semibold' : 'text-stone-600'}>
             {o.payment === 'online' ? (o.pay_status === 'paid' ? '💳 Πληρωμένη' : PAY_STATUS_LABEL[o.pay_status ?? 'none'] || 'Online') : PAYMENT_LABEL[o.payment]}
           </div>

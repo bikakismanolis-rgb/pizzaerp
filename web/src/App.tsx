@@ -10,6 +10,7 @@ const OrderStatusPage = lazy(() => import('./pages/shop/OrderStatusPage').then((
 const VivaReturn = lazy(() => import('./pages/shop/PayPages').then((m) => ({ default: m.VivaReturn })))
 const TestPay = lazy(() => import('./pages/shop/PayPages').then((m) => ({ default: m.TestPay })))
 const ReceiptPage = lazy(() => import('./pages/shop/ReceiptPage').then((m) => ({ default: m.ReceiptPage })))
+const PrivacyPage = lazy(() => import('./pages/shop/PrivacyPage').then((m) => ({ default: m.PrivacyPage })))
 const HotelOrder = lazy(() => import('./pages/shop/HotelOrder').then((m) => ({ default: m.HotelOrder })))
 
 const pageSpinner = <div className="min-h-screen flex items-center justify-center"><Spinner /></div>
@@ -22,6 +23,7 @@ export default function App() {
           <Routes>
             <Route path="/s/:slug" element={<Shop />} />
             <Route path="/s/:slug/o/:token" element={<OrderStatusPage />} />
+            <Route path="/s/:slug/privacy" element={<PrivacyPage />} />
             <Route path="/pay/viva" element={<VivaReturn />} />
             <Route path="/pay/test" element={<TestPay />} />
             <Route path="/r/:token" element={<ReceiptPage />} />
