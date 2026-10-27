@@ -209,7 +209,7 @@ tr { break-inside: avoid; page-break-inside: avoid; }
 th { text-align: left; font-size: 8.5pt; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; padding: 1.4mm 2.5mm; border-bottom: 1pt solid #d6d3d1; }
 td { padding: 2mm 2.5mm; vertical-align: top; border-bottom: 1pt solid var(--line); }
 tbody tr:last-child td { border-bottom: 0; }
-table.ex td.say { width: 50%; font-weight: 600; }
+table.ex td.say, table.ex td.osay, table.ex td.dsay { width: 50%; font-weight: 600; }
 table.ex td.say q { quotes: "«" "»"; }
 table.ex td.does { color: var(--ink); }
 table.ex { margin: 0 0 2mm; }
@@ -218,7 +218,7 @@ table.ex tr.tt th { text-transform: none; letter-spacing: 0; border-bottom: 1pt 
 table.ex tr.tt h3 { margin: 0; }
 table.ex tr.note td { color: var(--muted); font-size: 9.5pt; padding: 1.2mm 0 1.5mm; border-bottom: 0; }
 table.ex tr.note { break-after: avoid; page-break-after: avoid; }
-td.say .mi { display: inline-block; width: 3.2mm; height: 3.2mm; margin-right: 1.4mm; vertical-align: -0.4mm; }
+td.say .mi, td.osay .mi, td.dsay .mi { display: inline-block; width: 3.2mm; height: 3.2mm; margin-right: 1.4mm; vertical-align: -0.4mm; }
 
 table.walk td { vertical-align: middle; }
 table.walk td.where { width: 20%; color: var(--muted); font-weight: 600; }
@@ -333,7 +333,9 @@ table.fill tbody tr:last-child td { border-bottom: 1pt solid #a8a29e; }
 <li class="ch"><a href="#count" class="t"><span class="num">4</span>Απογραφή χώρο-χώρο</a><span class="dots"></span><span class="p">8</span></li>
 <li class="ch"><a href="#words" class="t"><span class="num">5</span>Οι δικές σας λέξεις και φράσεις</a><span class="dots"></span><span class="p">9</span></li>
 <li class="ch"><a href="#vocab" class="t"><span class="num">6</span>Ποια κανάλια και λέξεις καταλαβαίνει</a><span class="dots"></span><span class="p">10</span></li>
-<li class="ch"><a href="#ours" class="t"><span class="num">7</span>Οι λέξεις μας</a><span class="dots"></span><span class="p">11</span></li>
+<li class="ch"><a href="#orders" class="t"><span class="num">7</span>Online παραγγελίες (κουζίνα)</a><span class="dots"></span><span class="p">11</span></li>
+<li class="ch"><a href="#drivers" class="t"><span class="num">8</span>Διανομείς (στο κινητό τους)</a><span class="dots"></span><span class="p">12</span></li>
+<li class="ch"><a href="#ours" class="t"><span class="num">9</span>Οι λέξεις μας</a><span class="dots"></span><span class="p">13</span></li>
 
     </ol>
   </nav>
@@ -751,10 +753,85 @@ table.fill tbody tr:last-child td { border-bottom: 1pt solid #a8a29e; }
   </table>
 </section>
 
-<!-- ============================================================ 7. ΓΙΑ ΣΥΜΠΛΗΡΩΣΗ -->
+<!-- ============================================================ 7. ONLINE ΠΑΡΑΓΓΕΛΙΕΣ -->
+<div class="page-break"></div>
+<section id="orders">
+  <h2><span class="no">7</span>Online παραγγελίες (κουζίνα)</h2>
+  <p class="lead">
+    Οι παραγγελίες από τη σελίδα του μαγαζιού έρχονται στην οθόνη <span class="ui">Παραγγελίες</span>. Με κάθε νέα ακούγεται
+    «ντιν» και η εφαρμογή τη διαβάζει φωναχτά· όσο περιμένει απάντηση, ξαναχτυπάει. Απαντάς με ένα πάτημα
+    (<span class="kbd">20'</span>, <span class="kbd">30'</span>… ή <span class="kbd">Απόρριψη</span>) ή με φωνή, από την οθόνη
+    <span class="ui">Παραγγελίες</span> ή από το «Πες το».
+  </p>
+  <table class="ex" id="orders-say">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Τι λες</h3></th></tr>
+    </thead>
+    <tbody>
+      <tr class="note"><td colspan="2">Ο αριθμός είναι αυτός της παραγγελίας (#12). Αν δεν πεις αριθμό και περιμένουν δύο, σε ρωτάει ποια. Στην οθόνη Παραγγελίες, το «σταμάτα» κόβει την ανάγνωση.</td></tr>
+<tr class="z"><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«δεκτή η 12 σε 20 λεπτά»</td><td class="does">Αποδοχή της 12. Ο πελάτης βλέπει πότε θα είναι έτοιμη.</td></tr>
+<tr><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«δεκτή η 12 σε μισή ώρα»</td><td class="does">Το ίδιο, σε 30 λεπτά.</td></tr>
+<tr class="z"><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«δέξου την παραγγελία»</td><td class="does">Αποδοχή, αν περιμένει μόνο μία, με τον χρόνο που διάλεξες την τελευταία φορά.</td></tr>
+<tr><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«απόρριψε την 12 γιατί είμαστε γεμάτοι»</td><td class="does">Απόρριψη. Ο πελάτης βλέπει τον λόγο· δεν γράφεται τίποτα στην αποθήκη.</td></tr>
+<tr class="z"><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«έφυγε η 12»</td><td class="does">Η 12 έφυγε με τον διανομέα (ή την πήρε ο πελάτης).</td></tr>
+<tr><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«έφυγαν όλες οι παραγγελίες»</td><td class="does">Όσες ήταν σε ετοιμασία, έφυγαν.</td></tr>
+<tr class="z"><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«απόδειξη για την 12»</td><td class="does">Βγάζει την απόδειξη της 12 από τον πάροχο παραστατικών (αν έχει ρυθμιστεί).</td></tr>
+<tr><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«διάβασε τις παραγγελίες»</td><td class="does">Διαβάζει φωναχτά όσες περιμένουν απάντηση.</td></tr>
+<tr class="z"><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«έχουμε παραγγελίες;»</td><td class="does">Το ίδιο: λέει τι περιμένει και τι ετοιμάζεται.</td></tr>
+<tr><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«κλείσε τις παραγγελίες»</td><td class="does">Κλείνει το site τώρα (π.χ. γέμισε ο φούρνος). Κλείνει και μόνο του στην ώρα κλεισίματος.</td></tr>
+<tr class="z"><td class="osay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«άνοιξε τις παραγγελίες»</td><td class="does">Ανοίγει το site ως την ώρα κλεισίματος.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="box grey small">
+    <h4>Καλό να ξέρεις</h4>
+    <ul>
+      <li><b>Δεκτή</b> σημαίνει πώληση στο κανάλι <span class="ui">Site</span>: τα υλικά πέφτουν μόνα τους, όπως σε κάθε πίτσα κατά παραγγελία. <b>Απόρριψη</b>: τίποτα δεν γράφεται.</li>
+      <li><b>Ακύρωση</b> μετά την αποδοχή (π.χ. δεν ήταν σπίτι): από το κουμπί <span class="kbd">Ακύρωση…</span>. Η πώληση σβήνει και το απόθεμα γυρίζει, εκτός αν τη μέτρησε ήδη απογραφή.</li>
+      <li><b>Tablet της κουζίνας:</b> άνοιξε τις <span class="ui">Παραγγελίες</span> και άγγιξε μία φορά την οθόνη, αλλιώς ο browser δεν αφήνει ήχο. Η οθόνη δεν σβήνει όσο είναι ανοιχτή.</li>
+      <li>Αν γράφει <span class="ui">Δεν πέρασε στην αποθήκη</span> (π.χ. πίτσα χωρίς συνταγή), η παραγγελία έγινε κανονικά δεκτή· ο υπεύθυνος διορθώνει τη συνταγή και καταχωρεί την πώληση.</li>
+      <li><b>💳 Πληρωμένη:</b> ο πελάτης πλήρωσε online, ο διανομέας <b>δεν</b> παίρνει λεφτά. Αν την απορρίψεις ή την ακυρώσεις, τα χρήματα του γυρίζουν μόνα τους.</li>
+      <li><b>Extra</b> («+ Extra μοτσαρέλα») δίπλα στην πίτσα, η έκπτωση κάτω από το σύνολο. <b>🖨</b>: δελτίο κουζίνας (και μόνο του στην αποδοχή, αν το ανάψεις).</li>
+    </ul>
+  </div>
+</section>
+
+<div class="page-break"></div>
+<section id="drivers">
+  <h2><span class="no">8</span>Διανομείς (στο κινητό τους)</h2>
+  <p class="lead">
+    Κάθε διανομέας έχει δικό του σύνδεσμο (από τους <span class="ui">Διανομείς</span>, με QR). Τον ανοίγει στο κινητό και βλέπει
+    τις <span class="ui">Έτοιμες για διανομή</span> και όσες έχει <span class="ui">Στον δρόμο</span>. Πατάει
+    <span class="kbd">🛵 Την παίρνω</span>, <span class="kbd">🧭 Πλοήγηση</span>, <span class="kbd">✅ Παραδόθηκε</span>, ή το λέει
+    με το μικρόφωνο κάτω.
+  </p>
+  <table class="ex" id="drivers-say">
+    <thead>
+      <tr class="tt"><th colspan="2"><h3>Τι λες</h3></th></tr>
+    </thead>
+    <tbody>
+<tr class="z"><td class="dsay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«την παίρνω η 12»</td><td class="does">Παίρνεις την 12: φεύγει μαζί σου και ο πελάτης βλέπει ότι έρχεται.</td></tr>
+<tr><td class="dsay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«παραδόθηκε»</td><td class="does">Η παραγγελία που έχεις στον δρόμο παραδόθηκε (αν έχεις δύο, σε ρωτάει ποια).</td></tr>
+<tr class="z"><td class="dsay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«παραδόθηκε η 12»</td><td class="does">Η 12 παραδόθηκε· αν ήταν μετρητά, σου λέει πόσα κρατάς.</td></tr>
+<tr><td class="dsay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«δεν την πήρα η 12»</td><td class="does">Η 12 γυρίζει στις έτοιμες (π.χ. την πήρε άλλος).</td></tr>
+<tr class="z"><td class="dsay"><svg class="mi" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>«διάβασε»</td><td class="does">Διαβάζει φωναχτά πού πας και τι πληρώνει ο πελάτης.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="box grey small">
+    <h4>Καλό να ξέρεις</h4>
+    <ul>
+      <li><b>Μετρητά / Κάρτα / Πληρωμένη</b> γράφει σε κάθε παραγγελία τι εισπράττεις. Κάτω φαίνονται τα μετρητά που κρατάς· στο τέλος της βάρδιας το μαγαζί πατάει <span class="kbd">Εκκαθάριση</span>.</li>
+      <li>Από την κουζίνα: <span class="kbd">🛵 Νίκος</span> στην κάρτα της παραγγελίας τη στέλνει κατευθείαν σε εσένα.</li>
+      <li>Αν το μαγαζί το έχει ανοίξει, ο πελάτης βλέπει στον χάρτη πού είσαι, <b>μόνο</b> όσο του τη φέρνεις και όσο είναι ανοιχτή η σελίδα στο κινητό σου. Μόλις πατήσεις «Παραδόθηκε», η θέση σβήνει.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================ 9. ΓΙΑ ΣΥΜΠΛΗΡΩΣΗ -->
 <div class="page-break"></div>
 <section id="ours">
-  <h2><span class="no">7</span>Οι λέξεις μας</h2>
+  <h2><span class="no">9</span>Οι λέξεις μας</h2>
   <p class="fill-intro">
     Γράψτε εδώ τις λέξεις και τις φράσεις που λέτε στο μαγαζί. Μετά περάστε τες στη σελίδα
     <span class="ui">Λέξεις &amp; φράσεις</span> (ή πείτε <q>όταν λέω… εννοώ…</q>) και τσεκάρετε το κουτάκι.

@@ -18,6 +18,8 @@ import {
   setRefAt, shiftFlags, staleCount, stockLineViews, stockResultText, stockTotalsText, stocktakeList, suggestName, targetOf,
   visibleIssues, type RefSlot, type Solved, type StockLineView, type TallyRow,
 } from '../lib/voiceRules'
+import { parseOrderVoice } from '../lib/orders/orderVoice'
+import { runOrderVoice } from '../lib/orders/orderActions'
 import { CHANNEL_LABEL, COUNT_MOMENT, ITEM_TYPE_LABEL, TALLY_CHANNELS, UNITS, VAT_RATES, docCode } from '../lib/labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round, today } from '../lib/format'
 import { MicIcon, useToast } from '../components/ui'
@@ -299,6 +301,17 @@ export function Voice() {
     const text = raw.trim()
     if (!text || busy || execRef.current) return
     setInput('')
+    // online παραγγελίες («δεκτή η 12 σε 20 λεπτά», «έφυγε η 12»): μόνο καθαρές
+    // φράσεις, αμέσως (η κάρτα που περιμένει, αν υπάρχει, μένει)
+    const oc = parseOrderVoice(text, { strict: true })
+    if (oc) {
+      setThinking(true)
+      const r = await runOrderVoice(oc, companyId)
+      setThinking(false)
+      setAnswer({ text: r.text, tone: r.ok ? 'ok' : 'warn' })
+      say(r.speech ?? r.text)
+      return
+    }
     // ο κατάλογος δεν έχει φορτώσει ακόμα: αλλιώς όλα «δεν βρέθηκε» (και διπλά νέα είδη)
     if (!ready) {
       queuedRef.current = text

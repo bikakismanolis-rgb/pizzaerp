@@ -1,7 +1,8 @@
 export type ItemType = 'raw' | 'semi' | 'finished'
 export type DocType = 'purchase' | 'sale' | 'production' | 'stocktake' | 'receipt' | 'payment'
 export type DocStatus = 'draft' | 'posted'
-export type Channel = 'wholesale' | 'efood' | 'wolt' | 'box' | 'phone' | 'store'
+/** 'site': online παραγγελία από τη σελίδα του μαγαζιού (0005), μία πώληση ανά παραγγελία */
+export type Channel = 'wholesale' | 'efood' | 'wolt' | 'box' | 'phone' | 'store' | 'site'
 export type LineRole = 'item' | 'output' | 'input'
 
 export interface Company {
@@ -31,6 +32,14 @@ export interface Item {
   notes: string | null
   /** άλλα ονόματα με τα οποία το λένε (για τις φωνητικές εντολές) */
   aliases: string[]
+  /** φαίνεται στη σελίδα παραγγελιών (0005· λείπει σε βάση χωρίς το 0005) */
+  online?: boolean
+  /** περιγραφή για τον πελάτη του site */
+  description?: string | null
+  /** extra πάνω σε πίτσα (0006) */
+  is_extra?: boolean
+  /** υπηρεσία χωρίς απόθεμα, π.χ. μεταφορικά (0006) */
+  is_service?: boolean
 }
 
 export interface Partner {
@@ -49,6 +58,12 @@ export interface Partner {
   is_active: boolean
   /** άλλα ονόματα με τα οποία τον λένε (για τις φωνητικές εντολές) */
   aliases: string[]
+  /** στοιχεία τιμολόγησης (0006) */
+  tax_office?: string | null
+  postal_code?: string | null
+  country?: string
+  /** σύνδεσμος παραγγελιών του πελάτη (ξενοδοχείο), 0006 */
+  order_token?: string | null
 }
 
 /** Δική τους φράση για τις φωνητικές εντολές: "όταν λέω phrase εννοώ meaning" */

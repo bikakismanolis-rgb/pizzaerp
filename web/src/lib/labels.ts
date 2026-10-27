@@ -49,6 +49,7 @@ export const CHANNEL_LABEL: Record<Channel, string> = {
   box: 'box',
   phone: 'Τηλέφωνο',
   store: 'Μαγαζί',
+  site: 'Site',
 }
 
 /** Κανάλια λιανικής (μετρητής ημέρας), με τη σειρά που εμφανίζονται */

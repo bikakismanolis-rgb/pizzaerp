@@ -6,6 +6,8 @@ import { errMsg, supabase } from '../lib/supabase'
 import type { Partner, PartnerPrice } from '../lib/types'
 import { fmtDate, fmtMoney, parseAliases, toNum } from '../lib/format'
 import { DOC_TYPE_LABEL, docCode } from '../lib/labels'
+import { afmValid } from '../lib/fiscal'
+import { qrSvg } from '../lib/qr'
 import { Confirm, ErrorBox, Field, NumInput, PageTitle, Spinner, useToast, Empty } from '../components/ui'
 import { useLoad } from '../lib/useLoad'
 import type { DocType } from '../lib/types'
@@ -23,7 +25,7 @@ export function PartnerEdit() {
   const companyId = useCompanyId()
   const nav = useNavigate()
   const toast = useToast()
-  const { refresh } = useMaster()
+  const { refresh, partners } = useMaster()
   const [p, setP] = useState<Omit<Partner, 'id'> & { id?: string }>(emptyPartner(companyId))
   const [loading, setLoading] = useState(!isNew)
   const [busy, setBusy] = useState(false)
@@ -41,6 +43,14 @@ export function PartnerEdit() {
   }, [id, isNew])
 
   const set = <K extends keyof Partner>(k: K, v: Partner[K]) => setP((s) => ({ ...s, [k]: v }))
+  // στοιχεία τιμολόγησης και σύνδεσμος παραγγελιών (0006)
+  const has0006 = 'country' in p || partners.some((x) => 'country' in x)
+  const country = (p.country ?? 'GR').toUpperCase()
+  const vatClean = (v: string | null | undefined) => {
+    const t = (v ?? '').trim()
+    return country === 'GR' ? t.replace(/\s/g, '').replace(/^EL/i, '') : t
+  }
+  const afmWarn = has0006 && country === 'GR' && !!p.vat_no?.trim() && !afmValid(vatClean(p.vat_no))
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -48,9 +58,13 @@ export function PartnerEdit() {
     try {
       const payload = {
         company_id: companyId, code: p.code.trim(), name: p.name.trim(), is_customer: p.is_customer, is_supplier: p.is_supplier,
-        vat_no: p.vat_no?.trim() || null, phone: p.phone?.trim() || null, email: p.email?.trim() || null,
+        vat_no: vatClean(p.vat_no) || null, phone: p.phone?.trim() || null, email: p.email?.trim() || null,
         address: p.address?.trim() || null, city: p.city?.trim() || null, notes: p.notes?.trim() || null, is_active: p.is_active,
         aliases: parseAliases(aliasText),
+        ...(has0006 ? {
+          tax_office: p.tax_office?.trim() || null, postal_code: p.postal_code?.trim() || null,
+          country: /^[A-Z]{2}$/.test(country) ? country : 'GR',
+        } : {}),
       }
       if (isNew) {
         const { data, error: er } = await supabase.from('partner').insert(payload).select('id').single()
@@ -105,11 +119,21 @@ export function PartnerEdit() {
           <Field label="Άλλα ονόματα (πώς τον λέτε)" className="sm:col-span-2">
             <input className="input" value={aliasText} onChange={(e) => setAliasText(e.target.value)} placeholder="χωρισμένα με κόμμα, π.χ. μύλος, μυλωνάς" />
           </Field>
-          <Field label="ΑΦΜ"><input className="input" value={p.vat_no ?? ''} onChange={(e) => set('vat_no', e.target.value)} /></Field>
+          <Field label="ΑΦΜ">
+            <input className="input" value={p.vat_no ?? ''} onChange={(e) => set('vat_no', e.target.value)} />
+            {afmWarn && <div className="text-xs text-amber-800 mt-1">Το ΑΦΜ δεν φαίνεται σωστό· τιμολόγιο θέλει σωστό ΑΦΜ.</div>}
+          </Field>
+          {has0006 && <Field label="ΔΟΥ"><input className="input" value={p.tax_office ?? ''} onChange={(e) => set('tax_office', e.target.value)} /></Field>}
           <Field label="Τηλέφωνο"><input className="input" value={p.phone ?? ''} onChange={(e) => set('phone', e.target.value)} /></Field>
           <Field label="Email"><input className="input" type="email" value={p.email ?? ''} onChange={(e) => set('email', e.target.value)} /></Field>
           <Field label="Πόλη"><input className="input" value={p.city ?? ''} onChange={(e) => set('city', e.target.value)} /></Field>
           <Field label="Διεύθυνση" className="sm:col-span-2"><input className="input" value={p.address ?? ''} onChange={(e) => set('address', e.target.value)} /></Field>
+          {has0006 && (
+            <>
+              <Field label="ΤΚ"><input className="input" maxLength={10} value={p.postal_code ?? ''} onChange={(e) => set('postal_code', e.target.value)} /></Field>
+              <Field label="Χώρα (GR, CY, DE...)"><input className="input uppercase" maxLength={2} value={p.country ?? 'GR'} onChange={(e) => set('country', e.target.value.toUpperCase())} /></Field>
+            </>
+          )}
           <Field label="Σημειώσεις" className="sm:col-span-2"><textarea className="input" rows={2} value={p.notes ?? ''} onChange={(e) => set('notes', e.target.value)} /></Field>
           <label className="text-sm flex items-center gap-2 sm:col-span-2"><input type="checkbox" checked={p.is_active} onChange={(e) => set('is_active', e.target.checked)} /> Ενεργός</label>
           <div className="sm:col-span-2 flex justify-end">
@@ -118,10 +142,58 @@ export function PartnerEdit() {
         </form>
       )}
 
+      {tab === 'info' && has0006 && p.id && p.is_customer && (
+        <OrderLinkCard partnerId={p.id} token={p.order_token ?? null} onChange={(t) => set('order_token', t)} />
+      )}
+
       {tab === 'prices' && p.id && <PricesTab partnerId={p.id} />}
       {tab === 'ledger' && p.id && <LedgerTab partnerId={p.id} />}
 
       <Confirm open={askDelete} title="Διαγραφή" text={`Να διαγραφεί ο/η "${p.name}";`} onYes={doDelete} onNo={() => setAskDelete(false)} danger />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------
+// Σύνδεσμος παραγγελιών (ξενοδοχεία, καφέ): ο πελάτης παραγγέλνει μόνος του
+// ---------------------------------------------------------------------
+function OrderLinkCard({ partnerId, token, onChange }: { partnerId: string; token: string | null; onChange: (t: string | null) => void }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
+  const url = token ? `${window.location.origin}/h/${token}` : null
+  const act = async (action: 'get' | 'rotate' | 'off') => {
+    setBusy(true)
+    const { data, error } = await supabase.rpc('partner_order_link', { p_partner: partnerId, p_action: action })
+    setBusy(false)
+    if (error) { toast.err(errMsg(error)); return }
+    onChange((data as string | null) ?? null)
+    if (action === 'rotate') toast.ok('Νέος σύνδεσμος· ο παλιός δεν δουλεύει πια.')
+    if (action === 'off') toast.ok('Ο σύνδεσμος σταμάτησε.')
+  }
+  return (
+    <div className="card p-4 mt-4 max-w-3xl">
+      <h2 className="font-semibold mb-1">Σύνδεσμος παραγγελιών</h2>
+      <p className="text-sm text-stone-600 mb-3">
+        Ο πελάτης ανοίγει τον σύνδεσμο από το κινητό, βλέπει τα είδη με τις δικές του τιμές και στέλνει παραγγελία.
+        Γίνεται πρόχειρη πώληση χονδρικής· εσύ την ελέγχεις και την καταχωρείς (εμφανίζεται στις Παραγγελίες).
+      </p>
+      {!url ? (
+        <button className="btn-primary" disabled={busy} onClick={() => act('get')}>Φτιάξε σύνδεσμο</button>
+      ) : (
+        <div className="flex flex-wrap gap-4 items-start">
+          <div className="w-28 shrink-0" dangerouslySetInnerHTML={{ __html: qrSvg(url) }} aria-label="QR του συνδέσμου" />
+          <div className="flex-1 min-w-[12rem] text-sm">
+            <a className="text-red-700 underline break-all" href={url} target="_blank" rel="noreferrer">{url}</a>
+            <div className="flex flex-wrap gap-2 mt-2">
+              <button className="btn-secondary" onClick={() => { void navigator.clipboard?.writeText(url).then(() => toast.ok('Αντιγράφηκε')) }}>Αντιγραφή</button>
+              <a className="btn-secondary" href={`https://wa.me/?text=${encodeURIComponent('Παραγγελίες από εδώ: ' + url)}`} target="_blank" rel="noreferrer">Στείλε με WhatsApp</a>
+              <button className="btn-ghost" disabled={busy} onClick={() => act('rotate')}>Νέος σύνδεσμος</button>
+              <button className="btn-ghost" disabled={busy} onClick={() => act('off')}>Σταμάτα</button>
+            </div>
+            <p className="text-xs text-stone-500 mt-2">Όποιος έχει τον σύνδεσμο μπορεί να στείλει παραγγελία· αν τον δώσατε λάθος, πάτα «Νέος σύνδεσμος».</p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
