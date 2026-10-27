@@ -7,6 +7,7 @@ import { CHANNEL_LABEL } from '../../lib/labels'
 import { fmtCost, fmtDate, fmtMoney, round, toNum, today } from '../../lib/format'
 import { ErrorBox, Field, NumInput, Spinner } from '../../components/ui'
 import { ItemPicker, PartnerPicker } from '../../components/Pickers'
+import { FiscalBox } from '../../components/FiscalBox'
 import type { LineInput } from '../../lib/docs'
 import { useDocEditor } from './useDocEditor'
 import { DocShell } from './DocShell'
@@ -230,6 +231,15 @@ export function TradeDoc({ docType }: { docType: DocType }) {
         <div>ΦΠΑ: <b className="tabular-nums">{fmtMoney(totals.vat)}</b></div>
         <div className="text-base">Σύνολο: <b className="tabular-nums">{fmtMoney(totals.gross)}</b></div>
       </div>
+
+      {/* παραστατικό: χονδρική (τιμολόγιο) και online παραγγελία (απόδειξη)· οι πωλήσεις
+          ημέρας efood / Wolt / ταμείου είναι σύνολα, οι αποδείξεις τους βγαίνουν από την ταμειακή */}
+      {isSale && posted && doc && (channel === 'wholesale' || channel === 'site') && (
+        <div className="card p-4 mt-3">
+          <h3 className="font-semibold mb-2">Παραστατικό</h3>
+          <FiscalBox saleDoc={doc.id} canInvoice={channel === 'wholesale' && !!partnerId} />
+        </div>
+      )}
 
       <div className="card p-4 mt-3">
         <Field label="Σημειώσεις"><textarea className="input" rows={2} value={notes} disabled={locked} onChange={(e) => setNotes(e.target.value)} /></Field>

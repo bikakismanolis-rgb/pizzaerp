@@ -1,4 +1,8 @@
+import type { ReactNode } from 'react'
+
 /** Κοινά της σελίδας του πελάτη (χωρίς login, χωρίς τα contexts της εφαρμογής) */
+
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 type StoreKind = 'local' | 'session'
 
@@ -38,3 +42,9 @@ export function ShopHeader({ name, phone, open }: { name: string; phone: string 
     </header>
   )
 }
+
+export function Centered({ children }: { children: ReactNode }) {
+  return <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center text-stone-700">{children}</div>
+}
+
+export const telHref = (phone: string) => `tel:${phone.replace(/\s/g, '')}`

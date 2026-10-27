@@ -2,26 +2,28 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { Link } from 'react-router-dom'
 import { useCompanyId } from '../context/CompanyContext'
 import { supabase } from '../lib/supabase'
-import { fmtMoney, monthStart } from '../lib/format'
+import { fmtDate, fmtMoney, monthStart } from '../lib/format'
 import {
-  clock, fmtPhone, minutesSince, MODE_LABEL, NEW_ORDERS_EVENT, ORDER_STATUS_LABEL, orderSpeech, PAYMENT_LABEL, READY_MINUTES, readyAt,
-  REJECT_REASONS, shopIsOpen, shopUrl, type OnlineOrder, type OnlineShop,
+  clock, fmtPhone, minutesSince, MODE_LABEL, nestLines, NEW_ORDERS_EVENT, ORDER_STATUS_LABEL, orderSpeech, PAY_STATUS_LABEL, PAYMENT_LABEL,
+  READY_MINUTES, readyAt, REJECT_REASONS, shopIsOpen, shopUrl, type OnlineOrder, type OnlineShop,
 } from '../lib/online'
 import {
-  acceptOrder, cancelOrder, defaultMinutes, doneOrder, loadOrders, loadShop, rejectOrder, runOrderVoice, setShopOpen,
-  type OrderResult,
+  acceptOrder, autoReceiptOn, cancelOrder, defaultMinutes, doneOrder, loadOrders, loadShop, refundOrder, rejectOrder, runOrderVoice,
+  setShopOpen, type OrderResult,
 } from '../lib/orders/orderActions'
 import { listNos } from '../lib/orders/orderPick'
 import { parseOrderVoice } from '../lib/orders/orderVoice'
 import { beep, unlockAudio, useWakeLock } from '../lib/orders/alarm'
 import { cancelSpeech, speak, ttsSupported, useSpeechRecognition } from '../lib/voice/speech'
 import { ErrorBox, MicIcon, Modal, PageTitle, Spinner, useToast } from '../components/ui'
+import { FiscalBox } from '../components/FiscalBox'
 
 /**
  * Οθόνη της κουζίνας για τις online παραγγελίες. Ζωντανή (Realtime, και
  * ανανέωση κάθε 20'' για σιγουριά). Νέα παραγγελία: «ντιν» και ανάγνωση
  * φωναχτά, υπενθύμιση όσο περιμένει. Όλα και με φωνή: «δεκτή η 12 σε 20
- * λεπτά», «έφυγε η 12», «διάβασε», «κλείσε τις παραγγελίες».
+ * λεπτά», «έφυγε η 12», «απόδειξη για την 12», «διάβασε», «κλείσε τις
+ * παραγγελίες». Από κάτω και οι παραγγελίες των ξενοδοχείων (σύνδεσμος).
  */
 
 const SOUND_KEY = 'pizza-erp.orders-sound'
@@ -32,11 +34,27 @@ const readSound = () => { try { return localStorage.getItem(SOUND_KEY) !== '0' }
 
 interface Month { orders: number; total: number }
 
+/** Παραγγελία ξενοδοχείου από τον σύνδεσμο (0006): πρόχειρη πώληση χονδρικής */
+interface B2bOrder {
+  id: string; created_at: string; wanted_date: string | null; note: string | null; doc_id: string | null
+  partner: { name: string } | null; doc: { doc_no: number; total_gross: number; status: string } | null
+}
+
+async function loadB2b(companyId: string): Promise<B2bOrder[]> {
+  const { data, error } = await supabase.from('b2b_order')
+    .select('id, created_at, wanted_date, note, doc_id, partner(name), doc(doc_no, total_gross, status)')
+    .eq('company_id', companyId).is('seen_at', null).order('created_at').limit(50)
+  if (error) return [] // βάση χωρίς το 0006
+  return (data ?? []) as unknown as B2bOrder[]
+}
+
 export function Orders() {
   const companyId = useCompanyId()
   const toast = useToast()
   const [shop, setShop] = useState<OnlineShop | null | 'missing' | undefined>(undefined)
   const [orders, setOrders] = useState<OnlineOrder[]>([])
+  const [b2b, setB2b] = useState<B2bOrder[]>([])
+  const [autoReceipt, setAutoReceipt] = useState(false)
   const [month, setMonth] = useState<Month | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -51,6 +69,7 @@ export function Orders() {
   const [minutes, setMinutes] = useState(defaultMinutes)
   const sr = useSpeechRecognition()
   const seen = useRef<Set<string> | null>(null)
+  const seenB2b = useRef<Set<string> | null>(null)
   // σε refs: οι χρονομετρητές δεν ξαναστήνονται σε κάθε ανανέωση
   const soundRef = useRef(soundOn)
   soundRef.current = soundOn && touched
@@ -72,12 +91,14 @@ export function Orders() {
       if (my !== loadSeq.current) return
       setShop(s)
       if (s === 'missing') return
-      const [os, m] = await Promise.all([
+      const [os, m, bo] = await Promise.all([
         loadOrders(companyId),
         supabase.from('v_online_month').select('orders, total').eq('company_id', companyId).eq('month', monthStart()).maybeSingle(),
+        loadB2b(companyId),
       ])
       if (my !== loadSeq.current) return
       setOrders(os)
+      setB2b(bo)
       setMonth(m.data ? { orders: Number(m.data.orders), total: Number(m.data.total) } : { orders: 0, total: 0 })
       setError(null)
     } catch (e) {
@@ -86,6 +107,7 @@ export function Orders() {
   }, [companyId])
 
   useEffect(() => { load() }, [load])
+  useEffect(() => { if (companyId) autoReceiptOn(companyId).then(setAutoReceipt) }, [companyId])
   const timer = useRef<number | undefined>(undefined)
   const loadSoon = useCallback(() => {
     window.clearTimeout(timer.current)
@@ -126,21 +148,36 @@ export function Orders() {
 
   const fresh = useMemo(() => orders.filter((o) => o.status === 'new'), [orders])
   const cooking = useMemo(() => orders.filter((o) => o.status === 'accepted'), [orders])
-  const finished = useMemo(() => orders.filter((o) => o.status !== 'new' && o.status !== 'accepted').reverse(), [orders])
+  const finished = useMemo(() => orders.filter((o) => ['done', 'rejected', 'cancelled'].includes(o.status)).reverse(), [orders])
+  // πληρώνονται online τώρα: η κουζίνα τις βλέπει μόλις πληρωθούν
+  const paying = useMemo(() => orders.filter((o) => o.status === 'awaiting_payment'), [orders])
 
-  // νέες παραγγελίες: ντιν + ανάγνωση (όχι για όσες υπήρχαν όταν άνοιξε η σελίδα)
+  // νέες παραγγελίες: ντιν + ανάγνωση (όχι για όσες υπήρχαν όταν άνοιξε η
+  // σελίδα). Όσες περιμένουν πληρωμή δεν μετράνε ως «είδα» ακόμα.
   useEffect(() => {
     if (shop === undefined || shop === 'missing') return
+    const shown = orders.filter((o) => o.status !== 'awaiting_payment')
     if (seen.current === null) {
-      seen.current = new Set(orders.map((o) => o.id))
+      seen.current = new Set(shown.map((o) => o.id))
       return
     }
     const arrivals = fresh.filter((o) => !seen.current!.has(o.id))
-    for (const o of orders) seen.current.add(o.id)
+    for (const o of shown) seen.current.add(o.id)
     if (arrivals.length === 0) return
     if (soundOn) beep()
     window.setTimeout(() => say(arrivals.map(orderSpeech).join(' ')), 900)
   }, [orders, fresh, shop, soundOn, say])
+
+  // ξενοδοχεία: ένα «ντιν» και το όνομα
+  useEffect(() => {
+    if (shop === undefined || shop === 'missing') return
+    if (seenB2b.current === null) { seenB2b.current = new Set(b2b.map((b) => b.id)); return }
+    const arrivals = b2b.filter((b) => !seenB2b.current!.has(b.id))
+    for (const b of b2b) seenB2b.current.add(b.id)
+    if (arrivals.length === 0) return
+    if (soundOn) beep(1)
+    window.setTimeout(() => say(arrivals.map((b) => `Νέα παραγγελία χονδρικής από ${b.partner?.name ?? 'πελάτη'}.`).join(' ')), 900)
+  }, [b2b, shop, soundOn, say])
 
   // όσο περιμένει νέα παραγγελία: υπενθύμιση
   const freshRef = useRef(fresh)
@@ -205,7 +242,7 @@ export function Orders() {
     setHeard(t)
     const cmd = parseOrderVoice(t)
     if (!cmd) {
-      const m = 'Δεν κατάλαβα. Πες π.χ. «δεκτή η 12 σε 20 λεπτά», «απόρριψε την 12», «έφυγε η 12», «διάβασε», «κλείσε τις παραγγελίες».'
+      const m = 'Δεν κατάλαβα. Πες π.χ. «δεκτή η 12 σε 20 λεπτά», «απόρριψε την 12», «έφυγε η 12», «απόδειξη για την 12», «διάβασε», «κλείσε τις παραγγελίες».'
       setAnswer({ ok: false, text: m })
       void speak('Δεν κατάλαβα. Πες για παράδειγμα, δεκτή η δώδεκα σε είκοσι λεπτά.')
       return
@@ -286,7 +323,7 @@ export function Orders() {
             ? <div className="text-stone-700">{sr.interim || 'Σε ακούω…'}</div>
             : heard
               ? <div className="text-stone-500">«{heard}»</div>
-              : <div className="text-stone-500">Πες «δεκτή η 12 σε 20 λεπτά», «έφυγε η 12», «διάβασε», «κλείσε τις παραγγελίες».</div>}
+              : <div className="text-stone-500">Πες «δεκτή η 12 σε 20 λεπτά», «έφυγε η 12», «απόδειξη για την 12», «διάβασε», «κλείσε τις παραγγελίες».</div>}
           {answer?.text && <div className={answer.ok ? 'text-emerald-800 font-medium' : 'text-red-800 font-medium'}>{answer.text}</div>}
           {sr.error && <div className="text-red-800">{sr.error}</div>}
         </div>
@@ -300,6 +337,11 @@ export function Orders() {
       {/* Νέες */}
       <h2 className="font-semibold mb-2">Νέες {fresh.length > 0 && <span className="badge bg-amber-200 text-amber-900">{fresh.length}</span>}</h2>
       {fresh.length === 0 && <p className="text-sm text-stone-500 mb-4">Καμία νέα παραγγελία.{shop && !open ? ' Το site είναι κλειστό.' : ''}</p>}
+      {paying.length > 0 && (
+        <p className="text-xs text-stone-500 -mt-2 mb-3">
+          Πληρώνουν online τώρα: {paying.map((o) => `#${o.order_no} ${o.customer_name}`).join(', ')}. Έρχονται εδώ μόλις πληρωθούν.
+        </p>
+      )}
       <div className="grid gap-3 lg:grid-cols-2 mb-6">
         {fresh.map((o) => (
           <OrderCard key={o.id} o={o} now={now} tone="new">
@@ -308,7 +350,7 @@ export function Orders() {
               {READY_MINUTES.map((m) => (
                 <button key={m} disabled={!!busy}
                   className={(m === minutes ? 'btn-primary' : 'btn-secondary') + ' h-12 min-w-[3.5rem] text-base'}
-                  onClick={() => { setMinutes(m); void act(o.id, () => acceptOrder(o, m)) }}>
+                  onClick={() => { setMinutes(m); void act(o.id, () => acceptOrder(o, m, { autoReceipt })) }}>
                   {m}'
                 </button>
               ))}
@@ -330,9 +372,42 @@ export function Orders() {
               </button>
               <button className="btn-ghost h-12 ml-auto" disabled={!!busy} onClick={() => setCancelFor(o)}>Ακύρωση…</button>
             </div>
+            <div className="mt-2"><FiscalBox compact order={o.id} /></div>
           </OrderCard>
         ))}
       </div>
+
+      {/* Ξενοδοχεία */}
+      {b2b.length > 0 && (
+        <>
+          <h2 className="font-semibold mb-2">Χονδρική από σύνδεσμο <span className="badge bg-violet-100 text-violet-800">{b2b.length}</span></h2>
+          <div className="grid gap-3 lg:grid-cols-2 mb-6">
+            {b2b.map((b) => (
+              <div key={b.id} className="card p-4 border-2 border-violet-200 text-sm">
+                <div className="flex items-start gap-3">
+                  <div className="flex-1">
+                    <div className="font-semibold text-base">{b.partner?.name ?? 'Πελάτης'}</div>
+                    <div className="text-stone-600">
+                      {clock(b.created_at)}{b.wanted_date && <> · για <b>{fmtDate(b.wanted_date)}</b></>}
+                      {b.doc && <> · ΠΩ-{b.doc.doc_no} · {fmtMoney(b.doc.total_gross)}</>}
+                    </div>
+                    {b.note && <div className="mt-1 text-amber-900">📝 {b.note}</div>}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {b.doc_id && <Link className="btn-primary h-11" to={`/docs/sale/${b.doc_id}`}>Άνοιξε την πώληση</Link>}
+                  <button className="btn-ghost h-11 ml-auto" disabled={!!busy}
+                    onClick={() => act(b.id, async () => {
+                      const { error: e } = await supabase.rpc('b2b_seen', { p_id: b.id })
+                      if (e) throw new Error(e.message)
+                      return { ok: true, text: 'Εντάξει.' }
+                    })}>Το είδα</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {/* Μήνας */}
       {month && shop && (
@@ -361,9 +436,23 @@ export function Orders() {
                   <td className="w-12 font-semibold">#{o.order_no}</td>
                   <td>{clock(o.created_at)}</td>
                   <td>{o.customer_name}</td>
-                  <td><span className={'badge ' + (o.status === 'done' ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700')}>{ORDER_STATUS_LABEL[o.status]}</span>{o.reason && <span className="text-xs text-stone-500"> · {o.reason}</span>}</td>
+                  <td>
+                    <span className={'badge ' + (o.status === 'done' ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700')}>{ORDER_STATUS_LABEL[o.status]}</span>
+                    {o.reason && <span className="text-xs text-stone-500"> · {o.reason}</span>}
+                    {o.pay_status && o.pay_status !== 'none' && o.pay_status !== 'paid' && (
+                      <span className={'badge ml-1 ' + (o.pay_status === 'refund_failed' ? 'bg-red-100 text-red-800' : 'bg-sky-100 text-sky-800')}>{PAY_STATUS_LABEL[o.pay_status]}</span>
+                    )}
+                    {(o.status === 'done' || o.status === 'cancelled') && (
+                      <div className="mt-1"><FiscalBox compact order={o.id} allowNew={o.status === 'done'} /></div>
+                    )}
+                  </td>
                   <td className="num">{fmtMoney(o.total)}</td>
-                  <td className="text-right">{o.status === 'done' && <button className="btn-ghost px-2 py-1 text-xs" disabled={!!busy} onClick={() => setCancelFor(o)}>Ακύρωση…</button>}</td>
+                  <td className="text-right whitespace-nowrap">
+                    {(o.pay_status === 'refund_failed' || o.pay_status === 'refund_pending') && (
+                      <button className="btn-secondary px-2 py-1 text-xs mr-1" disabled={!!busy} onClick={() => act(o.id, () => refundOrder(o))}>Επιστροφή χρημάτων</button>
+                    )}
+                    {o.status === 'done' && <button className="btn-ghost px-2 py-1 text-xs" disabled={!!busy} onClick={() => setCancelFor(o)}>Ακύρωση…</button>}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -395,12 +484,18 @@ function OrderCard({ o, now, tone, children }: { o: OnlineOrder; now: number; to
         </div>
         <div className="text-right text-sm">
           <div className="font-semibold tabular-nums">{fmtMoney(o.total)}</div>
-          <div className="text-stone-600">{PAYMENT_LABEL[o.payment]}</div>
+          <div className={o.payment === 'online' ? 'text-emerald-800 font-semibold' : 'text-stone-600'}>
+            {o.payment === 'online' ? (o.pay_status === 'paid' ? '💳 Πληρωμένη' : PAY_STATUS_LABEL[o.pay_status ?? 'none'] || 'Online') : PAYMENT_LABEL[o.payment]}
+          </div>
         </div>
       </div>
       <ul className="text-lg leading-snug mb-2">
-        {o.online_order_line.map((l) => (
-          <li key={l.id}><b className="tabular-nums">{l.qty}×</b> {l.name}{l.note && <span className="text-base text-amber-800"> · {l.note}</span>}</li>
+        {nestLines(o.online_order_line).map((l) => (
+          <li key={l.id}>
+            <b className="tabular-nums">{l.qty}×</b> {l.name}
+            {l.extras.length > 0 && <span className="text-base text-sky-800"> + {l.extras.map((x) => x.name).join(', ')}</span>}
+            {l.note && <span className="text-base text-amber-800"> · {l.note}</span>}
+          </li>
         ))}
       </ul>
       <div className="text-sm mb-3">
@@ -426,7 +521,10 @@ function RejectModal({ order, onClose, onReject }: { order: OnlineOrder | null; 
   if (!order) return null
   return (
     <Modal open title={`Απόρριψη #${order.order_no}`} onClose={onClose}>
-      <p className="text-sm text-stone-600 mb-3">Ο πελάτης βλέπει τον λόγο στη σελίδα του. Καμία κίνηση στην αποθήκη.</p>
+      <p className="text-sm text-stone-600 mb-3">
+        Ο πελάτης βλέπει τον λόγο στη σελίδα του. Καμία κίνηση στην αποθήκη.
+        {order.payment === 'online' && order.pay_status === 'paid' && <b> Είναι πληρωμένη online: τα χρήματα επιστρέφονται αμέσως.</b>}
+      </p>
       <div className="grid gap-2 mb-3">
         {REJECT_REASONS.map((r) => <button key={r} className="btn-secondary h-11 justify-start" onClick={() => onReject(order, r)}>{r}</button>)}
       </div>
@@ -446,6 +544,8 @@ function CancelModal({ order, onClose, onCancel }: { order: OnlineOrder | null; 
     <Modal open title={`Ακύρωση #${order.order_no}`} onClose={onClose}>
       <p className="text-sm text-stone-600 mb-3">
         Η πώληση της παραγγελίας ακυρώνεται και το απόθεμα γυρίζει, εκτός αν την έχει ήδη μετρήσει απογραφή (τότε μένει, και το λέει).
+        {order.payment === 'online' && order.pay_status === 'paid' && <b> Είναι πληρωμένη online: τα χρήματα επιστρέφονται αμέσως.</b>}
+        {' '}Αν βγήκε απόδειξη, κάνε και πιστωτικό (κουμπί «Πιστωτικό…»).
       </p>
       <form onSubmit={(e) => { e.preventDefault(); onCancel(order, text.trim() || null) }} className="grid gap-3">
         <input className="input" maxLength={200} value={text} onChange={(e) => setText(e.target.value)} placeholder="Λόγος (π.χ. δεν ήταν σπίτι)" />

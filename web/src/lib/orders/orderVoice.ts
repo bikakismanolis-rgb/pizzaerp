@@ -3,7 +3,8 @@ import { segment, type Seg } from '../voice/numbers'
 
 /**
  * Φωνητικές εντολές για τις online παραγγελίες («δεκτή η 12 σε 20 λεπτά»,
- * «απόρριψε την 5», «έφυγε η 12», «κλείσε τις παραγγελίες», «διάβασε»).
+ * «απόρριψε την 5», «έφυγε η 12», «απόδειξη για την 12», «κλείσε τις
+ * παραγγελίες», «διάβασε»).
  * Χωριστά από τον κατανοητή του «Πες το»: λίγες, σταθερές φράσεις της
  * κουζίνας. Δεν γράφει τίποτα· η οθόνη βρίσκει την παραγγελία και εκτελεί.
  *
@@ -21,6 +22,7 @@ export type OrderVoiceCommand =
   | { kind: 'open' }
   | { kind: 'close' }
   | { kind: 'read'; pick: OrderPick }
+  | { kind: 'receipt'; pick: OrderPick }
   | { kind: 'stop' }
 
 const ACCEPT = /^(δεκτ|δεχτ|δεχομ|δεξου|δεξ|αποδοχ|αποδεχ|αποδεξ)/
@@ -31,6 +33,9 @@ const DONE = /^(εφυγ|παραδοθ|παραδωσ|παρεδωσ|βγηκ)/
 const OPEN = /^(ανοιξ|ανοιγ|ανοιχτ)/
 const CLOSE = /^(κλεισ|κλειν|κλειστ)/
 const READ = /^(διαβασ|ξαναπεσ|ξαναδιαβασ|επαναλαβ|ξαναλεγ)/
+const RECEIPT = /^(αποδειξ|αποδιξ)/
+/** «κόψε / βγάλε απόδειξη» */
+const RECEIPT_VERB = new Set(['κοψε', 'βγαλε', 'εκδωσε', 'φτιαξε', 'τυπωσε', 'θελει', 'θελω'])
 const STOP = /^(σταματα|σταματησε|σωπα|σιωπη|φτανει|αρκετα|σκασε)$/
 const ORDER_NOUN = /^(παραγγελ|site$|σαιτ$|online$|ονλαιν$|σαιτ)/
 const MINUTE = /^λεπτ/
@@ -126,7 +131,14 @@ export function parseOrderVoice(text: string, opts: { strict?: boolean } = {}): 
   const oi = findW(OPEN)
   const ci = findW(CLOSE)
   const rd = findW(READ)
+  const rc = findW(RECEIPT)
 
+  // «απόδειξη για την 12» (πριν από τα άλλα: «κόψε απόδειξη» δεν είναι «κλείσε»)
+  if (rc >= 0 && (ai < 0 || rc < ai)) {
+    if (leftovers(rc, (x) => RECEIPT_VERB.has(x)) > 0) return null
+    if (strict && !isInt(num)) return null
+    return { kind: 'receipt', pick }
+  }
   if (ai >= 0 && (rj < 0 || ai < rj)) {
     if (strict && (!(ACCEPT_STRONG.test(ws[ai]!) || noun) || leftovers(ai) > 0)) return null
     const mins = minutes ?? (isInt(num) && isInt(extra) && extra >= 5 ? extra : null)

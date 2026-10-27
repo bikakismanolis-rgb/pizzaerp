@@ -117,3 +117,26 @@ describe('δεν είναι εντολή παραγγελίας', () => {
     expect(parseOrderVoice(text, { strict: true })?.kind).toBe(kind)
   })
 })
+
+describe('απόδειξη', () => {
+  test.each([
+    ['απόδειξη για την 12', 12],
+    ['κόψε απόδειξη στην 5', 5],
+    ['βγάλε απόδειξη για την παραγγελία 7', 7],
+    ['απόδειξη στη δώδεκα', 12],
+    ['απόδειξη', null],
+  ])('%s', (text, pick) => {
+    expect(parseOrderVoice(text)).toEqual({ kind: 'receipt', pick })
+  })
+
+  test('στο «Πες το» μόνο με αριθμό και χωρίς άλλες λέξεις', () => {
+    expect(parseOrderVoice('απόδειξη για την 12', { strict: true })).toEqual({ kind: 'receipt', pick: 12 })
+    expect(parseOrderVoice('απόδειξη', { strict: true })).toBeNull()
+    expect(parseOrderVoice('απόδειξη για τον Γιώργο 12 ευρώ', { strict: true })).toBeNull()
+  })
+
+  test('δεν μπερδεύεται με την αποδοχή', () => {
+    expect(parseOrderVoice('αποδοχή της 12')).toEqual({ kind: 'accept', pick: 12, minutes: null })
+    expect(parseOrderVoice('δέξου την 12')).toEqual({ kind: 'accept', pick: 12, minutes: null })
+  })
+})

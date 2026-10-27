@@ -4,14 +4,16 @@ import { useCompany } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { errMsg, supabase } from '../lib/supabase'
 import { fmtMoney, round, toNum } from '../lib/format'
-import { grossPrice, shopUrl, slugify, slugValid, type OnlineShop } from '../lib/online'
+import { grossPrice, PAY_PROVIDER_LABEL, shopUrl, slugify, slugValid, type OnlineShop, type PayProvider } from '../lib/online'
 import { loadShop } from '../lib/orders/orderActions'
 import { qrSvg } from '../lib/qr'
 import { ErrorBox, Field, NumInput, PageTitle, Spinner, useToast } from '../components/ui'
+import { SecretField, useSecretNames } from '../components/Secrets'
 
 /**
  * Ρυθμίσεις του site: διεύθυνση, στοιχεία, διανομή / παραλαβή, ποια είδη
- * φαίνονται, QR για τις σακούλες. Τις αλλάζει μόνο ο ιδιοκτήτης (RLS).
+ * φαίνονται, QR για τις σακούλες, πληρωμές (μετρητά, κάρτα, online με
+ * Viva ή Stripe) και CAPTCHA. Τις αλλάζει μόνο ο ιδιοκτήτης (RLS).
  */
 
 interface Form {
@@ -70,8 +72,8 @@ export function ShopSettings() {
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setForm((f) => (f ? { ...f, [k]: v } : f))
 
-  // είδη για το site: έτοιμα, ενεργά
-  const finished = useMemo(() => items.filter((i) => i.item_type === 'finished' && i.is_active), [items])
+  // είδη για το site: έτοιμα, ενεργά (όχι υπηρεσίες, π.χ. μεταφορικά)
+  const finished = useMemo(() => items.filter((i) => i.item_type === 'finished' && i.is_active && !i.is_service), [items])
   const onlineCount = finished.filter((i) => i.online).length
   const noPrice = finished.filter((i) => i.online && !(Number(i.sale_price) > 0))
 
@@ -247,16 +249,143 @@ export function ShopSettings() {
               {finished.map((i) => (
                 <li key={i.id} className="py-1.5 flex items-center gap-2">
                   <input type="checkbox" checked={!!i.online} disabled={busy} onChange={(e) => setOnline([i.id], e.target.checked)} aria-label={`${i.name} στο site`} />
-                  <Link to={`/items/${i.id}`} className="flex-1 hover:underline">{i.name}</Link>
+                  <Link to={`/items/${i.id}`} className="flex-1 hover:underline">
+                    {i.name}{i.is_extra && <span className="badge bg-sky-100 text-sky-800 ml-1">extra</span>}
+                  </Link>
                   <span className="text-stone-500">{i.category ?? ''}</span>
                   <span className="tabular-nums w-20 text-right">{fmtMoney(grossPrice(i.sale_price, i.vat_rate))}</span>
                 </li>
               ))}
             </ul>
-            <p className="text-xs text-stone-500 mt-2">Τιμές με ΦΠΑ, όπως τις βλέπει ο πελάτης. Περιγραφή για το site γράφεις στο κάθε είδος.</p>
+            <p className="text-xs text-stone-500 mt-2">
+              Τιμές με ΦΠΑ, όπως τις βλέπει ο πελάτης. Περιγραφή για το site γράφεις στο κάθε είδος.
+              Extra (π.χ. «Extra μοτσαρέλα»): είδος με «Είναι extra» τσεκαρισμένο· ο πελάτης το διαλέγει πάνω στις πίτσες που φτιάχνονται κατά παραγγελία.
+            </p>
           </div>
+
+          {shop && shop.pay_provider !== undefined && company && (
+            <PayCard shop={shop} companyId={company.id} onSaved={(row) => { setShop(row); setForm(toForm(row)) }} />
+          )}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------
+// Πληρωμές και CAPTCHA (0006)
+// ---------------------------------------------------------------------
+const PROVIDERS: PayProvider[] = ['none', 'test', 'viva', 'stripe']
+const fnUrl = (name: string) => `${String(import.meta.env.VITE_SUPABASE_URL ?? '').replace(/\/$/, '')}/functions/v1/${name}`
+
+function PayCard({ shop, companyId, onSaved }: { shop: OnlineShop; companyId: string; onSaved: (s: OnlineShop) => void }) {
+  const toast = useToast()
+  const { names, reload } = useSecretNames(companyId)
+  const [cash, setCash] = useState(shop.pay_cash !== false)
+  const [door, setDoor] = useState(shop.pay_card_door !== false)
+  const [prov, setProv] = useState<PayProvider>(shop.pay_provider ?? 'none')
+  const [live, setLive] = useState(!!shop.pay_live)
+  const [captcha, setCaptcha] = useState(shop.captcha_site_key ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const missing = prov === 'viva' ? ['viva_client_id', 'viva_client_secret', 'viva_merchant_id', 'viva_api_key'].filter((n) => !names[n])
+    : prov === 'stripe' ? ['stripe_secret_key', 'stripe_webhook_secret'].filter((n) => !names[n]) : []
+
+  const save = async () => {
+    setError(null)
+    if (!cash && !door && prov === 'none') { setError('Άφησε έναν τουλάχιστον τρόπο πληρωμής.'); return }
+    const key = captcha.trim()
+    if (key && !/^[A-Za-z0-9_-]{8,100}$/.test(key)) { setError('Το Site Key του Turnstile δεν μοιάζει σωστό (π.χ. 0x4AAAAAAA...).'); return }
+    if (key && !names.turnstile_secret) { setError('Βάλε πρώτα και το Secret Key του Turnstile (από κάτω), αλλιώς δεν θα περνάει καμία παραγγελία.'); return }
+    setBusy(true)
+    const { data, error: er } = await supabase.from('online_shop')
+      .update({ pay_cash: cash, pay_card_door: door, pay_provider: prov, pay_live: live, captcha_site_key: key || null })
+      .eq('company_id', companyId).select('*')
+    setBusy(false)
+    if (er) { setError(errMsg(er)); return }
+    const row = (data ?? [])[0] as OnlineShop | undefined
+    if (!row) { setError('Μόνο ο ιδιοκτήτης αλλάζει τις πληρωμές.'); return }
+    onSaved(row)
+    toast.ok('Αποθηκεύτηκαν οι πληρωμές')
+  }
+
+  const copy = (t: string) => { void navigator.clipboard?.writeText(t).then(() => toast.ok('Αντιγράφηκε')) }
+  const webhook = `${fnUrl('payments-webhook')}?provider=${prov}&company=${companyId}`
+
+  return (
+    <div className="card p-4 grid gap-3">
+      <h2 className="font-semibold">Πληρωμές</h2>
+      <ErrorBox text={error} />
+      <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={cash} onChange={(e) => setCash(e.target.checked)} /> Μετρητά (στην πόρτα / στο ταμείο)</label>
+      <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={door} onChange={(e) => setDoor(e.target.checked)} /> Κάρτα στην πόρτα (POS του διανομέα)</label>
+
+      <div>
+        <span className="label">Online πληρωμή με κάρτα / IRIS</span>
+        <div className="grid gap-1">
+          {PROVIDERS.map((p) => (
+            <label key={p} className="text-sm flex items-center gap-2">
+              <input type="radio" name="pay-provider" checked={prov === p} onChange={() => setProv(p)} /> {PAY_PROVIDER_LABEL[p]}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {prov === 'test' && (
+        <p className="text-xs text-amber-800">
+          Δοκιμαστική: ο πελάτης βλέπει μια σελίδα «Πλήρωσε (δοκιμή)» αντί για κάρτα. Για να δεις όλη τη ροή (πληρωμή, απόρριψη, επιστροφή) πριν ανοίξεις λογαριασμό. Μην την αφήσεις ανοιχτή για πελάτες.
+        </p>
+      )}
+
+      {(prov === 'viva' || prov === 'stripe') && (
+        <div className="grid gap-3 rounded-md bg-stone-50 p-3">
+          <label className="text-sm flex items-center gap-2">
+            <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
+            Πραγματικές πληρωμές {live ? '' : <span className="text-stone-500">(τώρα: δοκιμαστικός λογαριασμός {prov === 'viva' ? 'demo' : 'test mode'})</span>}
+          </label>
+          {prov === 'viva' && (
+            <>
+              <p className="text-xs text-stone-600">
+                Viva → Settings → API Access. Στην πηγή πληρωμών (Sales → Online Payments → Websites/Apps) βάλε Success URL και Failure URL:{' '}
+                <code className="break-all">{window.location.origin}/pay/viva</code>{' '}
+                <button type="button" className="underline" onClick={() => copy(`${window.location.origin}/pay/viva`)}>αντιγραφή</button>.
+                Webhooks «Transaction Payment Created» και «Transaction Failed»: <code className="break-all">{webhook}</code>{' '}
+                <button type="button" className="underline" onClick={() => copy(webhook)}>αντιγραφή</button>.
+              </p>
+              <SecretField companyId={companyId} name="viva_client_id" label="Smart Checkout Client ID" saved={names.viva_client_id} onSaved={reload} />
+              <SecretField companyId={companyId} name="viva_client_secret" label="Smart Checkout Client Secret" saved={names.viva_client_secret} onSaved={reload} />
+              <SecretField companyId={companyId} name="viva_merchant_id" label="Merchant ID" saved={names.viva_merchant_id} onSaved={reload} />
+              <SecretField companyId={companyId} name="viva_api_key" label="API Key" help="Για τα webhooks και τις επιστροφές χρημάτων." saved={names.viva_api_key} onSaved={reload} />
+              <SecretField companyId={companyId} name="viva_source_code" label="Κωδικός πηγής (προαιρετικό)" help="Αν δεν μπει: η Default." saved={names.viva_source_code} onSaved={reload} />
+            </>
+          )}
+          {prov === 'stripe' && (
+            <>
+              <p className="text-xs text-stone-600">
+                Stripe → Developers → API keys (Secret key, sk_...). Webhook (Developers → Webhooks) για «checkout.session.completed», «checkout.session.async_payment_succeeded», «checkout.session.async_payment_failed» και «checkout.session.expired»:{' '}
+                <code className="break-all">{webhook}</code> <button type="button" className="underline" onClick={() => copy(webhook)}>αντιγραφή</button>, και το Signing secret (whsec_...) εδώ.
+              </p>
+              <SecretField companyId={companyId} name="stripe_secret_key" label="Secret key (sk_...)" saved={names.stripe_secret_key} onSaved={reload} />
+              <SecretField companyId={companyId} name="stripe_webhook_secret" label="Webhook signing secret (whsec_...)" saved={names.stripe_webhook_secret} onSaved={reload} />
+            </>
+          )}
+          {missing.length > 0 && <p className="text-xs text-red-800">Λείπουν κλειδιά: χωρίς αυτά η online πληρωμή δεν ξεκινά.</p>}
+        </div>
+      )}
+
+      <div className="grid gap-2 border-t border-stone-200 pt-3">
+        <span className="font-medium text-sm">«Δεν είμαι ρομπότ» (Cloudflare Turnstile, δωρεάν)</span>
+        <p className="text-xs text-stone-600">Προαιρετικό: σταματά ψεύτικες παραγγελίες από bots. Φτιάξε widget στο dash.cloudflare.com → Turnstile για τη διεύθυνση του site και βάλε τα δύο κλειδιά.</p>
+        <Field label="Site Key (δημόσιο)">
+          <input className="input font-mono" value={captcha} onChange={(e) => setCaptcha(e.target.value.trim())} placeholder="0x4AAAAAAA..." />
+        </Field>
+        <SecretField companyId={companyId} name="turnstile_secret" label="Secret Key" saved={names.turnstile_secret} onSaved={reload} />
+      </div>
+
+      <div className="flex justify-end"><button className="btn-primary" disabled={busy} onClick={save}>Αποθήκευση πληρωμών</button></div>
+      <p className="text-xs text-stone-500">
+        Οι online πληρωμές και το CAPTCHA θέλουν τις Edge Functions ανεβασμένες στο Supabase (βλ. README). Τα κλειδιά δεν φαίνονται ποτέ ξανά στον browser.
+      </p>
     </div>
   )
 }

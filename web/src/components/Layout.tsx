@@ -25,6 +25,7 @@ const NAV: NavGroup[] = [
       { to: '/docs/stocktake', label: 'Απογραφές' },
       { to: '/docs/receipt', label: 'Εισπράξεις' },
       { to: '/docs/payment', label: 'Πληρωμές' },
+      { to: '/fiscal', label: 'Αποδείξεις & τιμολόγια' },
     ],
   },
   {

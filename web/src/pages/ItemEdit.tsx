@@ -64,6 +64,8 @@ export function ItemEdit() {
   const hasBom = item.item_type !== 'raw'
   // η βάση έχει online παραγγελίες (0005): αλλιώς ούτε φαίνονται ούτε στέλνονται τα πεδία
   const hasOnline = 'online' in item || items.some((i) => 'online' in i)
+  // extras και υπηρεσίες (0006)
+  const hasKinds = 'is_extra' in item || items.some((i) => 'is_extra' in i)
 
   // Εκτίμηση κόστους συνταγής από τα τρέχοντα μέσα κόστη
   const outQty = toNum(bom.output_qty)
@@ -98,6 +100,10 @@ export function ItemEdit() {
         ...(hasOnline ? {
           online: item.item_type === 'finished' && !!item.online,
           description: item.description?.trim() || null,
+        } : {}),
+        ...(hasKinds ? {
+          is_extra: item.item_type === 'finished' && !!item.is_extra && !item.is_service,
+          is_service: item.item_type === 'finished' && !!item.is_service && !item.make_to_order,
         } : {}),
       }
       let itemId = item.id
@@ -213,9 +219,30 @@ export function ItemEdit() {
           )}
           {item.item_type === 'finished' && (
             <label className="text-sm flex items-center gap-2 sm:col-span-2 mt-1">
-              <input type="checkbox" checked={item.make_to_order} onChange={(e) => set('make_to_order', e.target.checked)} />
+              <input type="checkbox" checked={item.make_to_order} disabled={!!item.is_service}
+                onChange={(e) => set('make_to_order', e.target.checked)} />
               <span>Φτιάχνεται κατά παραγγελία (λιανική): η πώληση καταναλώνει αυτόματα τη συνταγή</span>
             </label>
+          )}
+          {item.item_type === 'finished' && hasKinds && (
+            <>
+              <label className="text-sm flex items-start gap-2 sm:col-span-2">
+                <input type="checkbox" className="mt-1" checked={!!item.is_extra} disabled={!!item.is_service}
+                  onChange={(e) => set('is_extra', e.target.checked)} />
+                <span>
+                  Είναι extra (μπαίνει πάνω σε πίτσα, π.χ. «Extra μοτσαρέλα»)
+                  <span className="block text-xs text-stone-500">Στο site το διαλέγει ο πελάτης πάνω στις πίτσες «κατά παραγγελία». Με συνταγή και «κατά παραγγελία» γράφεται και η κατανάλωση.</span>
+                </span>
+              </label>
+              <label className="text-sm flex items-start gap-2 sm:col-span-2">
+                <input type="checkbox" className="mt-1" checked={!!item.is_service}
+                  onChange={(e) => setItem((s) => ({ ...s, is_service: e.target.checked, ...(e.target.checked ? { make_to_order: false, is_extra: false } : {}) }))} />
+                <span>
+                  Υπηρεσία χωρίς απόθεμα (π.χ. μεταφορικά)
+                  <span className="block text-xs text-stone-500">Δεν κινεί αποθήκη· μπαίνει στην πώληση και στο παραστατικό με τον ΦΠΑ του.</span>
+                </span>
+              </label>
+            </>
           )}
           {item.item_type === 'finished' && hasOnline && (
             <>

@@ -1,13 +1,16 @@
 import { fmtMoney } from './format'
 
 /**
- * Online παραγγελίες (0005): ό,τι μοιράζονται η σελίδα του πελάτη
+ * Online παραγγελίες (0005, 0006): ό,τι μοιράζονται η σελίδα του πελάτη
  * (/s/:slug, χωρίς login) και η οθόνη «Παραγγελίες» της κουζίνας.
  */
 
-export type OrderStatus = 'new' | 'accepted' | 'done' | 'rejected' | 'cancelled'
+/** awaiting_payment / expired: πληρωμή online που δεν ολοκληρώθηκε (δεν φαίνεται στην κουζίνα) */
+export type OrderStatus = 'awaiting_payment' | 'new' | 'accepted' | 'done' | 'rejected' | 'cancelled' | 'expired'
 export type OrderMode = 'delivery' | 'pickup'
-export type OrderPayment = 'cash' | 'card'
+export type OrderPayment = 'cash' | 'card' | 'online'
+export type PayStatus = 'none' | 'pending' | 'failed' | 'paid' | 'refund_pending' | 'refunded' | 'refund_failed'
+export type PayProvider = 'none' | 'test' | 'viva' | 'stripe'
 
 /** Ένα είδος του μενού όπως το βλέπει ο πελάτης (τιμή με ΦΠΑ) */
 export interface MenuItem {
@@ -16,7 +19,12 @@ export interface MenuItem {
   description: string | null
   category: string | null
   price: number
+  /** παίρνει extra (πίτσα κατά παραγγελία) */
+  extras_ok?: boolean
 }
+
+/** Extra πάνω σε πίτσα (τιμή με ΦΠΑ) */
+export interface MenuExtra { id: string; name: string; price: number }
 
 /** Απάντηση του shop_menu */
 export interface ShopMenu {
@@ -30,9 +38,15 @@ export interface ShopMenu {
   delivery_fee: number
   min_order: number
   items: MenuItem[]
+  extras?: MenuExtra[]
+  pay_cash?: boolean
+  pay_card_door?: boolean
+  pay_online?: boolean
+  pay_test?: boolean
+  captcha_site_key?: string | null
 }
 
-export interface OrderInputLine { item_id: string; qty: number; note?: string | null }
+export interface OrderInputLine { item_id: string; qty: number; note?: string | null; extras?: string[] }
 
 export interface OrderInput {
   name: string
@@ -51,6 +65,11 @@ export interface OrderStatusInfo {
   status: OrderStatus
   mode: OrderMode
   payment: OrderPayment
+  pay_status?: PayStatus
+  pay_test?: boolean
+  /** public token της απόδειξης, αν έχει εκδοθεί */
+  receipt?: string | null
+  paid_at?: string | null
   name: string
   items_total: number
   delivery_fee: number
@@ -61,7 +80,7 @@ export interface OrderStatusInfo {
   accepted_at: string | null
   done_at: string | null
   shop: { name: string; phone: string | null; slug: string }
-  lines: { name: string; qty: number; price: number; note: string | null }[]
+  lines: { name: string; qty: number; price: number; note: string | null; line_no?: number; parent_line?: number | null }[]
 }
 
 /** Ρυθμίσεις του site (πίνακας online_shop) */
@@ -78,6 +97,12 @@ export interface OnlineShop {
   closes_at: string
   open_until: string | null
   compare_fee_pct: number | null
+  pay_cash?: boolean
+  pay_card_door?: boolean
+  pay_provider?: PayProvider
+  pay_live?: boolean
+  captcha_site_key?: string | null
+  delivery_item_id?: string | null
 }
 
 export interface OnlineOrderLine {
@@ -89,6 +114,8 @@ export interface OnlineOrderLine {
   qty: number
   unit_price: number
   note: string | null
+  /** extra: ο αριθμός γραμμής της πίτσας που το παίρνει */
+  parent_line?: number | null
 }
 
 export interface OnlineOrder {
@@ -99,6 +126,8 @@ export interface OnlineOrder {
   status: OrderStatus
   mode: OrderMode
   payment: OrderPayment
+  pay_status?: PayStatus
+  paid_at?: string | null
   customer_name: string
   phone: string
   address: string | null
@@ -118,6 +147,8 @@ export interface OnlineOrder {
 }
 
 export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
+  awaiting_payment: 'Περιμένει πληρωμή',
+  expired: 'Δεν πληρώθηκε',
   new: 'Νέα',
   accepted: 'Σε ετοιμασία',
   done: 'Έφυγε',
@@ -127,7 +158,24 @@ export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
 
 export const MODE_LABEL: Record<OrderMode, string> = { delivery: 'Διανομή', pickup: 'Παραλαβή' }
 
-export const PAYMENT_LABEL: Record<OrderPayment, string> = { cash: 'Μετρητά', card: 'Κάρτα' }
+export const PAYMENT_LABEL: Record<OrderPayment, string> = { cash: 'Μετρητά', card: 'Κάρτα', online: 'Πληρωμένη online' }
+
+export const PAY_STATUS_LABEL: Record<PayStatus, string> = {
+  none: '',
+  pending: 'Περιμένει πληρωμή',
+  failed: 'Η πληρωμή απέτυχε',
+  paid: 'Πληρώθηκε online',
+  refund_pending: 'Επιστροφή χρημάτων σε εξέλιξη',
+  refunded: 'Έγινε επιστροφή χρημάτων',
+  refund_failed: 'Η επιστροφή χρημάτων δεν έγινε',
+}
+
+export const PAY_PROVIDER_LABEL: Record<PayProvider, string> = {
+  none: 'Χωρίς online πληρωμή',
+  test: 'Δοκιμαστική (χωρίς χρήματα)',
+  viva: 'Viva.com (κάρτα, Apple/Google Pay, IRIS)',
+  stripe: 'Stripe (κάρτα, Apple/Google Pay)',
+}
 
 /** Χρόνοι αποδοχής που προτείνει η κουζίνα (λεπτά) */
 export const READY_MINUTES = [15, 20, 30, 45, 60]
@@ -174,18 +222,29 @@ export function phoneLooksValid(raw: string): boolean {
   return /^[26]\d{9}$/.test(d)
 }
 
-/** Γραμμές παραγγελίας όπως τις λέει η κουζίνα: «Μαργαρίτα 2 (χωρίς ρίγανη)» */
-export function linesText(lines: { name: string; qty: number; note?: string | null }[], sep = ', '): string {
-  return lines.map((l) => `${l.name} ${l.qty}${l.note ? ` (${l.note})` : ''}`).join(sep)
+type TextLine = { name: string; qty: number; note?: string | null; line_no?: number; parent_line?: number | null }
+
+/** Γραμμή με τα extras της από κάτω (γραμμές με parent_line) */
+export function nestLines<T extends TextLine>(lines: T[]): (T & { extras: T[] })[] {
+  const main = lines.filter((l) => l.parent_line == null)
+  return main.map((m) => ({ ...m, extras: lines.filter((x) => x.parent_line != null && x.parent_line === m.line_no) }))
+}
+
+/** Γραμμές παραγγελίας όπως τις λέει η κουζίνα: «Μαργαρίτα 2 με Extra μοτσαρέλα (χωρίς ρίγανη)» */
+export function linesText(lines: TextLine[], sep = ', '): string {
+  return nestLines(lines).map((l) => {
+    const ex = l.extras.length ? ` με ${l.extras.map((x) => x.name).join(' και ')}` : ''
+    return `${l.name} ${l.qty}${ex}${l.note ? ` (${l.note})` : ''}`
+  }).join(sep)
 }
 
 /** Ό,τι διαβάζεται φωναχτά όταν έρχεται νέα παραγγελία */
-export function orderSpeech(o: Pick<OnlineOrder, 'order_no' | 'mode' | 'address' | 'payment' | 'notes' | 'total'> & { online_order_line: { name: string; qty: number; note: string | null }[] }): string {
+export function orderSpeech(o: Pick<OnlineOrder, 'order_no' | 'mode' | 'address' | 'payment' | 'notes' | 'total'> & { online_order_line: TextLine[] }): string {
   const parts = [
     `Νέα παραγγελία ${o.order_no}.`,
     linesText(o.online_order_line) + '.',
     o.mode === 'delivery' ? `Διανομή${o.address ? ', ' + o.address : ''}.` : 'Παραλαβή από το μαγαζί.',
-    o.payment === 'card' ? 'Πληρωμή με κάρτα.' : 'Μετρητά.',
+    o.payment === 'online' ? 'Πληρωμένη online.' : o.payment === 'card' ? 'Πληρωμή με κάρτα.' : 'Μετρητά.',
   ]
   if (o.notes) parts.push(`Σημείωση: ${o.notes}.`)
   return parts.join(' ')

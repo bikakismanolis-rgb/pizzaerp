@@ -1,21 +1,23 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { errMsg, supabase } from '../../lib/supabase'
+import { callFunction } from '../../lib/edge'
 import { fmtMoney, round } from '../../lib/format'
 import {
   MODE_LABEL, phoneLooksValid,
-  type MenuItem, type OrderInput, type OrderMode, type OrderPayment, type ShopMenu,
+  type MenuExtra, type MenuItem, type OrderInput, type OrderMode, type OrderPayment, type ShopMenu,
 } from '../../lib/online'
-import { ShopHeader, readStore, writeStore } from './shared'
+import { Centered, ShopHeader, readStore, telHref, writeStore } from './shared'
+import { Turnstile } from './Turnstile'
 
 /**
- * Η σελίδα του μαγαζιού για τον πελάτη (/s/:slug): μενού, καλάθι,
- * στοιχεία, αποστολή. Χωρίς λογαριασμό· οι τιμές και οι έλεγχοι γίνονται
- * στη βάση (place_order), εδώ μόνο για ευκολία.
+ * Η σελίδα του μαγαζιού για τον πελάτη (/s/:slug): μενού, καλάθι (με extras
+ * ανά πίτσα), στοιχεία, πληρωμή (μετρητά, κάρτα στην πόρτα, online).
+ * Χωρίς λογαριασμό· τιμές και έλεγχοι στη βάση. Με CAPTCHA ή online
+ * πληρωμή η παραγγελία περνά από τον server (Edge Function shop-checkout).
  */
 
-interface CartLine { qty: number; note: string }
-type Cart = Record<string, CartLine>
+interface CartLine { key: string; item_id: string; qty: number; note: string; extras: string[] }
 
 interface Customer { name: string; phone: string; address: string; mode: OrderMode; payment: OrderPayment }
 
@@ -25,17 +27,33 @@ export const lastOrderKey = (slug: string) => `pizza-shop.last.${slug}`
 
 const emptyCustomer: Customer = { name: '', phone: '', address: '', mode: 'delivery', payment: 'cash' }
 
+const newKey = () => Math.random().toString(36).slice(2, 10)
+
+/** Καλάθι από το sessionStorage (και από την παλιά μορφή { item_id: { qty, note } }) */
+function loadCart(slug: string): CartLine[] {
+  const v = readStore<unknown>('session', cartKey(slug), [])
+  if (Array.isArray(v)) return v.filter((l) => l && typeof l.item_id === 'string' && l.qty > 0).map((l) => ({ extras: [], note: '', ...l }))
+  if (v && typeof v === 'object') {
+    return Object.entries(v as Record<string, { qty: number; note?: string }>)
+      .filter(([, l]) => l?.qty > 0).map(([item_id, l]) => ({ key: newKey(), item_id, qty: l.qty, note: l.note ?? '', extras: [] }))
+  }
+  return []
+}
+
 export function Shop() {
   const { slug = '' } = useParams()
   const nav = useNavigate()
   const [menu, setMenu] = useState<ShopMenu | null | undefined>(undefined)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [cart, setCart] = useState<Cart>(() => readStore<Cart>('session', cartKey(slug), {}))
+  const [cart, setCart] = useState<CartLine[]>(() => loadCart(slug))
   const [step, setStep] = useState<'menu' | 'checkout'>('menu')
   const [cust, setCust] = useState<Customer>(() => ({ ...emptyCustomer, ...readStore<Partial<Customer>>('local', CUSTOMER_KEY, {}) }))
   const [notes, setNotes] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [picking, setPicking] = useState<MenuItem | null>(null)
+  const [captcha, setCaptcha] = useState<string | null>(null)
+  const captchaReset = useRef<() => void>(() => {})
   const last = readStore<{ token: string; no: number } | null>('local', lastOrderKey(slug), null)
 
   const load = useCallback(async () => {
@@ -55,30 +73,51 @@ export function Shop() {
   useEffect(() => { if (menu) document.title = menu.name }, [menu])
   useEffect(() => { writeStore('session', cartKey(slug), cart) }, [slug, cart])
 
-  // τρόπος που δεν υποστηρίζει το μαγαζί → ο άλλος
+  // τρόποι πληρωμής του μαγαζιού (βάση χωρίς 0006: μετρητά και κάρτα)
+  const payments = useMemo(() => {
+    const out: OrderPayment[] = []
+    if (!menu) return out
+    if (menu.pay_cash !== false) out.push('cash')
+    if (menu.pay_card_door !== false) out.push('card')
+    if (menu.pay_online) out.push('online')
+    return out
+  }, [menu])
+
+  // ό,τι δεν υποστηρίζει το μαγαζί → το άλλο
   useEffect(() => {
     if (!menu) return
     if (cust.mode === 'delivery' && !menu.delivery) setCust((c) => ({ ...c, mode: 'pickup' }))
     if (cust.mode === 'pickup' && !menu.pickup) setCust((c) => ({ ...c, mode: 'delivery' }))
-  }, [menu, cust.mode])
+    if (payments.length && !payments.includes(cust.payment)) setCust((c) => ({ ...c, payment: payments[0] }))
+  }, [menu, cust.mode, cust.payment, payments])
 
   const byId = useMemo(() => new Map((menu?.items ?? []).map((i) => [i.id, i])), [menu])
-  // ό,τι δεν υπάρχει πια στο μενού φεύγει από το καλάθι
-  const lines = Object.entries(cart).filter(([id, l]) => l.qty > 0 && byId.has(id)).map(([id, l]) => ({ item: byId.get(id)!, ...l }))
+  const extraById = useMemo(() => new Map((menu?.extras ?? []).map((x) => [x.id, x])), [menu])
+  // ό,τι δεν υπάρχει πια στο μενού φεύγει από το καλάθι (και τα extras που έφυγαν)
+  const lines = cart
+    .filter((l) => l.qty > 0 && byId.has(l.item_id))
+    .map((l) => {
+      const item = byId.get(l.item_id)!
+      const extras = item.extras_ok ? l.extras.map((x) => extraById.get(x)).filter((x): x is MenuExtra => !!x) : []
+      const unit = item.price + extras.reduce((s, x) => s + x.price, 0)
+      return { ...l, item, extrasFull: extras, unit, total: round(l.qty * unit) }
+    })
   const count = lines.reduce((s, l) => s + l.qty, 0)
-  const itemsTotal = round(lines.reduce((s, l) => s + l.qty * l.item.price, 0))
+  const itemsTotal = round(lines.reduce((s, l) => s + l.total, 0))
   const fee = menu && cust.mode === 'delivery' ? Number(menu.delivery_fee) : 0
   const total = round(itemsTotal + fee)
   const belowMin = !!menu && itemsTotal < Number(menu.min_order)
+  const extrasOn = (it: MenuItem) => !!it.extras_ok && (menu?.extras?.length ?? 0) > 0
 
-  const setQty = (id: string, qty: number) => setCart((c) => {
-    const q = Math.max(0, Math.min(50, qty))
-    const next = { ...c }
-    if (q === 0) delete next[id]
-    else next[id] = { qty: q, note: c[id]?.note ?? '' }
-    return next
+  const qtyOf = (id: string) => cart.filter((l) => l.item_id === id).reduce((s, l) => s + l.qty, 0)
+  const addLine = (item_id: string, qty = 1, extras: string[] = [], note = '') => setCart((c) => {
+    const same = c.find((l) => l.item_id === item_id && l.note === note && l.extras.join() === [...extras].sort().join())
+    if (same) return c.map((l) => (l === same ? { ...l, qty: Math.min(50, l.qty + qty) } : l))
+    return [...c, { key: newKey(), item_id, qty, note, extras: [...extras].sort() }]
   })
-  const setNote = (id: string, note: string) => setCart((c) => (c[id] ? { ...c, [id]: { ...c[id], note } } : c))
+  const setLineQty = (key: string, qty: number) =>
+    setCart((c) => (qty <= 0 ? c.filter((l) => l.key !== key) : c.map((l) => (l.key === key ? { ...l, qty: Math.min(50, qty) } : l))))
+  const setLineNote = (key: string, note: string) => setCart((c) => c.map((l) => (l.key === key ? { ...l, note } : l)))
 
   const groups = useMemo(() => {
     const out: { cat: string; items: MenuItem[] }[] = []
@@ -90,6 +129,8 @@ export function Shop() {
     return out
   }, [menu])
 
+  const needServer = !!menu?.captcha_site_key || cust.payment === 'online'
+
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (!menu) return
@@ -97,6 +138,7 @@ export function Shop() {
     if (cust.name.trim().length < 2) { setError('Γράψε το όνομά σου.'); return }
     if (!phoneLooksValid(cust.phone)) { setError('Γράψε ένα σωστό τηλέφωνο (10 ψηφία).'); return }
     if (cust.mode === 'delivery' && cust.address.trim().length < 5) { setError('Γράψε τη διεύθυνση για τη διανομή.'); return }
+    if (menu.captcha_site_key && !captcha) { setError('Τσέκαρε το «δεν είμαι ρομπότ» παραπάνω.'); return }
     const order: OrderInput = {
       name: cust.name.trim(),
       phone: cust.phone.trim(),
@@ -104,22 +146,36 @@ export function Shop() {
       address: cust.mode === 'delivery' ? cust.address.trim() : null,
       payment: cust.payment,
       notes: notes.trim() || null,
-      lines: lines.map((l) => ({ item_id: l.item.id, qty: l.qty, note: l.note.trim() || null })),
+      lines: lines.map((l) => ({ item_id: l.item.id, qty: l.qty, note: l.note.trim() || null, extras: l.extrasFull.map((x) => x.id) })),
     }
     setSending(true)
-    const { data, error: er } = await supabase.rpc('place_order', { p_slug: slug, p_order: order })
-    setSending(false)
-    if (er) {
-      const msg = errMsg(er)
+    try {
+      let r: { token: string; order_no: number; redirect?: string }
+      if (needServer) {
+        r = await callFunction('shop-checkout', { slug, order, captcha })
+      } else {
+        const { data, error: er } = await supabase.rpc('place_order', { p_slug: slug, p_order: order })
+        if (er) throw new Error(errMsg(er))
+        r = data as { token: string; order_no: number }
+      }
+      writeStore('local', CUSTOMER_KEY, cust)
+      writeStore('local', lastOrderKey(slug), { token: r.token, no: r.order_no })
+      setCart([])
+      if (r.redirect) {
+        // πληρωμή στον πάροχο (ή στη δοκιμαστική σελίδα)· γυρίζει στη σελίδα της παραγγελίας
+        window.location.assign(r.redirect)
+        return
+      }
+      nav(`/s/${slug}/o/${r.token}`)
+    } catch (er) {
+      const msg = er instanceof Error ? er.message : String(er)
       setError(msg)
+      captchaReset.current()
+      setCaptcha(null)
       if (/διαθέσιμο|δεν δέχεται/.test(msg)) load()
-      return
+    } finally {
+      setSending(false)
     }
-    const r = data as { token: string; order_no: number }
-    writeStore('local', CUSTOMER_KEY, cust)
-    writeStore('local', lastOrderKey(slug), { token: r.token, no: r.order_no })
-    setCart({})
-    nav(`/s/${slug}/o/${r.token}`)
   }
 
   if (loadError && menu === undefined) {
@@ -131,6 +187,10 @@ export function Shop() {
   if (menu === undefined) return <Centered>Φόρτωση...</Centered>
   if (menu === null) return <Centered>Δεν βρέθηκε το κατάστημα. Έλεγξε τη διεύθυνση.</Centered>
 
+  const payLabel = (p: OrderPayment) => p === 'cash' ? 'Μετρητά'
+    : p === 'card' ? (cust.mode === 'delivery' ? 'Κάρτα στην πόρτα' : 'Κάρτα στο ταμείο')
+    : 'Online τώρα'
+
   return (
     <div className="min-h-screen bg-stone-100 pb-28">
       <ShopHeader name={menu.name} phone={menu.phone} open={menu.open} />
@@ -139,7 +199,7 @@ export function Shop() {
         {!menu.open && (
           <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mt-3">
             Αυτή τη στιγμή δεν δεχόμαστε online παραγγελίες.
-            {menu.phone && <> Πάρε μας τηλέφωνο: <a className="underline font-medium" href={`tel:${menu.phone.replace(/\s/g, '')}`}>{menu.phone}</a></>}
+            {menu.phone && <> Πάρε μας τηλέφωνο: <a className="underline font-medium" href={telHref(menu.phone)}>{menu.phone}</a></>}
           </div>
         )}
         {last && (
@@ -165,7 +225,8 @@ export function Shop() {
                 <h2 className="text-lg font-semibold mb-2">{g.cat}</h2>
                 <div className="card divide-y divide-stone-100">
                   {g.items.map((it) => {
-                    const l = cart[it.id]
+                    const mine = lines.filter((l) => l.item_id === it.id)
+                    const plain = !extrasOn(it) ? mine[0] : undefined
                     return (
                       <div key={it.id} className="p-3">
                         <div className="flex items-start gap-3">
@@ -174,19 +235,31 @@ export function Shop() {
                             {it.description && <div className="text-sm text-stone-500">{it.description}</div>}
                             <div className="text-sm font-semibold mt-1 tabular-nums">{fmtMoney(it.price)}</div>
                           </div>
-                          {l ? (
-                            <div className="flex items-center gap-1 shrink-0">
-                              <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Ένα λιγότερο ${it.name}`} onClick={() => setQty(it.id, l.qty - 1)}>−</button>
-                              <span className="w-8 text-center font-semibold tabular-nums" aria-live="polite">{l.qty}</span>
-                              <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Ένα ακόμα ${it.name}`} onClick={() => setQty(it.id, l.qty + 1)}>+</button>
-                            </div>
+                          {plain ? (
+                            <Stepper label={it.name} qty={plain.qty} onChange={(q) => setLineQty(plain.key, q)} />
                           ) : (
-                            <button type="button" className="btn-primary h-11 shrink-0" disabled={!menu.open} onClick={() => setQty(it.id, 1)}>+ Προσθήκη</button>
+                            <button type="button" className="btn-primary h-11 shrink-0" disabled={!menu.open}
+                              onClick={() => (extrasOn(it) ? setPicking(it) : addLine(it.id))}>
+                              + Προσθήκη{qtyOf(it.id) > 0 ? ` (${qtyOf(it.id)})` : ''}
+                            </button>
                           )}
                         </div>
-                        {l && (
-                          <input className="input mt-2" maxLength={100} value={l.note} onChange={(e) => setNote(it.id, e.target.value)}
+                        {plain && (
+                          <input className="input mt-2" maxLength={100} value={plain.note} onChange={(e) => setLineNote(plain.key, e.target.value)}
                             placeholder="Σημείωση (π.χ. χωρίς κρεμμύδι)" aria-label={`Σημείωση για ${it.name}`} />
+                        )}
+                        {extrasOn(it) && mine.length > 0 && (
+                          <ul className="mt-2 grid gap-1">
+                            {mine.map((l) => (
+                              <li key={l.key} className="flex items-center gap-2 rounded-md bg-stone-50 px-2 py-1 text-sm">
+                                <span className="flex-1 min-w-0">
+                                  {l.extrasFull.length ? '+ ' + l.extrasFull.map((x) => x.name).join(', ') : 'Χωρίς extra'}
+                                  {l.note && <span className="text-stone-500"> · {l.note}</span>}
+                                </span>
+                                <Stepper small label={it.name} qty={l.qty} onChange={(q) => setLineQty(l.key, q)} />
+                              </li>
+                            ))}
+                          </ul>
                         )}
                       </div>
                     )
@@ -205,10 +278,14 @@ export function Shop() {
               <h2 className="font-semibold mb-2">Η παραγγελία σου</h2>
               <ul className="text-sm divide-y divide-stone-100">
                 {lines.map((l) => (
-                  <li key={l.item.id} className="py-1.5 flex gap-2">
+                  <li key={l.key} className="py-1.5 flex gap-2">
                     <span className="tabular-nums w-8">{l.qty}×</span>
-                    <span className="flex-1">{l.item.name}{l.note.trim() && <span className="text-stone-500"> ({l.note.trim()})</span>}</span>
-                    <span className="tabular-nums">{fmtMoney(l.qty * l.item.price)}</span>
+                    <span className="flex-1">
+                      {l.item.name}
+                      {l.extrasFull.length > 0 && <span className="text-stone-600"> + {l.extrasFull.map((x) => x.name).join(', ')}</span>}
+                      {l.note.trim() && <span className="text-stone-500"> ({l.note.trim()})</span>}
+                    </span>
+                    <span className="tabular-nums">{fmtMoney(l.total)}</span>
                   </li>
                 ))}
               </ul>
@@ -216,15 +293,9 @@ export function Shop() {
 
             <div className="card p-4 grid gap-3">
               {menu.delivery && menu.pickup && (
-                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Τρόπος">
-                  {(['delivery', 'pickup'] as const).map((m) => (
-                    <button key={m} type="button" role="radio" aria-checked={cust.mode === m}
-                      className={'h-12 rounded-md border text-sm font-medium ' + (cust.mode === m ? 'bg-red-700 text-white border-red-700' : 'bg-white border-stone-300')}
-                      onClick={() => setCust({ ...cust, mode: m })}>
-                      {MODE_LABEL[m]}{m === 'delivery' && Number(menu.delivery_fee) > 0 ? ` (+${fmtMoney(menu.delivery_fee)})` : ''}
-                    </button>
-                  ))}
-                </div>
+                <Choice label="Τρόπος" value={cust.mode} options={(['delivery', 'pickup'] as const).map((m) => ({
+                  value: m, text: MODE_LABEL[m] + (m === 'delivery' && Number(menu.delivery_fee) > 0 ? ` (+${fmtMoney(menu.delivery_fee)})` : ''),
+                }))} onChange={(m) => setCust({ ...cust, mode: m })} />
               )}
               {!(menu.delivery && menu.pickup) && <p className="text-sm text-stone-600">{menu.delivery ? 'Μόνο διανομή.' : 'Μόνο παραλαβή από το μαγαζί.'}</p>}
               <label className="block">
@@ -247,18 +318,20 @@ export function Shop() {
                 <span className="label">Σημειώσεις (προαιρετικό)</span>
                 <textarea className="input" rows={2} maxLength={300} value={notes} onChange={(e) => setNotes(e.target.value)} />
               </label>
-              <div>
-                <span className="label">Πληρωμή</span>
-                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Πληρωμή">
-                  {(['cash', 'card'] as const).map((p) => (
-                    <button key={p} type="button" role="radio" aria-checked={cust.payment === p}
-                      className={'h-12 rounded-md border text-sm font-medium ' + (cust.payment === p ? 'bg-red-700 text-white border-red-700' : 'bg-white border-stone-300')}
-                      onClick={() => setCust({ ...cust, payment: p })}>
-                      {p === 'cash' ? 'Μετρητά' : cust.mode === 'delivery' ? 'Κάρτα στην πόρτα' : 'Κάρτα στο ταμείο'}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {payments.length > 1 && (
+                <Choice label="Πληρωμή" value={cust.payment} options={payments.map((p) => ({ value: p, text: payLabel(p) }))}
+                  onChange={(p) => setCust({ ...cust, payment: p })} />
+              )}
+              {payments.length === 1 && <p className="text-sm text-stone-600">Πληρωμή: {payLabel(payments[0])}.</p>}
+              {cust.payment === 'online' && (
+                <p className="text-xs text-stone-500 -mt-1">
+                  Με κάρτα, Apple Pay, Google Pay ή IRIS, στη σελίδα ασφαλούς πληρωμής. Αν το μαγαζί δεν μπορέσει να την ετοιμάσει, τα χρήματα επιστρέφονται.
+                  {menu.pay_test && <b className="text-amber-800"> Δοκιμαστική λειτουργία: δεν χρεώνεται τίποτα.</b>}
+                </p>
+              )}
+              {menu.captcha_site_key && (
+                <Turnstile siteKey={menu.captcha_site_key} onToken={setCaptcha} resetRef={captchaReset} />
+              )}
             </div>
 
             <div className="card p-4 text-sm grid gap-1">
@@ -270,7 +343,7 @@ export function Shop() {
 
             {error && <div role="alert" className="rounded-md bg-red-50 border border-red-200 text-red-800 text-sm px-3 py-2">{error}</div>}
             <button className="btn-primary h-14 text-base" disabled={sending || !menu.open || belowMin || lines.length === 0}>
-              {sending ? 'Αποστολή...' : `Στείλε την παραγγελία · ${fmtMoney(total)}`}
+              {sending ? 'Αποστολή...' : cust.payment === 'online' ? `Πληρωμή · ${fmtMoney(total)}` : `Στείλε την παραγγελία · ${fmtMoney(total)}`}
             </button>
             <p className="text-xs text-stone-500 text-center -mt-2">
               Το μαγαζί τη βλέπει αμέσως και σου λέει σε πόση ώρα θα είναι έτοιμη. Τα στοιχεία σου πάνε μόνο στο μαγαζί.
@@ -292,10 +365,86 @@ export function Shop() {
           </div>
         </div>
       )}
+
+      {picking && (
+        <ExtrasPicker item={picking} extras={menu.extras ?? []} onClose={() => setPicking(null)}
+          onAdd={(qty, extras, note) => { addLine(picking.id, qty, extras, note); setPicking(null) }} />
+      )}
     </div>
   )
 }
 
-function Centered({ children }: { children: ReactNode }) {
-  return <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center text-stone-700">{children}</div>
+function Stepper({ label, qty, onChange, small = false }: { label: string; qty: number; onChange: (q: number) => void; small?: boolean }) {
+  const b = small ? 'h-9 w-9 text-lg' : 'h-11 w-11 text-xl'
+  return (
+    <div className="flex items-center gap-1 shrink-0">
+      <button type="button" className={`btn-secondary p-0 ${b}`} aria-label={`Ένα λιγότερο ${label}`} onClick={() => onChange(qty - 1)}>−</button>
+      <span className="w-8 text-center font-semibold tabular-nums" aria-live="polite">{qty}</span>
+      <button type="button" className={`btn-secondary p-0 ${b}`} aria-label={`Ένα ακόμα ${label}`} onClick={() => onChange(qty + 1)}>+</button>
+    </div>
+  )
+}
+
+function Choice<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { value: T; text: string }[]; onChange: (v: T) => void }) {
+  return (
+    <div>
+      <span className="label">{label}</span>
+      <div className={'grid gap-2 ' + (options.length >= 3 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-2')} role="radiogroup" aria-label={label}>
+        {options.map((o) => (
+          <button key={o.value} type="button" role="radio" aria-checked={value === o.value}
+            className={'min-h-12 rounded-md border text-sm font-medium px-2 ' + (value === o.value ? 'bg-red-700 text-white border-red-700' : 'bg-white border-stone-300')}
+            onClick={() => onChange(o.value)}>
+            {o.text}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** «Θέλεις κάτι extra;»: ποσότητα, extras, σημείωση */
+function ExtrasPicker({ item, extras, onAdd, onClose }: {
+  item: MenuItem; extras: MenuExtra[]; onAdd: (qty: number, extras: string[], note: string) => void; onClose: () => void
+}) {
+  const [qty, setQty] = useState(1)
+  const [chosen, setChosen] = useState<string[]>([])
+  const [note, setNote] = useState('')
+  const unit = item.price + extras.filter((x) => chosen.includes(x.id)).reduce((s, x) => s + x.price, 0)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [onClose])
+  return (
+    <div className="fixed inset-0 z-40 bg-black/40 flex items-end sm:items-center justify-center" onMouseDown={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={item.name} className="bg-white w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-4 max-h-[90vh] overflow-y-auto"
+        onMouseDown={(e) => e.stopPropagation()}>
+        <div className="flex items-start gap-3 mb-3">
+          <div className="flex-1">
+            <div className="text-lg font-semibold">{item.name}</div>
+            {item.description && <div className="text-sm text-stone-500">{item.description}</div>}
+          </div>
+          <button className="btn-ghost px-2 py-1" onClick={onClose} aria-label="Κλείσιμο">✕</button>
+        </div>
+        <div className="text-sm font-medium mb-1">Θέλεις κάτι extra;</div>
+        <div className="grid gap-1 mb-3">
+          {extras.map((x) => (
+            <label key={x.id} className="flex items-center gap-3 rounded-md border border-stone-200 px-3 py-2">
+              <input type="checkbox" className="h-5 w-5" checked={chosen.includes(x.id)}
+                onChange={(e) => setChosen((c) => (e.target.checked ? [...c, x.id] : c.filter((y) => y !== x.id)))} />
+              <span className="flex-1">{x.name}</span>
+              <span className="tabular-nums text-sm">+{fmtMoney(x.price)}</span>
+            </label>
+          ))}
+        </div>
+        <input className="input mb-3" maxLength={100} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Σημείωση (π.χ. χωρίς κρεμμύδι)" />
+        <div className="flex items-center gap-3">
+          <Stepper label={item.name} qty={qty} onChange={(q) => setQty(Math.max(1, Math.min(50, q)))} />
+          <button className="btn-primary h-12 flex-1 text-base" onClick={() => onAdd(qty, chosen, note.trim())}>
+            Πρόσθεσε · {fmtMoney(round(qty * unit))}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }

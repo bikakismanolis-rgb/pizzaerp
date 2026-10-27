@@ -36,6 +36,10 @@ export interface Item {
   online?: boolean
   /** περιγραφή για τον πελάτη του site */
   description?: string | null
+  /** extra πάνω σε πίτσα (0006) */
+  is_extra?: boolean
+  /** υπηρεσία χωρίς απόθεμα, π.χ. μεταφορικά (0006) */
+  is_service?: boolean
 }
 
 export interface Partner {
@@ -54,6 +58,12 @@ export interface Partner {
   is_active: boolean
   /** άλλα ονόματα με τα οποία τον λένε (για τις φωνητικές εντολές) */
   aliases: string[]
+  /** στοιχεία τιμολόγησης (0006) */
+  tax_office?: string | null
+  postal_code?: string | null
+  country?: string
+  /** σύνδεσμος παραγγελιών του πελάτη (ξενοδοχείο), 0006 */
+  order_token?: string | null
 }
 
 /** Δική τους φράση για τις φωνητικές εντολές: "όταν λέω phrase εννοώ meaning" */

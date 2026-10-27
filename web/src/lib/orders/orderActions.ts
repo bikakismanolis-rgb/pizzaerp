@@ -1,12 +1,15 @@
 import { errMsg, supabase } from '../supabase'
 import { today } from '../format'
+import { callFunction } from '../edge'
+import { fiscalCode, loadFiscalSettings, makeFiscal, type FiscalDoc } from '../fiscal'
 import { clock, type OnlineOrder, type OnlineShop } from '../online'
 import type { OrderVoiceCommand } from './orderVoice'
-import { listNos, pickOrder, readText } from './orderPick'
+import { byNo, listNos, pickOrder, readText, STATUS_PHRASE } from './orderPick'
 
 /**
  * Ενέργειες στις online παραγγελίες (οθόνη «Παραγγελίες» και «Πες το»).
- * Όλα περνούν από τις functions της βάσης (0005): order_accept κλπ.
+ * Όλα περνούν από τις functions της βάσης (0005, 0006): order_accept κλπ.
+ * Επιστροφές χρημάτων και αποδείξεις από τις Edge Functions.
  */
 
 export interface OrderResult {
@@ -67,19 +70,59 @@ async function call<T>(fn: string, args: Record<string, unknown>): Promise<T> {
   return data as T
 }
 
-export async function acceptOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, minutes: number | null): Promise<OrderResult> {
+/** Βγαίνει μόνη της απόδειξη στην αποδοχή; (ρύθμιση, με πάροχο που εκδίδει) */
+export async function autoReceiptOn(companyId: string): Promise<boolean> {
+  try {
+    const s = await loadFiscalSettings(companyId)
+    return !!s && s !== 'missing' && s.auto_receipt && s.provider !== 'none' && s.provider !== 'manual'
+  } catch { return false }
+}
+
+export async function acceptOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, minutes: number | null, opts: { autoReceipt?: boolean } = {}): Promise<OrderResult> {
   const r = await call<{ stock_note: string | null; doc_no: number }>('order_accept', { p_order: o.id, p_minutes: minutes })
   if (minutes) rememberMinutes(minutes)
   const base = `Δεκτή η ${o.order_no}${minutes ? `, σε ${minutes} λεπτά` : ''}.`
   if (r.stock_note) {
     return { ok: true, text: `${base} Η πώληση ΠΩ-${r.doc_no} δεν πέρασε στην αποθήκη: ${r.stock_note}`, speech: `${base} Προσοχή, δεν πέρασε στην αποθήκη.` }
   }
+  if (opts.autoReceipt) {
+    const rc = await receiptOrder(o)
+    if (!rc.ok) return { ok: true, text: `${base} ${rc.text}`, speech: `${base} Η απόδειξη δεν βγήκε.` }
+  }
   return { ok: true, text: base }
 }
 
+/** Επιστροφή χρημάτων (online πληρωμή) μετά από απόρριψη / ακύρωση, ή ξανά */
+export async function refundOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promise<OrderResult> {
+  try {
+    const r = await callFunction<{ refunded: number; failed: string[] }>('pay-refund', { order_id: o.id })
+    if (r.failed.length) return { ok: false, text: `Η επιστροφή χρημάτων της ${o.order_no} δεν έγινε: ${r.failed[0]}` }
+    return { ok: true, text: r.refunded ? 'Τα χρήματα επιστράφηκαν στον πελάτη.' : 'Δεν υπάρχει πληρωμή για επιστροφή.' }
+  } catch (e) {
+    return { ok: false, text: `Η επιστροφή χρημάτων της ${o.order_no} δεν έγινε: ${e instanceof Error ? e.message : String(e)}` }
+  }
+}
+
+const withRefund = async (o: Pick<OnlineOrder, 'id' | 'order_no'>, r: OrderResult, refund: boolean | undefined): Promise<OrderResult> => {
+  if (!refund) return r
+  const f = await refundOrder(o)
+  return { ok: f.ok, text: `${r.text} ${f.text}`, speech: `${r.speech ?? r.text} ${f.ok ? 'Τα χρήματα επιστράφηκαν.' : 'Προσοχή, η επιστροφή χρημάτων δεν έγινε.'}` }
+}
+
 export async function rejectOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, reason: string | null): Promise<OrderResult> {
-  await call('order_reject', { p_order: o.id, p_reason: reason })
-  return { ok: true, text: `Απορρίφθηκε η ${o.order_no}.${reason ? ` Λόγος: ${reason}.` : ''}`, speech: `Απορρίφθηκε η ${o.order_no}.` }
+  const r = await call<{ refund?: boolean } | null>('order_reject', { p_order: o.id, p_reason: reason })
+  return withRefund(o, { ok: true, text: `Απορρίφθηκε η ${o.order_no}.${reason ? ` Λόγος: ${reason}.` : ''}`, speech: `Απορρίφθηκε η ${o.order_no}.` }, r?.refund)
+}
+
+/** Απόδειξη για την παραγγελία (από τον πάροχο· «με το χέρι» μένει πρόχειρη για αριθμό) */
+export async function receiptOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promise<OrderResult & { doc?: FiscalDoc }> {
+  try {
+    const d = await makeFiscal('receipt', { order: o.id })
+    if (d.status === 'issued') return { ok: true, doc: d, text: `Βγήκε η απόδειξη ${fiscalCode(d)} για την ${o.order_no}.` }
+    return { ok: true, doc: d, text: `Γράψε τον αριθμό της απόδειξης της ${o.order_no} (από την ταμειακή) στην οθόνη Παραγγελίες.` }
+  } catch (e) {
+    return { ok: false, text: `Η απόδειξη της ${o.order_no} δεν βγήκε: ${e instanceof Error ? e.message : String(e)}` }
+  }
 }
 
 export async function doneOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promise<OrderResult> {
@@ -88,9 +131,9 @@ export async function doneOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promis
 }
 
 export async function cancelOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, reason: string | null): Promise<OrderResult> {
-  const r = await call<{ note: string | null }>('order_cancel', { p_order: o.id, p_reason: reason })
-  if (r.note) return { ok: true, text: `Ακυρώθηκε η ${o.order_no}. ${r.note}`, speech: `Ακυρώθηκε η ${o.order_no}. Η πώληση έμεινε, δες την οθόνη.` }
-  return { ok: true, text: `Ακυρώθηκε η ${o.order_no}. Η πώληση σβήστηκε και το απόθεμα γύρισε.`, speech: `Ακυρώθηκε η ${o.order_no}.` }
+  const r = await call<{ note: string | null; refund?: boolean }>('order_cancel', { p_order: o.id, p_reason: reason })
+  if (r.note) return withRefund(o, { ok: true, text: `Ακυρώθηκε η ${o.order_no}. ${r.note}`, speech: `Ακυρώθηκε η ${o.order_no}. Η πώληση έμεινε, δες την οθόνη.` }, r.refund)
+  return withRefund(o, { ok: true, text: `Ακυρώθηκε η ${o.order_no}. Η πώληση σβήστηκε και το απόθεμα γύρισε.`, speech: `Ακυρώθηκε η ${o.order_no}.` }, r.refund)
 }
 
 export async function setShopOpen(companyId: string, open: boolean): Promise<OrderResult & { until: string | null }> {
@@ -120,12 +163,23 @@ export async function runOrderVoice(cmd: OrderVoiceCommand, companyId: string): 
       case 'accept': {
         const p = pickOrder(orders, cmd.pick, 'new', 'δεκτή')
         if (!p.order) return { ok: false, text: p.error! }
-        return await acceptOrder(p.order, cmd.minutes ?? defaultMinutes())
+        return await acceptOrder(p.order, cmd.minutes ?? defaultMinutes(), { autoReceipt: await autoReceiptOn(companyId) })
       }
       case 'reject': {
         const p = pickOrder(orders, cmd.pick, 'new', 'απόρριψε')
         if (!p.order) return { ok: false, text: p.error! }
         return await rejectOrder(p.order, cmd.reason)
+      }
+      case 'receipt': {
+        if (typeof cmd.pick === 'number') {
+          const o = byNo(orders, cmd.pick)
+          if (!o) return { ok: false, text: `Δεν βρίσκω παραγγελία ${cmd.pick} σήμερα.` }
+          if (o.status !== 'accepted' && o.status !== 'done') return { ok: false, text: `Η ${o.order_no} ${STATUS_PHRASE[o.status]}· απόδειξη βγαίνει όταν γίνει δεκτή.` }
+          return await receiptOrder(o)
+        }
+        const p = pickOrder(orders, cmd.pick, 'accepted', 'απόδειξη')
+        if (!p.order) return { ok: false, text: p.error!.replace('«απόδειξη η', '«απόδειξη για την') }
+        return await receiptOrder(p.order)
       }
       case 'done': {
         if (cmd.all) {

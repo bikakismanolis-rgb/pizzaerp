@@ -17,6 +17,8 @@ export const listNos = (os: { order_no: number }[]): string => {
 }
 
 export const STATUS_PHRASE: Record<OnlineOrder['status'], string> = {
+  awaiting_payment: 'περιμένει ακόμα την πληρωμή',
+  expired: 'δεν πληρώθηκε ποτέ',
   new: 'δεν έχει γίνει ακόμα δεκτή',
   accepted: 'έχει ήδη γίνει δεκτή',
   done: 'έχει ήδη φύγει',

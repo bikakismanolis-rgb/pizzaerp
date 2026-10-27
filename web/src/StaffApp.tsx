@@ -34,6 +34,9 @@ const VoiceWords = lazy(() => import('./pages/VoiceWords').then((m) => ({ defaul
 // online παραγγελίες: η κουζίνα και οι ρυθμίσεις του site
 const Orders = lazy(() => import('./pages/Orders').then((m) => ({ default: m.Orders })))
 const ShopSettings = lazy(() => import('./pages/ShopSettings').then((m) => ({ default: m.ShopSettings })))
+// παραστατικά: λίστα και ρυθμίσεις
+const FiscalList = lazy(() => import('./pages/Fiscal').then((m) => ({ default: m.FiscalList })))
+const FiscalSettingsPage = lazy(() => import('./pages/Fiscal').then((m) => ({ default: m.FiscalSettingsPage })))
 
 function Gate() {
   const { session, loading } = useAuth()
@@ -59,6 +62,8 @@ function CompanyGate() {
           <Route path="voice/words" element={<Suspense fallback={<Spinner />}><VoiceWords /></Suspense>} />
           <Route path="orders" element={<Suspense fallback={<Spinner />}><Orders /></Suspense>} />
           <Route path="orders/settings" element={<Suspense fallback={<Spinner />}><ShopSettings /></Suspense>} />
+          <Route path="fiscal" element={<Suspense fallback={<Spinner />}><FiscalList /></Suspense>} />
+          <Route path="fiscal/settings" element={<Suspense fallback={<Spinner />}><FiscalSettingsPage /></Suspense>} />
           <Route path="daily-sales" element={<DailySales />} />
           <Route path="items" element={<Items />} />
           <Route path="items/:id" element={<ItemEdit />} />
