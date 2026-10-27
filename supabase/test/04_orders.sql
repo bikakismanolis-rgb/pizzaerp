@@ -191,7 +191,7 @@ begin
     raise exception 'ΑΠΟΤΥΧΙΑ: τιμή με ΦΠΑ στο μενού';
   end if;
   if exists (select 1 from jsonb_array_elements(m->'items') x, jsonb_object_keys(x) k
-              where k not in ('id', 'name', 'description', 'category', 'price')) then
+              where k not in ('id', 'name', 'description', 'category', 'price', 'extras_ok')) then
     raise exception 'ΑΠΟΤΥΧΙΑ: το μενού δείχνει παραπάνω πεδία';
   end if;
   -- ο επισκέπτης δεν διαβάζει κανέναν πίνακα
@@ -335,10 +335,12 @@ begin
   if (select status from public.doc where id = d) <> 'posted'
      or (select channel from public.doc where id = d) <> 'site'
      or (select notes from public.doc where id = d) not like 'Online παραγγελία #1 %'
-     or (select count(*) from public.doc_line where doc_id = d) <> 1
-     or (select qty from public.doc_line where doc_id = d) <> 3
-     or (select unit_price from public.doc_line where doc_id = d) <> 8
-     or (select total_gross from public.doc where id = d) <> 27.12 then
+     or (select count(*) from public.doc_line where doc_id = d and item_id = marg) <> 1
+     or (select qty from public.doc_line where doc_id = d and item_id = marg) <> 3
+     or (select unit_price from public.doc_line where doc_id = d and item_id = marg) <> 8
+     or (select sum(gross) from public.doc_line where doc_id = d and item_id = marg) <> 27.12
+     -- με το 0006 τα μεταφορικά (1,50) είναι κι αυτά γραμμή της πώλησης
+     or (select total_gross from public.doc where id = d) not in (27.12, 28.62) then
     raise exception 'ΑΠΟΤΥΧΙΑ: πώληση από αποδοχή';
   end if;
   -- 3 μαργαρίτες: 3 ζυμάρια αυτόματα → 0.75 kg αλεύρι, 0.36 μοτσαρέλα, 3 κουτιά
