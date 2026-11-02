@@ -4,7 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext'
 import { CompanyProvider, useCompany } from './context/CompanyContext'
 import { MasterDataProvider } from './context/MasterData'
 import { Spinner } from './components/ui'
-import { Login } from './pages/Login'
+import { Login, NewPassword } from './pages/Login'
 import { CompanySetup } from './pages/CompanySetup'
 import { Layout } from './components/Layout'
 import { Dashboard } from './pages/Dashboard'
@@ -36,6 +36,7 @@ const Orders = lazy(() => import('./pages/Orders').then((m) => ({ default: m.Ord
 const ShopSettings = lazy(() => import('./pages/ShopSettings').then((m) => ({ default: m.ShopSettings })))
 // γενικά έξοδα και κέρδος (μόνο ο ιδιοκτήτης)
 const Overheads = lazy(() => import('./pages/Overheads').then((m) => ({ default: m.Overheads })))
+const Team = lazy(() => import('./pages/Team').then((m) => ({ default: m.Team })))
 const Profit = lazy(() => import('./pages/reports/Profit').then((m) => ({ default: m.Profit })))
 const Drivers = lazy(() => import('./pages/Drivers').then((m) => ({ default: m.Drivers })))
 const SiteCustomers = lazy(() => import('./pages/SiteCustomers').then((m) => ({ default: m.SiteCustomers })))
@@ -44,9 +45,11 @@ const FiscalList = lazy(() => import('./pages/Fiscal').then((m) => ({ default: m
 const FiscalSettingsPage = lazy(() => import('./pages/Fiscal').then((m) => ({ default: m.FiscalSettingsPage })))
 
 function Gate() {
-  const { session, loading } = useAuth()
+  const { session, loading, recovering } = useAuth()
   if (loading) return <div className="min-h-screen flex items-center justify-center"><Spinner /></div>
   if (!session) return <Login />
+  // ήρθε από το email «Ξέχασα τον κωδικό»
+  if (recovering) return <NewPassword />
   return (
     <CompanyProvider>
       <CompanyGate />
@@ -72,6 +75,7 @@ function CompanyGate() {
           <Route path="fiscal" element={<Suspense fallback={<Spinner />}><FiscalList /></Suspense>} />
           <Route path="fiscal/settings" element={<Suspense fallback={<Spinner />}><FiscalSettingsPage /></Suspense>} />
           <Route path="costs" element={<Suspense fallback={<Spinner />}><Overheads /></Suspense>} />
+          <Route path="team" element={<Suspense fallback={<Spinner />}><Team /></Suspense>} />
           <Route path="reports/profit" element={<Suspense fallback={<Spinner />}><Profit /></Suspense>} />
           <Route path="daily-sales" element={<DailySales />} />
           <Route path="items" element={<Items />} />

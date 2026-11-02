@@ -264,6 +264,11 @@ describe('κείμενα', () => {
     expect(friendlyMessage('NetworkError when attempting to fetch resource.')).toBe(NET_MSG)
     expect(friendlyMessage('Load failed')).toBe(NET_MSG)
     expect(friendlyMessage('Δεν βρέθηκε το είδος')).toBe('Δεν βρέθηκε το είδος')
+    expect(friendlyMessage('Invalid login credentials')).toMatch(/^Λάθος email ή κωδικός/)
+    expect(friendlyMessage('Email not confirmed')).toMatch(/^Δεν έχεις επιβεβαιώσει/)
+    expect(friendlyMessage('User already registered')).toMatch(/^Υπάρχει ήδη λογαριασμός/)
+    expect(friendlyMessage('Password should be at least 6 characters.')).toMatch(/τουλάχιστον 6/)
+    expect(friendlyMessage('For security purposes, you can only request this after 42 seconds.')).toMatch(/^Πολλές προσπάθειες/)
     expect(friendlyMessage('Η πώληση ΠΩ-12 έμεινε, απογραφή ΑΠ-3')).toBe('Η πώληση αρ. 12 έμεινε, απογραφή αρ. 3')
     // σειρές αποδείξεων μένουν: ΑΛΠ-1, ΠΛ-2, ΤΠ-4
     expect(friendlyMessage('Υπάρχει ήδη ΑΛΠ-1 και ΠΛ-2 και ΤΠ-4')).toBe('Υπάρχει ήδη ΑΛΠ-1 και ΠΛ-2 και ΤΠ-4')

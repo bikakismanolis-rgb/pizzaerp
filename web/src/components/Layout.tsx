@@ -43,6 +43,7 @@ const NAV: NavGroup[] = [
       { to: '/items', label: 'Είδη & συνταγές' },
       { to: '/partners', label: 'Πελάτες & προμηθευτές' },
       { to: '/orders/drivers', label: 'Διανομείς' },
+      { to: '/team', label: 'Υπάλληλοι' },
       { to: '/voice/words', label: 'Οι λέξεις μας (για το «Πες το»)' },
     ],
   },
