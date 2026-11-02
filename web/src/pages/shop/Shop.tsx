@@ -4,7 +4,7 @@ import { errMsg, supabase } from '../../lib/supabase'
 import { callFunction } from '../../lib/edge'
 import { fmtMoney, round } from '../../lib/format'
 import {
-  MODE_LABEL, phoneLooksValid, SOURCE_RE,
+  phoneLooksValid, SOURCE_RE,
   type MenuExtra, type MenuItem, type OrderInput, type OrderMode, type OrderPayment, type OrderStatusInfo, type ShopMenu,
 } from '../../lib/online'
 import { Centered, ShopHeader, readStore, telHref, writeStore } from './shared'
@@ -214,15 +214,15 @@ export function Shop() {
   if (loadError && menu === undefined) {
     return <Centered>
       <p className="mb-3">{loadError}</p>
-      <button className="btn-primary" onClick={load}>Ξανά</button>
+      <button className="btn-primary" onClick={load}>Δοκίμασε ξανά</button>
     </Centered>
   }
-  if (menu === undefined) return <Centered>Φόρτωση...</Centered>
-  if (menu === null) return <Centered>Δεν βρέθηκε το κατάστημα. Έλεγξε τη διεύθυνση.</Centered>
+  if (menu === undefined) return <Centered>Ανοίγει το μενού…</Centered>
+  if (menu === null) return <Centered>Δεν βρήκαμε αυτό το μαγαζί. Δες ότι η διεύθυνση είναι σωστή.</Centered>
 
   const payLabel = (p: OrderPayment) => p === 'cash' ? 'Μετρητά'
     : p === 'card' ? (cust.mode === 'delivery' ? 'Κάρτα στην πόρτα' : 'Κάρτα στο ταμείο')
-    : 'Online τώρα'
+    : 'Με κάρτα, τώρα'
 
   return (
     <div className="min-h-screen bg-stone-100 pb-28">
@@ -231,14 +231,14 @@ export function Shop() {
         {menu.note && <p className="text-sm text-stone-600 mt-3">{menu.note}</p>}
         {!menu.open && (
           <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mt-3">
-            Αυτή τη στιγμή δεν δεχόμαστε online παραγγελίες.
+            Αυτή την ώρα δεν παίρνουμε παραγγελίες από εδώ.
             {menu.phone && <> Πάρε μας τηλέφωνο: <a className="underline font-medium" href={telHref(menu.phone)}>{menu.phone}</a></>}
           </div>
         )}
         {step === 'menu' && (menu.welcome_pct || menu.loyalty_every) && (
           <div className="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm px-3 py-2 mt-3 grid gap-0.5">
-            {menu.welcome_pct && !last && <div>🎁 <b>−{Number(menu.welcome_pct)}%</b> στην πρώτη σου απευθείας παραγγελία</div>}
-            {menu.loyalty_every && <div>⭐ Κάθε <b>{menu.loyalty_every}η</b> παραγγελία <b>−{Number(menu.loyalty_pct)}%</b></div>}
+            {menu.welcome_pct && !last && <div>🎁 <b>−{Number(menu.welcome_pct)}%</b> στην πρώτη σου παραγγελία από εδώ</div>}
+            {menu.loyalty_every && <div>⭐ Κάθε <b>{menu.loyalty_every}η</b> παραγγελία σου έχει <b>−{Number(menu.loyalty_pct)}%</b></div>}
           </div>
         )}
         {last && (
@@ -258,7 +258,7 @@ export function Shop() {
                 ))}
               </nav>
             )}
-            {groups.length === 0 && <p className="text-stone-500 text-center py-10">Το μενού ετοιμάζεται.</p>}
+            {groups.length === 0 && <p className="text-stone-500 text-center py-10">Το μενού δεν είναι έτοιμο ακόμα.{menu.phone ? ` Πάρε μας στο ${menu.phone}.` : ''}</p>}
             {groups.map((g) => (
               <section key={g.cat} id={`cat-${encodeURIComponent(g.cat)}`} className="mt-4 scroll-mt-16">
                 <h2 className="text-lg font-semibold mb-2">{g.cat}</h2>
@@ -332,39 +332,39 @@ export function Shop() {
 
             <div className="card p-4 grid gap-3">
               {menu.delivery && menu.pickup && (
-                <Choice label="Τρόπος" value={cust.mode} options={(['delivery', 'pickup'] as const).map((m) => ({
-                  value: m, text: MODE_LABEL[m] + (m === 'delivery' && Number(menu.delivery_fee) > 0 ? ` (+${fmtMoney(menu.delivery_fee)})` : ''),
+                <Choice label="Πώς τη θέλεις;" value={cust.mode} options={(['delivery', 'pickup'] as const).map((m) => ({
+                  value: m, text: (m === 'delivery' ? 'Φέρτε τη μου' : 'Θα την πάρω από το μαγαζί') + (m === 'delivery' && Number(menu.delivery_fee) > 0 ? ` (+${fmtMoney(menu.delivery_fee)})` : ''),
                 }))} onChange={(m) => setCust({ ...cust, mode: m })} />
               )}
-              {!(menu.delivery && menu.pickup) && <p className="text-sm text-stone-600">{menu.delivery ? 'Μόνο διανομή.' : 'Μόνο παραλαβή από το μαγαζί.'}</p>}
+              {!(menu.delivery && menu.pickup) && <p className="text-sm text-stone-600">{menu.delivery ? 'Σου τη φέρνουμε εμείς.' : 'Την παίρνεις από το μαγαζί (δεν κάνουμε διανομή).'}</p>}
               <label className="block">
-                <span className="label">Όνομα</span>
+                <span className="label">Το όνομά σου</span>
                 <input className="input" autoComplete="name" required maxLength={60} value={cust.name} onChange={(e) => setCust({ ...cust, name: e.target.value })} />
               </label>
               <label className="block">
-                <span className="label">Τηλέφωνο</span>
+                <span className="label">Το κινητό σου (για να σε πάρουμε αν χρειαστεί)</span>
                 <input className="input" type="tel" inputMode="tel" autoComplete="tel" required maxLength={20} value={cust.phone}
                   onChange={(e) => setCust({ ...cust, phone: e.target.value })} placeholder="69..." />
               </label>
               {cust.mode === 'delivery' && (
                 <label className="block">
-                  <span className="label">Διεύθυνση (οδός, αριθμός, όροφος, κουδούνι)</span>
+                  <span className="label">Διεύθυνση: πού να τη φέρουμε (οδός, αριθμός, όροφος, κουδούνι)</span>
                   <input className="input" autoComplete="street-address" required maxLength={200} value={cust.address}
                     onChange={(e) => setCust({ ...cust, address: e.target.value })} />
                 </label>
               )}
               <label className="block">
-                <span className="label">Σημειώσεις (προαιρετικό)</span>
+                <span className="label">Κάτι που πρέπει να ξέρουμε; (αν θες)</span>
                 <textarea className="input" rows={2} maxLength={300} value={notes} onChange={(e) => setNotes(e.target.value)} />
               </label>
               {payments.length > 1 && (
-                <Choice label="Πληρωμή" value={cust.payment} options={payments.map((p) => ({ value: p, text: payLabel(p) }))}
+                <Choice label="Πώς θα πληρώσεις;" value={cust.payment} options={payments.map((p) => ({ value: p, text: payLabel(p) }))}
                   onChange={(p) => setCust({ ...cust, payment: p })} />
               )}
               {payments.length === 1 && <p className="text-sm text-stone-600">Πληρωμή: {payLabel(payments[0])}.</p>}
               {cust.payment === 'online' && (
                 <p className="text-xs text-stone-500 -mt-1">
-                  Με κάρτα, Apple Pay, Google Pay ή IRIS, στη σελίδα ασφαλούς πληρωμής. Αν το μαγαζί δεν μπορέσει να την ετοιμάσει, τα χρήματα επιστρέφονται.
+                  Με κάρτα, Apple Pay, Google Pay ή IRIS, σε ασφαλή σελίδα της τράπεζας. Αν δεν μπορέσουμε να τη φτιάξουμε, τα χρήματα σου επιστρέφονται.
                   {menu.pay_test && <b className="text-amber-800"> Δοκιμαστική λειτουργία: δεν χρεώνεται τίποτα.</b>}
                 </p>
               )}
@@ -374,7 +374,7 @@ export function Shop() {
             </div>
 
             <div className="card p-4 text-sm grid gap-1">
-              <div className="flex justify-between"><span>Προϊόντα</span><span className="tabular-nums">{fmtMoney(itemsTotal)}</span></div>
+              <div className="flex justify-between"><span>Η παραγγελία</span><span className="tabular-nums">{fmtMoney(itemsTotal)}</span></div>
               {discount > 0 && (
                 <div className="flex justify-between text-emerald-800">
                   <span>⭐ Επιβράβευση −{Number(menu.loyalty_pct)}% ({menu.loyalty_every}η παραγγελία)</span><span className="tabular-nums">−{fmtMoney(discount)}</span>
@@ -392,10 +392,10 @@ export function Shop() {
 
             {error && <div role="alert" className="rounded-md bg-red-50 border border-red-200 text-red-800 text-sm px-3 py-2">{error}</div>}
             <button className="btn-primary h-14 text-base" disabled={sending || !menu.open || belowMin || lines.length === 0}>
-              {sending ? 'Αποστολή...' : cust.payment === 'online' ? `Πληρωμή · ${fmtMoney(total)}` : `Στείλε την παραγγελία · ${fmtMoney(total)}`}
+              {sending ? 'Στέλνεται…' : cust.payment === 'online' ? `Πλήρωσε · ${fmtMoney(total)}` : `Στείλε την παραγγελία · ${fmtMoney(total)}`}
             </button>
             <p className="text-xs text-stone-500 text-center -mt-2">
-              Το μαγαζί τη βλέπει αμέσως και σου λέει σε πόση ώρα θα είναι έτοιμη. Τα στοιχεία σου πάνε μόνο στο μαγαζί,
+              Τη βλέπουμε αμέσως και σου λέμε σε πόση ώρα θα είναι έτοιμη. Τα στοιχεία σου τα κρατάμε μόνο εμείς,
               για την παραγγελία (<Link className="underline" to={`/s/${slug}/privacy`}>απόρρητο</Link>).
             </p>
           </form>

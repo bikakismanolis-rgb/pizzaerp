@@ -80,11 +80,11 @@ export function OrderStatusPage() {
     }
   }
 
-  if (info === undefined) return <Centered>{error ?? 'Φόρτωση...'}</Centered>
+  if (info === undefined) return <Centered>{error ?? 'Μια στιγμή…'}</Centered>
   if (info === null) {
     return (
       <Centered>
-        <p>Δεν βρέθηκε η παραγγελία.</p>
+        <p>Δεν βρήκαμε αυτή την παραγγελία.</p>
         <Link className="btn-primary" to={`/s/${slug}`}>Στο μενού</Link>
       </Centered>
     )
@@ -93,9 +93,9 @@ export function OrderStatusPage() {
   const at = readyAt(info)
   const phone = info.shop.phone
   const tel = phone ? <a className="underline font-medium" href={telHref(phone)}>{phone}</a> : null
-  const refund = info.pay_status === 'refunded' ? ' Τα χρήματα επιστράφηκαν στην κάρτα σου (φαίνονται σε λίγες μέρες).'
-    : info.pay_status === 'refund_pending' ? ' Η επιστροφή των χρημάτων σου είναι σε εξέλιξη.'
-    : info.pay_status === 'refund_failed' ? ' Η αυτόματη επιστροφή των χρημάτων δεν έγινε· το μαγαζί θα την κάνει.'
+  const refund = info.pay_status === 'refunded' ? ' Τα χρήματα γύρισαν στην κάρτα σου (θα τα δεις σε λίγες μέρες).'
+    : info.pay_status === 'refund_pending' ? ' Τα χρήματα γυρίζουν στην κάρτα σου.'
+    : info.pay_status === 'refund_failed' ? ' Τα χρήματα δεν γύρισαν αυτόματα· θα σου τα επιστρέψουμε εμείς.'
     : ''
   let icon = '⏳', title = '', text: ReactNode = null
   switch (info.status) {
@@ -103,25 +103,25 @@ export function OrderStatusPage() {
       icon = '💳'
       title = info.pay_status === 'failed' ? 'Η πληρωμή δεν έγινε' : 'Περιμένουμε την πληρωμή'
       text = info.pay_status === 'failed'
-        ? <>Δεν χρεώθηκες. Δοκίμασε ξανά, ή κάνε νέα παραγγελία με άλλο τρόπο πληρωμής.</>
-        : <>Αν μόλις πλήρωσες, περίμενε λίγο εδώ (με IRIS μπορεί να αργήσει μερικά λεπτά). Το μαγαζί τη βλέπει μόλις επιβεβαιωθεί η πληρωμή.</>
+        ? <>Δεν χρεώθηκες. Δοκίμασε ξανά, ή κάνε νέα παραγγελία και πλήρωσε αλλιώς.</>
+        : <>Αν μόλις πλήρωσες, μείνε λίγο εδώ (με IRIS μπορεί να πάρει μερικά λεπτά). Την παραγγελία τη βλέπουμε μόλις περάσει η πληρωμή.</>
       break
     case 'expired':
       icon = '⌛'
       title = 'Η πληρωμή δεν ολοκληρώθηκε'
-      text = <>Η παραγγελία δεν στάλθηκε στο μαγαζί. Κάνε μια νέα όποτε θέλεις.</>
+      text = <>Η παραγγελία δεν μας ήρθε. Κάνε μια νέα όποτε θέλεις.</>
       break
     case 'new':
       icon = '⏳'
-      title = 'Περιμένει επιβεβαίωση'
-      text = <>Το μαγαζί είδε την παραγγελία σου. Σε λίγο θα δεις εδώ πότε θα είναι έτοιμη.</>
+      title = 'Μας ήρθε, περιμένει να τη δεχτούμε'
+      text = <>Μόλις τη δεχτούμε, θα δεις εδώ τι ώρα θα είναι έτοιμη.</>
       break
     case 'accepted':
       icon = '👨‍🍳'
       title = 'Έγινε δεκτή, ετοιμάζεται'
       text = at
         ? <>{info.mode === 'delivery' ? 'Υπολογίζουμε να είναι σε σένα' : 'Θα είναι έτοιμη για παραλαβή'} γύρω στις <b>{clock(at)}</b>.</>
-        : <>Ετοιμάζεται.</>
+        : <>Τη φτιάχνουμε.</>
       break
     case 'done':
       if (info.mode === 'delivery' && track?.delivered_at) {
@@ -132,13 +132,13 @@ export function OrderStatusPage() {
         icon = info.mode === 'delivery' ? '🛵' : '✅'
         title = info.mode === 'delivery' ? 'Έφυγε, έρχεται!' : 'Παραδόθηκε'
         text = info.mode === 'delivery'
-          ? <>{track?.driver ? <>Τη φέρνει: <b>{track.driver}</b>{info.done_at ? ` (έφυγε ${clock(info.done_at)})` : ''}.</> : <>Ο διανομέας είναι καθ' οδόν.</>}</>
+          ? <>{track?.driver ? <>Τη φέρνει: <b>{track.driver}</b>{info.done_at ? ` (έφυγε ${clock(info.done_at)})` : ''}.</> : <>Ο διανομέας έρχεται.</>}</>
           : <>Καλή όρεξη!</>
       }
       break
     case 'rejected':
       icon = '😔'
-      title = 'Δεν μπορούμε να την εξυπηρετήσουμε'
+      title = 'Δυστυχώς δεν μπορούμε να τη φτιάξουμε τώρα'
       text = <>{info.reason ? `${info.reason}.` : ''}{refund} {tel && <>Πάρε μας τηλέφωνο: {tel}</>}</>
       break
     case 'cancelled':
@@ -149,7 +149,7 @@ export function OrderStatusPage() {
   }
   const canPay = info.status === 'awaiting_payment' && (info.pay_status === 'failed' || info.pay_status === 'pending')
   const payText = info.payment === 'online'
-    ? (info.pay_status === 'paid' || info.pay_status?.startsWith('refund') ? 'Πληρωμένη online' : 'Online πληρωμή')
+    ? (info.pay_status === 'paid' || info.pay_status?.startsWith('refund') ? 'Πληρωμένη με κάρτα' : 'Πληρωμή με κάρτα')
     : PAYMENT_LABEL[info.payment]
 
   return (
@@ -164,7 +164,7 @@ export function OrderStatusPage() {
           {payMsg && <p role="alert" className="mt-3 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2">{payMsg}</p>}
           {canPay && (
             <button className="btn-primary h-12 mt-4 px-6 text-base" disabled={paying} onClick={payAgain}>
-              {paying ? 'Μεταφορά στην πληρωμή...' : `${info.pay_status === 'failed' ? 'Δοκίμασε ξανά' : 'Πλήρωσε'} · ${fmtMoney(info.total)}`}
+              {paying ? 'Σε πάμε στην πληρωμή…' : `${info.pay_status === 'failed' ? 'Δοκίμασε ξανά' : 'Πλήρωσε'} · ${fmtMoney(info.total)}`}
             </button>
           )}
           {info.pay_test && info.payment === 'online' && <p className="text-xs text-amber-800 mt-2">Δοκιμαστική πληρωμή: δεν χρεώθηκε τίποτα.</p>}

@@ -30,7 +30,7 @@ export function ShopHeader({ name, phone, open }: { name: string; phone: string 
         <div className="flex-1 min-w-0">
           <h1 className="text-lg font-bold leading-tight truncate">{name}</h1>
           {open !== undefined && (
-            <div className="text-xs opacity-90">{open ? 'Δεχόμαστε παραγγελίες τώρα' : 'Κλειστό για online παραγγελίες'}</div>
+            <div className="text-xs opacity-90">{open ? 'Παίρνουμε παραγγελίες τώρα' : 'Δεν παίρνουμε παραγγελίες αυτή την ώρα'}</div>
           )}
         </div>
         {phone && (

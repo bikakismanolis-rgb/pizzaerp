@@ -6,6 +6,7 @@ import { phraseKey } from './normalize'
 import { CHANNEL_LABEL, ITEM_TYPE_LABEL, TALLY_NOTES, docCode } from '../labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round } from '../format'
 import { friendlyMessage, tallyMessage } from '../errors'
+import { countName } from './greek'
 import { monthAcc } from '../overhead'
 import { loadMonthNumbers } from '../money'
 import {
@@ -85,8 +86,9 @@ function partnerOf(env: ExecEnv, id: string): Partner {
 }
 
 /** "3 Μαργαρίτα" για τεμάχια, "6 kg Μοτσαρέλα" για τα υπόλοιπα */
+/** «3 Μαργαρίτες», «10 kg Μοτσαρέλα» */
 export function qtyText(it: Pick<Item, 'unit' | 'name'>, qty: number): string {
-  return it.unit === 'τεμ' ? `${fmtQty(qty)} ${it.name}` : `${fmtQty(qty)} ${it.unit} ${it.name}`
+  return it.unit === 'τεμ' ? `${fmtQty(qty)} ${countName(qty, it.name)}` : `${fmtQty(qty)} ${it.unit} ${it.name}`
 }
 
 const okQty = (q: number) => Number.isFinite(q) && q > 0
@@ -655,7 +657,7 @@ async function sale(cmd: Cmd<'sale'>, env: ExecEnv): Promise<ExecResult> {
   await env.refreshMaster()
   const list = lines.map((l) => qtyText(itemOf(env, l.item_id), l.qty)).join(', ')
   return {
-    message: `Πώληση ${docCode('sale', d.docNo)} σε «${partner.name}»: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
+    message: `Πώληση ${docCode('sale', d.docNo)} στον πελάτη ${partner.name}: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
     undo: undoPosted(env, d.id),
   }
 }
@@ -677,7 +679,7 @@ async function purchase(cmd: Cmd<'purchase'>, env: ExecEnv): Promise<ExecResult>
   await env.refreshMaster()
   const list = lines.map((l) => qtyText(itemOf(env, l.item_id), l.qty)).join(', ')
   return {
-    message: `Αγορά ${docCode('purchase', d.docNo)} από «${partner.name}»: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
+    message: `Αγορά ${docCode('purchase', d.docNo)} από τον προμηθευτή ${partner.name}: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
     undo: undoPosted(env, d.id),
   }
 }
@@ -835,8 +837,8 @@ async function money(cmd: Cmd<'receipt'> | Cmd<'payment'>, env: ExecEnv): Promis
   const rest = bal ? ` Υπόλοιπο: ${fmtMoney(isReceipt ? bal.customer_balance : bal.supplier_balance)}.` : ''
   return {
     message: isReceipt
-      ? `Είσπραξη ${docCode('receipt', d.docNo)} από «${partner.name}»: ${fmtMoney(cmd.amount)}.${rest}`
-      : `Πληρωμή ${docCode('payment', d.docNo)} σε «${partner.name}»: ${fmtMoney(cmd.amount)}.${rest}`,
+      ? `Είσπραξη ${docCode('receipt', d.docNo)} από τον πελάτη ${partner.name}: ${fmtMoney(cmd.amount)}.${rest}`
+      : `Πληρωμή ${docCode('payment', d.docNo)} στον προμηθευτή ${partner.name}: ${fmtMoney(cmd.amount)}.${rest}`,
     undo: undoPosted(env, d.id),
   }
 }
@@ -963,7 +965,7 @@ async function partnerPrice(cmd: Cmd<'partner_price'>, env: ExecEnv): Promise<Ex
     .upsert({ company_id: env.companyId, partner_id: partnerId, item_id: itemId, price: net }, { onConflict: 'partner_id,item_id' })
   if (error) fail(error)
   return {
-    message: `Τιμή για «${p.name}»: ${it.name} ${fmtMoney(net)} χωρίς ΦΠΑ${oldRow ? ` (πριν ${fmtMoney(oldRow.price)})` : ''}.`,
+    message: `Τιμή για τον πελάτη ${p.name}: ${it.name} ${fmtMoney(net)} χωρίς ΦΠΑ${oldRow ? ` (πριν ${fmtMoney(oldRow.price)})` : ''}.`,
     undo: async () => {
       const q = oldRow
         ? supabase.from('partner_price').update({ price: oldRow.price }).eq('partner_id', partnerId).eq('item_id', itemId)
