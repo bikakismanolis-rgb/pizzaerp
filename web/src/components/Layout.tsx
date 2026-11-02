@@ -5,6 +5,7 @@ import { useCompany } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { supabase } from '../lib/supabase'
 import { CHANNEL_LABEL } from '../lib/labels'
+import { NEW_ORDERS_EVENT } from '../lib/online'
 import { fmtDate, today } from '../lib/format'
 import type { Channel } from '../lib/types'
 import { MicIcon, useToast } from './ui'
@@ -12,40 +13,54 @@ import { MicIcon, useToast } from './ui'
 interface NavItem { to: string; label: string }
 interface NavGroup { title: string; items: NavItem[] }
 
+/** Τα καθημερινά: πάντα φαίνονται */
+const MAIN: NavItem[] = [
+  { to: '/', label: '🏠 Αρχική' },
+  { to: '/voice', label: '🎤 Πες το' },
+  { to: '/orders', label: '🛎️ Παραγγελίες' },
+  { to: '/daily-sales', label: '📋 Πωλήσεις ημέρας' },
+  { to: '/docs/purchase', label: '🚚 Αγορές (ήρθε εμπόρευμα)' },
+  { to: '/reports/profit', label: '💶 Κέρδος του μήνα' },
+]
+
+/** Τα υπόλοιπα, κάτω από «Περισσότερα» */
 const NAV: NavGroup[] = [
-  { title: '', items: [{ to: '/voice', label: '🎤 Πες το' }, { to: '/', label: 'Αρχική' }] },
   {
     title: 'Κινήσεις',
     items: [
-      { to: '/daily-sales', label: 'Πωλήσεις ημέρας' },
-      { to: '/docs/sale', label: 'Πωλήσεις' },
-      { to: '/docs/purchase', label: 'Αγορές' },
+      { to: '/docs/sale', label: 'Πωλήσεις (όλες)' },
       { to: '/docs/production', label: 'Παραγωγές' },
-      { to: '/docs/stocktake', label: 'Απογραφές' },
-      { to: '/docs/receipt', label: 'Εισπράξεις' },
-      { to: '/docs/payment', label: 'Πληρωμές' },
+      { to: '/docs/stocktake', label: 'Μετρήσεις αποθήκης' },
+      { to: '/docs/receipt', label: 'Εισπράξεις (μας πλήρωσαν)' },
+      { to: '/docs/payment', label: 'Πληρωμές (πληρώσαμε)' },
+      { to: '/fiscal', label: 'Αποδείξεις & τιμολόγια' },
+      { to: '/costs', label: 'Γενικά έξοδα (ρεύμα, ενοίκιο…)' },
     ],
   },
   {
-    title: 'Αρχεία',
+    title: 'Τα στοιχεία μας',
     items: [
       { to: '/items', label: 'Είδη & συνταγές' },
       { to: '/partners', label: 'Πελάτες & προμηθευτές' },
-      { to: '/voice/words', label: 'Λέξεις & φράσεις' },
+      { to: '/orders/drivers', label: 'Διανομείς' },
+      { to: '/team', label: 'Υπάλληλοι' },
+      { to: '/voice/words', label: 'Οι λέξεις μας (για το «Πες το»)' },
     ],
   },
   {
     title: 'Αναφορές',
     items: [
-      { to: '/reports/stock', label: 'Υπόλοιπα αποθήκης' },
-      { to: '/reports/balances', label: 'Υπόλοιπα συναλλασσομένων' },
-      { to: '/reports/sales', label: 'Πωλήσεις ανά πελάτη/είδος' },
+      { to: '/reports/stock', label: 'Τι έχουμε στην αποθήκη' },
+      { to: '/reports/balances', label: 'Ποιος χρωστάει, τι χρωστάμε' },
+      { to: '/reports/sales', label: 'Πωλήσεις ανά πελάτη / είδος' },
       { to: '/reports/purchases', label: 'Αγορές ανά προμηθευτή' },
       { to: '/reports/production-cost', label: 'Κόστος παραγωγής' },
-      { to: '/reports/stocktakes', label: 'Αποτελέσματα απογραφών' },
+      { to: '/reports/stocktakes', label: 'Τι βγήκε στις μετρήσεις' },
     ],
   },
 ]
+
+const MORE_KEY = 'pizza-erp.menu-more'
 
 // ---------------------------------------------------------------------
 // Αυτόματο κλείσιμο προηγούμενων ημερών: μία φορά ανά εταιρεία/ημέρα/συνεδρία.
@@ -103,7 +118,7 @@ function useAutoCloseRunning(companyId: string | undefined) {
       const failed = rows.filter((x) => !x.ok)
       if (failed.length === 1) {
         const r = failed[0]
-        toast.err(`Δεν έκλεισε η πώληση ημέρας ${rowLabel(r)} (ΠΩ-${r.doc_no}): ${r.message}. Δες τις Πωλήσεις.`)
+        toast.err(`Δεν έκλεισε η πώληση ημέρας ${rowLabel(r)} (αρ. ${r.doc_no}): ${r.message}. Δες τις Πωλήσεις.`)
       } else if (failed.length > 1) {
         const list = failed.slice(0, 4).map(rowLabel).join(', ') + (failed.length > 4 ? ` και ${failed.length - 4} ακόμα` : '')
         toast.err(`Δεν έκλεισαν ${failed.length} πωλήσεις ημέρας (${list}): ${failed[0].message}. Δες τις Πωλήσεις (σε εξέλιξη).`)
@@ -114,34 +129,83 @@ function useAutoCloseRunning(companyId: string | undefined) {
   }, [companyId, day, nonce])
 }
 
+// ---------------------------------------------------------------------
+// Νέες online παραγγελίες: αριθμός στο μενού, από όποια σελίδα κι αν είσαι.
+// Βάση χωρίς 0005: σιωπηλά τίποτα.
+// ---------------------------------------------------------------------
+function useNewOrders(companyId: string | undefined): number {
+  const [n, setN] = useState(0)
+  useEffect(() => {
+    if (!companyId) return
+    let alive = true
+    let off = false
+    const check = async () => {
+      if (off || document.visibilityState !== 'visible') return
+      const { count, error } = await supabase.from('online_order').select('id', { count: 'exact', head: true })
+        .eq('company_id', companyId).eq('status', 'new')
+      if (!alive) return
+      if (error) { off = true; return }
+      setN(count ?? 0)
+    }
+    void check()
+    const iv = window.setInterval(check, 30000)
+    document.addEventListener('visibilitychange', check)
+    const fromOrders = (e: Event) => { const v = (e as CustomEvent<number>).detail; if (typeof v === 'number') setN(v) }
+    window.addEventListener(NEW_ORDERS_EVENT, fromOrders)
+    return () => {
+      alive = false
+      window.clearInterval(iv)
+      document.removeEventListener('visibilitychange', check)
+      window.removeEventListener(NEW_ORDERS_EVENT, fromOrders)
+    }
+  }, [companyId])
+  return n
+}
+
 export function Layout() {
   const [open, setOpen] = useState(false)
   const { signOut, user } = useAuth()
   const { company, companies, select } = useCompany()
   const { pathname } = useLocation()
   useAutoCloseRunning(company?.id)
-  // το στρογγυλό μικρόφωνο: όχι στο «Πες το» και όχι στις Πωλήσεις ημέρας (έχουν
-  // δικό τους «Πες το» και τα +/− θα κρύβονταν από κάτω του)
-  const showMic = !/^\/voice\/?$/.test(pathname) && !pathname.startsWith('/daily-sales')
+  const newOrders = useNewOrders(company?.id)
+  // το στρογγυλό μικρόφωνο: όχι στο «Πες το», στις Πωλήσεις ημέρας και στις
+  // Παραγγελίες (έχουν δικό τους μικρόφωνο / τα κουμπιά θα κρύβονταν από κάτω του)
+  // όχι στην αρχική: εκεί υπάρχει το μεγάλο κόκκινο «Πες το»
+  const showMic = pathname !== '/' && !/^\/voice\/?$/.test(pathname) && !pathname.startsWith('/daily-sales') && !/^\/orders\/?$/.test(pathname)
 
+  // «Περισσότερα»: ανοιχτό αν το άνοιξε κάποτε ή αν είμαστε σε σελίδα του
+  const inMore = NAV.some((g) => g.items.some((it) => pathname === it.to || pathname.startsWith(it.to + '/')))
+    && !MAIN.some((it) => it.to !== '/' && (pathname === it.to || pathname.startsWith(it.to + '/')))
+  const [more, setMore] = useState(() => { try { return localStorage.getItem(MORE_KEY) === '1' } catch { return false } })
+  const toggleMore = () => { const v = !more; setMore(v); try { localStorage.setItem(MORE_KEY, v ? '1' : '0') } catch { /* ignore */ } }
+  const link = (it: NavItem, big = false) => (
+    <NavLink
+      key={it.to}
+      to={it.to}
+      end={it.to === '/' || it.to === '/voice' || it.to === '/orders'}
+      onClick={() => setOpen(false)}
+      className={({ isActive }) =>
+        'flex items-center rounded-md px-3 ' + (big ? 'min-h-12 text-base font-medium ' : 'min-h-11 ') + (isActive ? 'bg-red-700 text-white' : 'text-stone-800 hover:bg-stone-200')
+      }
+    >
+      {it.label}
+      {it.to === '/orders' && newOrders > 0 && (
+        <span className="ml-2 inline-flex min-w-[1.5rem] justify-center rounded-full bg-amber-400 px-1.5 text-sm font-bold text-amber-950">{newOrders}</span>
+      )}
+    </NavLink>
+  )
   const nav = (
-    <nav className="flex flex-col gap-4 p-3 text-sm">
-      {NAV.map((g, gi) => (
-        <div key={gi}>
-          {g.title && <div className="px-2 mb-1 text-xs font-semibold uppercase tracking-wide text-stone-400">{g.title}</div>}
-          {g.items.map((it) => (
-            <NavLink
-              key={it.to}
-              to={it.to}
-              end={it.to === '/' || it.to === '/voice'}
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                'block rounded-md px-2 py-1.5 ' + (isActive ? 'bg-red-700 text-white' : 'text-stone-700 hover:bg-stone-200')
-              }
-            >
-              {it.label}
-            </NavLink>
-          ))}
+    <nav className="flex flex-col gap-1 p-3 text-[15px]">
+      {MAIN.map((it) => link(it, true))}
+      <button type="button" className="mt-2 flex items-center justify-between min-h-12 rounded-md px-3 text-stone-700 hover:bg-stone-200 font-medium"
+        onClick={toggleMore} aria-expanded={more || inMore}>
+        <span>Περισσότερα</span><span aria-hidden="true">{more || inMore ? '▾' : '▸'}</span>
+      </button>
+      {(more || inMore) && NAV.map((g, gi) => (
+        <div key={gi} className="mt-2">
+          <div className="px-3 mb-1 text-sm font-semibold text-stone-600">{g.title}</div>
+          {g.items.map((it) => link(it))}
         </div>
       ))}
     </nav>
@@ -188,7 +252,10 @@ export function Layout() {
         <header className="md:hidden sticky top-0 z-30 bg-white border-b border-stone-200 flex items-center gap-3 px-2 py-1">
           <button className="btn-ghost h-11 w-11 p-0 text-xl" onClick={() => setOpen(true)} aria-label="Μενού">☰</button>
           <div className="font-bold text-red-700">🍕 Pizza ERP</div>
-          <div className="text-xs text-stone-500 truncate">{company?.name}</div>
+          <div className="text-xs text-stone-500 truncate flex-1">{company?.name}</div>
+          {newOrders > 0 && !pathname.startsWith('/orders') && (
+            <Link to="/orders" className="rounded-full bg-amber-400 text-amber-950 text-xs font-bold px-3 py-1.5 mr-1">🛎️ {newOrders} νέ{newOrders === 1 ? 'α' : 'ες'}</Link>
+          )}
         </header>
         <main className={'flex-1 p-3 md:p-6 max-w-7xl w-full mx-auto ' + (showMic ? 'pb-24 md:pb-6' : '')}>
           <Outlet />

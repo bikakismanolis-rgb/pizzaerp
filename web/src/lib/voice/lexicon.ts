@@ -145,7 +145,7 @@ export type Cue =
   | 'recipe' | 'recipeVerb' | 'want' | 'price' | 'priceVerb' | 'relPrice' | 'sell' | 'invoice' | 'note' | 'order'
   | 'ordered' | 'buy' | 'brought' | 'take1' | 'take3' | 'produce' | 'did' | 'knead' | 'count' | 'remain' | 'runOut'
   | 'have' | 'receive' | 'paid3' | 'gave3' | 'pay' | 'question' | 'owe1' | 'owe3' | 'balance' | 'stockNoun' | 'today'
-  | 'turnover' | 'minus' | 'waste' | 'ret' | 'typeRaw' | 'typeSemi' | 'typeFinished' | 'typeGeneric' | 'pizza' | 'fix'
+  | 'turnover' | 'money' | 'month' | 'minus' | 'waste' | 'ret' | 'typeRaw' | 'typeSemi' | 'typeFinished' | 'typeGeneric' | 'pizza' | 'fix'
 
 const CUES: [RegExp, Cue][] = [
   [/^(βοηθεια|βοηθησε|help|οδηγιεσ|εντολεσ|παραδειγματα)$/, 'help'],
@@ -196,6 +196,8 @@ const CUES: [RegExp, Cue][] = [
   [/^(αποθεμα|αποθεματα|αποθεματοσ|στοκ|stock)$/, 'stockNoun'],
   [/^(σημερα|σημερινα|σημερινεσ|σημερινο|σημερινη|σημερινησ)$/, 'today'],
   [/^(τζιροσ|τζιρο|τζιρου)$/, 'turnover'],
+  [/^(λεφτα|λεφτουδια|χρηματα|κερδοσ|κερδη|κερδισαμε|κερδισα|κερδιζουμε)$/, 'money'],
+  [/^(μηνα|μηνασ|μηνου|μηνιαια|μηνιαιο|μηνιαιεσ)$/, 'month'],
   [/^(μειον|λιγοτερη|λιγοτερεσ|λιγοτερα|λιγοτερο|λιγοτερουσ|αφαιρεσε|αφαιρεση|βγαλε)$/, 'minus'],
   [/^(υλικο|υλικα|πρωτυλη)$/, 'typeRaw'],
   [/^(ημιετοιμ|μισοετοιμ)/, 'typeSemi'],

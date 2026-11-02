@@ -6,6 +6,9 @@ import { phraseKey } from './normalize'
 import { CHANNEL_LABEL, ITEM_TYPE_LABEL, TALLY_NOTES, docCode } from '../labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round } from '../format'
 import { friendlyMessage, tallyMessage } from '../errors'
+import { countName } from './greek'
+import { monthAcc } from '../overhead'
+import { loadMonthNumbers } from '../money'
 import {
   addDays, localHour, phraseProblem, plural, removalNote, stockOps, stockTarget, stocktakeList, tallySteps,
   type ChannelTotal, type PostedQty, type RunningState, type RunningStocktake, type StockOp, type TallyRow,
@@ -83,8 +86,9 @@ function partnerOf(env: ExecEnv, id: string): Partner {
 }
 
 /** "3 Μαργαρίτα" για τεμάχια, "6 kg Μοτσαρέλα" για τα υπόλοιπα */
+/** «3 Μαργαρίτες», «10 kg Μοτσαρέλα» */
 export function qtyText(it: Pick<Item, 'unit' | 'name'>, qty: number): string {
-  return it.unit === 'τεμ' ? `${fmtQty(qty)} ${it.name}` : `${fmtQty(qty)} ${it.unit} ${it.name}`
+  return it.unit === 'τεμ' ? `${fmtQty(qty)} ${countName(qty, it.name)}` : `${fmtQty(qty)} ${it.unit} ${it.name}`
 }
 
 const okQty = (q: number) => Number.isFinite(q) && q > 0
@@ -286,7 +290,7 @@ async function assertStillOpen(docId: string | null, what: string) {
   if (!docId) return
   const head = await docHead(docId)
   if (head && head.status === 'posted') {
-    throw new Error(`${what} ${docCode(head.doc_type, head.doc_no)} έχει ήδη καταχωρηθεί. Αναίρεση από τη λίστα παραστατικών (ακύρωση καταχώρησης).`)
+    throw new Error(`${what} ${docCode(head.doc_type, head.doc_no)} έχει ήδη περαστεί. Άνοιξέ την από το μενού και πάτα «Διόρθωση».`)
   }
 }
 
@@ -549,6 +553,7 @@ export async function execute(cmd: Command, env: ExecEnv): Promise<ExecResult> {
     case 'query_stock': return queryStock(cmd, env)
     case 'query_balance': return queryBalance(cmd, env)
     case 'query_today': return { message: await todaySummary(env) }
+    case 'query_month': return { message: await monthSummary(env) }
     case 'new_phrase': return newPhrase(cmd, env)
     case 'help': return { message: 'Πες π.χ. «efood δύο μαργαρίτες», «αγόρασα από τον μύλο δέκα σακιά αλεύρι», «μέτρησα μοτσαρέλα έξι κιλά», «όταν λέω οικογενειακή εννοώ μεγάλη μαργαρίτα».' }
     case 'undo': throw new Error('Η αναίρεση γίνεται από τη λίστα ενεργειών.')
@@ -652,7 +657,7 @@ async function sale(cmd: Cmd<'sale'>, env: ExecEnv): Promise<ExecResult> {
   await env.refreshMaster()
   const list = lines.map((l) => qtyText(itemOf(env, l.item_id), l.qty)).join(', ')
   return {
-    message: `Πώληση ${docCode('sale', d.docNo)} σε «${partner.name}»: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
+    message: `Πώληση ${docCode('sale', d.docNo)} στον πελάτη ${partner.name}: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
     undo: undoPosted(env, d.id),
   }
 }
@@ -674,7 +679,7 @@ async function purchase(cmd: Cmd<'purchase'>, env: ExecEnv): Promise<ExecResult>
   await env.refreshMaster()
   const list = lines.map((l) => qtyText(itemOf(env, l.item_id), l.qty)).join(', ')
   return {
-    message: `Αγορά ${docCode('purchase', d.docNo)} από «${partner.name}»: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
+    message: `Αγορά ${docCode('purchase', d.docNo)} από τον προμηθευτή ${partner.name}: ${list}. Σύνολο ${fmtMoney(d.gross)} με ΦΠΑ.`,
     undo: undoPosted(env, d.id),
   }
 }
@@ -832,8 +837,8 @@ async function money(cmd: Cmd<'receipt'> | Cmd<'payment'>, env: ExecEnv): Promis
   const rest = bal ? ` Υπόλοιπο: ${fmtMoney(isReceipt ? bal.customer_balance : bal.supplier_balance)}.` : ''
   return {
     message: isReceipt
-      ? `Είσπραξη ${docCode('receipt', d.docNo)} από «${partner.name}»: ${fmtMoney(cmd.amount)}.${rest}`
-      : `Πληρωμή ${docCode('payment', d.docNo)} σε «${partner.name}»: ${fmtMoney(cmd.amount)}.${rest}`,
+      ? `Είσπραξη ${docCode('receipt', d.docNo)} από τον πελάτη ${partner.name}: ${fmtMoney(cmd.amount)}.${rest}`
+      : `Πληρωμή ${docCode('payment', d.docNo)} στον προμηθευτή ${partner.name}: ${fmtMoney(cmd.amount)}.${rest}`,
     undo: undoPosted(env, d.id),
   }
 }
@@ -960,7 +965,7 @@ async function partnerPrice(cmd: Cmd<'partner_price'>, env: ExecEnv): Promise<Ex
     .upsert({ company_id: env.companyId, partner_id: partnerId, item_id: itemId, price: net }, { onConflict: 'partner_id,item_id' })
   if (error) fail(error)
   return {
-    message: `Τιμή για «${p.name}»: ${it.name} ${fmtMoney(net)} χωρίς ΦΠΑ${oldRow ? ` (πριν ${fmtMoney(oldRow.price)})` : ''}.`,
+    message: `Τιμή για τον πελάτη ${p.name}: ${it.name} ${fmtMoney(net)} χωρίς ΦΠΑ${oldRow ? ` (πριν ${fmtMoney(oldRow.price)})` : ''}.`,
     undo: async () => {
       const q = oldRow
         ? supabase.from('partner_price').update({ price: oldRow.price }).eq('partner_id', partnerId).eq('item_id', itemId)
@@ -996,7 +1001,7 @@ async function closeDay(env: ExecEnv): Promise<ExecResult> {
   if (ok.length === 0) throw new Error('Δεν έκλεισε η μέρα. ' + bad.join(' · '))
   return {
     message: `Έκλεισε η μέρα: ${ok.join(', ')}.` + (bad.length ? ` Δεν έκλεισαν: ${bad.join(' · ')}.` : '') +
-      ' Δεν αναιρείται από εδώ (ακύρωση καταχώρησης από τις Πωλήσεις).',
+      ' Δεν αναιρείται από εδώ: άνοιξε την πώληση στις Πωλήσεις και πάτα «Διόρθωση».',
   }
 }
 
@@ -1071,6 +1076,20 @@ async function queryBalance(cmd: Cmd<'query_balance'>, env: ExecEnv): Promise<Ex
 }
 
 /** Σύνοψη πωλήσεων ημέρας (ανοιχτές + καταχωρημένες) ανά κανάλι και είδος */
+/**
+ * «Πόσα λεφτά βγάλαμε αυτό τον μήνα»: ίδια νούμερα με την αρχική και το
+ * «Κέρδος του μήνα» (lib/money). Τα γενικά έξοδα τα βλέπει μόνο ο ιδιοκτήτης.
+ */
+export async function monthSummary(env: Pick<ExecEnv, 'companyId' | 'today'>): Promise<string> {
+  const m = await loadMonthNumbers(env.companyId, env.today)
+  const when = `Τον ${monthAcc(m.month, m.month)} ως σήμερα`
+  const openTxt = m.openNet > 0 ? ` Ανοιχτές πωλήσεις ημέρας ακόμα ${fmtMoney(m.openNet)}: μετράνε όταν κλείσει η μέρα.` : ''
+  if (m.net === 0) return `${when} δεν έχουν περαστεί πωλήσεις.${openTxt}`
+  const ohTxt = m.overhead > 0 ? `, γενικά έξοδα ${fmtMoney(m.overhead)}${m.days < m.of ? ` για ${m.days} μέρες` : ''}` : ''
+  const tail = m.overhead > 0 ? `Μένουν ${fmtMoney(m.profit)}.` : `Μετά τα υλικά μένουν ${fmtMoney(m.profit)}, χωρίς τα γενικά έξοδα.`
+  return `${when}: πωλήσεις ${fmtMoney(m.net)} χωρίς ΦΠΑ, υλικά ${fmtMoney(m.cogs)}${ohTxt}. ${tail}${openTxt}`
+}
+
 export async function todaySummary(env: Pick<ExecEnv, 'companyId' | 'today' | 'items'>): Promise<string> {
   const { data, error } = await supabase.from('doc').select('id, channel, status, is_running, doc_line(item_id, qty, gross)')
     .eq('company_id', env.companyId).eq('doc_type', 'sale').eq('doc_date', env.today).eq('is_auto', false)
@@ -1084,14 +1103,16 @@ export async function todaySummary(env: Pick<ExecEnv, 'companyId' | 'today' | 'i
   for (const d of docs) {
     const ch = d.channel ?? 'wholesale'
     for (const l of d.doc_line) {
+      gross += Number(l.gross)
+      // τα μεταφορικά δεν είναι τεμάχια (μετράνε μόνο στα λεφτά)
+      if (env.items.find((i) => i.id === l.item_id)?.is_service) continue
       const q = Number(l.qty)
       byCh.set(ch, (byCh.get(ch) ?? 0) + q)
       byItem.set(l.item_id, (byItem.get(l.item_id) ?? 0) + q)
       qty += q
-      gross += Number(l.gross)
     }
   }
-  if (qty === 0) return 'Σήμερα δεν έχουν περαστεί πωλήσεις.'
+  if (qty === 0 && gross === 0) return 'Σήμερα δεν έχουν περαστεί πωλήσεις.'
   const label = (c: string) => CHANNEL_LABEL[c as keyof typeof CHANNEL_LABEL] ?? c
   const chs = [...byCh].map(([c, q]) => `${label(c)} ${fmtQty(q)}`).join(', ')
   const top = [...byItem].sort((a, b) => b[1] - a[1]).slice(0, 6)

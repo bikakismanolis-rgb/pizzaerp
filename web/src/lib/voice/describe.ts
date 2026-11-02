@@ -4,10 +4,11 @@ import { CHANNEL_LABEL } from '../labels'
 import { fmtCost, fmtMoney, fmtQty } from '../format'
 import { normText } from './normalize'
 import { genericPack, unitWord } from './lexicon'
+import { countName } from './greek'
 
 /**
  * Μία φυσική ελληνική πρόταση για την οθόνη επιβεβαίωσης και την ανάγνωση
- * φωναχτά, π.χ. "Πώληση efood: 3 Μαργαρίτα, 2 Special. Να το περάσω;".
+ * φωναχτά, π.χ. "Πώληση efood: 3 Μαργαρίτες, 2 Special. Να το περάσω;".
  * Ό,τι δεν βρέθηκε στον κατάλογο εμφανίζεται όπως ακούστηκε, σε «».
  */
 
@@ -49,6 +50,8 @@ function qtyPart(ctx: InterpretContext, l: QtyLine, abs = false): string | null 
   const q = abs ? Math.abs(Number(l.qty) || 0) : Number(l.qty) || 0
   // 0 χωρίς heardQty = δεν ειπώθηκε ποσότητα (όχι "0 kg")
   if (q === 0 && !l.heardQty?.trim()) return null
+  // σακί / κιβώτιο χωρίς γνωστό μέγεθος: όπως ακούστηκε ("δύο σακιά Αλεύρι"), όχι "2 kg"
+  if (l.unknownPack) return l.heardQty?.trim() || `${fmtQty(l.unknownPack.count)} × ${l.unknownPack.name}`
   // άγνωστο είδος: η μονάδα όπως ακούστηκε ("10 σακιά «σιμιγδάλι»")
   if (!it && l.heardQty) {
     const last = normText(l.heardQty).split(' ').pop() ?? ''
@@ -58,10 +61,21 @@ function qtyPart(ctx: InterpretContext, l: QtyLine, abs = false): string | null 
 }
 
 function lineText(ctx: InterpretContext, l: QtyLine, abs = false): string {
+  const it = findItem(ctx, l.item?.id ?? null)
   const name = refText(ctx, l.item, 'item')
   const q = qtyPart(ctx, l, abs)
-  return q === null ? `${name} (δεν ακούστηκε ποσότητα)` : `${q} ${name}`
+  if (q === null) return `${name} (δεν ακούστηκε ποσότητα)`
+  // τεμάχια: «3 Μαργαρίτες»· κιλά / λίτρα / σακιά: «10 kg Μοτσαρέλα»
+  const pieces = !!it && (!it.unit || it.unit === 'τεμ') && !l.unknownPack
+  return `${q} ${pieces ? countName(Number(l.qty) || 0, name) : name}`
 }
+
+/** «από τον προμηθευτή Μύλος», «στον πελάτη Ταβέρνα Κύμα»: το όνομα δεν κλίνεται, ο ρόλος ναι */
+const toCustomer = (name: string) => `στον πελάτη ${name}`
+const forCustomer = (name: string) => `για τον πελάτη ${name}`
+const fromCustomer = (name: string) => `από τον πελάτη ${name}`
+const toSupplier = (name: string) => `στον προμηθευτή ${name}`
+const fromSupplier = (name: string) => `από τον προμηθευτή ${name}`
 
 /** Απογραφή: "Αλεύρι άλλα 5 kg" (πρόσθεση), "Αλεύρι σύνολο 40 kg" (αντικατάσταση) */
 function stockText(ctx: InterpretContext, l: QtyLine): string {
@@ -118,11 +132,11 @@ function describeInner(interp: Interpretation, ctx: InterpretContext): string {
       return sentence(`Πώληση ${ch}: ${body}${less}`, ASK)
     }
     case 'sale': {
-      const who = c.partner?.id || c.partner?.heard ? ` σε ${refText(ctx, c.partner, 'partner')}` : ' (χωρίς πελάτη)'
+      const who = c.partner?.id || c.partner?.heard ? ` ${toCustomer(refText(ctx, c.partner, 'partner'))}` : ' (χωρίς πελάτη)'
       return sentence(`Πώληση${who}: ${list(c.lines.map((l) => pricedText(ctx, l)))}`, ASK)
     }
     case 'purchase': {
-      const who = c.partner?.id || c.partner?.heard ? ` από ${refText(ctx, c.partner, 'partner')}` : ' (χωρίς προμηθευτή)'
+      const who = c.partner?.id || c.partner?.heard ? ` ${fromSupplier(refText(ctx, c.partner, 'partner'))}` : ' (χωρίς προμηθευτή)'
       const ref = c.refNo ? ` (τιμολόγιο ${c.refNo})` : ''
       return sentence(`Αγορά${who}${ref}: ${list(c.lines.map((l) => pricedText(ctx, l)))}`, ASK)
     }
@@ -131,11 +145,11 @@ function describeInner(interp: Interpretation, ctx: InterpretContext): string {
     case 'stocktake':
       return sentence(`Απογραφή: ${list(c.lines.map((l) => stockText(ctx, l)))}`, ASK)
     case 'receipt':
-      if (unheard(c.amount, NO_AMOUNT)) return sentence(`Είσπραξη από ${refText(ctx, c.partner, 'partner')}: δεν ακούστηκε ποσό`)
-      return sentence(`Είσπραξη ${fmtMoney(c.amount)} από ${refText(ctx, c.partner, 'partner')}`, ASK)
+      if (unheard(c.amount, NO_AMOUNT)) return sentence(`Είσπραξη ${fromCustomer(refText(ctx, c.partner, 'partner'))}: δεν ακούστηκε ποσό`)
+      return sentence(`Είσπραξη ${fmtMoney(c.amount)} ${fromCustomer(refText(ctx, c.partner, 'partner'))}`, ASK)
     case 'payment':
-      if (unheard(c.amount, NO_AMOUNT)) return sentence(`Πληρωμή σε ${refText(ctx, c.partner, 'partner')}: δεν ακούστηκε ποσό`)
-      return sentence(`Πληρωμή ${fmtMoney(c.amount)} σε ${refText(ctx, c.partner, 'partner')}`, ASK)
+      if (unheard(c.amount, NO_AMOUNT)) return sentence(`Πληρωμή ${toSupplier(refText(ctx, c.partner, 'partner'))}: δεν ακούστηκε ποσό`)
+      return sentence(`Πληρωμή ${fmtMoney(c.amount)} ${toSupplier(refText(ctx, c.partner, 'partner'))}`, ASK)
     case 'new_item': {
       const head = c.itemType === 'raw' ? 'Νέα πρώτη ύλη' : c.itemType === 'semi' ? 'Νέο ημιέτοιμο' : 'Νέο προϊόν'
       const parts = [`${head} «${c.name || '?'}» σε ${c.unit}`]
@@ -161,7 +175,7 @@ function describeInner(interp: Interpretation, ctx: InterpretContext): string {
       const out = qtyText(c.outputQty, it?.unit ?? 'τεμ')
       const unitSuffix = !it || it.unit === 'τεμ' ? ' τεμ' : ''
       return sentence(
-        `Συνταγή για ${refText(ctx, c.item, 'item')} (για ${out}${unitSuffix}): ${list(c.lines.map((l) => lineText(ctx, l)))}`,
+        `${refText(ctx, c.item, 'item')}, συνταγή για ${out}${unitSuffix}: ${list(c.lines.map((l) => lineText(ctx, l)))}`,
         'Να την περάσω;',
       )
     }
@@ -169,34 +183,36 @@ function describeInner(interp: Interpretation, ctx: InterpretContext): string {
       const it = findItem(ctx, c.item?.id ?? null)
       const vat = Number(it?.vat_rate ?? 13)
       const name = refText(ctx, c.item, 'item')
-      if (unheard(c.netPrice, NO_PRICE)) return sentence(`Τιμή για ${name}: δεν ακούστηκε ποσό`)
+      if (unheard(c.netPrice, NO_PRICE)) return sentence(`${name}: νέα τιμή, δεν ακούστηκε ποσό`)
       const text = c.heardGross
-        ? `Τιμή για ${name}: ${fmtMoney(c.netPrice * (1 + vat / 100))} με ΦΠΑ (${fmtMoney(c.netPrice)} χωρίς ΦΠΑ)`
-        : `Τιμή για ${name}: ${fmtMoney(c.netPrice)} χωρίς ΦΠΑ`
+        ? `${name}: νέα τιμή ${fmtMoney(c.netPrice * (1 + vat / 100))} με ΦΠΑ (${fmtMoney(c.netPrice)} χωρίς ΦΠΑ)`
+        : `${name}: νέα τιμή ${fmtMoney(c.netPrice)} χωρίς ΦΠΑ`
       return sentence(text, 'Να την αλλάξω;')
     }
     case 'partner_price':
       if (unheard(c.netPrice, NO_PRICE)) {
-        return sentence(`Τιμή για ${refText(ctx, c.partner, 'partner')}: ${refText(ctx, c.item, 'item')}, δεν ακούστηκε ποσό`)
+        return sentence(`Τιμή ${forCustomer(refText(ctx, c.partner, 'partner'))}: ${refText(ctx, c.item, 'item')}, δεν ακούστηκε ποσό`)
       }
       return sentence(
-        `Τιμή για ${refText(ctx, c.partner, 'partner')}: ${refText(ctx, c.item, 'item')} ${fmtMoney(c.netPrice)} χωρίς ΦΠΑ`,
+        `Τιμή ${forCustomer(refText(ctx, c.partner, 'partner'))}: ${refText(ctx, c.item, 'item')} ${fmtMoney(c.netPrice)} χωρίς ΦΠΑ`,
         'Να την περάσω;',
       )
     case 'new_phrase':
       return `Νέα φράση: όταν λες «${c.phrase || '?'}» θα καταλαβαίνω «${c.meaning || '?'}». Να τη θυμάμαι;`
     case 'close_day':
-      return 'Κλείσιμο ημέρας: θα καταχωρηθούν οι ανοιχτές πωλήσεις ημέρας. Να προχωρήσω;'
+      return 'Κλείσιμο ημέρας: θα περαστούν οι ανοιχτές πωλήσεις ημέρας. Να προχωρήσω;'
     case 'close_stocktake':
-      return 'Τέλος απογραφής: θα καταχωρηθεί η απογραφή σε εξέλιξη. Να προχωρήσω;'
+      return 'Τέλος απογραφής: θα περαστεί η ανοιχτή απογραφή. Να προχωρήσω;'
     case 'undo':
-      return 'Αναίρεση της τελευταίας καταχώρησης. Να προχωρήσω;'
+      return 'Αναίρεση του τελευταίου που πέρασε. Να προχωρήσω;'
     case 'query_stock':
-      return sentence(`Απόθεμα για ${refText(ctx, c.item, 'item')}`)
+      return sentence(`Απόθεμα: ${refText(ctx, c.item, 'item')}`)
     case 'query_balance':
-      return sentence(`Υπόλοιπο για ${refText(ctx, c.partner, 'partner')}`)
+      return sentence(`Υπόλοιπο: ${refText(ctx, c.partner, 'partner')}`)
     case 'query_today':
       return 'Οι σημερινές πωλήσεις.'
+    case 'query_month':
+      return 'Τα λεφτά του μήνα.'
     case 'help':
       return HELP
     default:

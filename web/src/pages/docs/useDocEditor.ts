@@ -74,7 +74,7 @@ export function useDocEditor({ docType, isNew, id, initialFields }: Options) {
       await replaceLines(companyId, docId, docLines)
       const fresh = await loadDoc(docId)
       setDoc(fresh.doc); setLines(fresh.lines)
-      if (!opts?.silent) toast.ok('Αποθηκεύτηκε')
+      if (!opts?.silent) toast.ok('Κρατήθηκε για αργότερα. Δεν μετράει μέχρι να πατήσεις «Πέρασέ το».')
       if (opts?.navigate && isNew) nav(`/docs/${docType}/${docId}`, { replace: true })
       return docId
     } catch (e) {
@@ -96,7 +96,7 @@ export function useDocEditor({ docType, isNew, id, initialFields }: Options) {
       await refreshMaster()
       const fresh = await loadDoc(docId)
       setDoc(fresh.doc); setLines(fresh.lines)
-      toast.ok('Καταχωρήθηκε')
+      toast.ok('Πέρασε ✓')
       if (isNew) nav(`/docs/${docType}/${docId}`, { replace: true })
     } catch (e) { setError(errMsg(e)); toast.err(errMsg(e)) } finally { setPosting(false) }
   }, [companyId, docType, doc, initialFields, isNew, nav, refreshMaster, toast])
@@ -112,7 +112,7 @@ export function useDocEditor({ docType, isNew, id, initialFields }: Options) {
       await postDoc(doc.id)
       await refreshMaster()
       await reload()
-      toast.ok('Καταχωρήθηκε')
+      toast.ok('Πέρασε ✓')
     } catch (e) { setError(errMsg(e)); toast.err(errMsg(e)) } finally { setPosting(false) }
   }, [doc, refreshMaster, reload, toast])
 
@@ -123,7 +123,7 @@ export function useDocEditor({ docType, isNew, id, initialFields }: Options) {
     try {
       await updateDraft(doc.id, { is_running: false })
       await reload()
-      toast.ok('Έγινε κανονικό πρόχειρο: μπορείς να το αλλάξεις')
+      toast.ok('Τώρα το αλλάζεις με το χέρι. Μετά πάτα «Πέρασέ το».')
     } catch (e) { setError(errMsg(e)); toast.err(errMsg(e)) } finally { setSaving(false) }
   }, [doc, reload, toast])
 
@@ -136,7 +136,7 @@ export function useDocEditor({ docType, isNew, id, initialFields }: Options) {
       const fresh = await loadDoc(doc.id)
       setDoc(fresh.doc); setLines(fresh.lines)
       // πωλήσεις ημέρας: ξαναγίνονται ανοιχτές (κλείνουν ξανά με «Κλείσιμο ημέρας» ή αυτόματα)
-      toast.ok(fresh.doc.is_running ? 'Η καταχώρηση ακυρώθηκε: οι πωλήσεις ημέρας ξανάνοιξαν (σε εξέλιξη)' : 'Η καταχώρηση ακυρώθηκε')
+      toast.ok(fresh.doc.is_running ? 'Άνοιξε για διόρθωση: οι πωλήσεις ημέρας ξαναγεμίζουν και κλείνουν πάλι το βράδυ.' : 'Άνοιξε για διόρθωση. Όταν τελειώσεις, πάτα «Πέρασέ το».')
     } catch (e) { setError(errMsg(e)); toast.err(errMsg(e)) } finally { setPosting(false) }
   }, [doc, refreshMaster, toast])
 
@@ -144,7 +144,7 @@ export function useDocEditor({ docType, isNew, id, initialFields }: Options) {
     if (!doc) return
     try {
       await deleteDraft(doc.id)
-      toast.ok('Διαγράφηκε')
+      toast.ok('Σβήστηκε')
       nav(`/docs/${docType}`)
     } catch (e) { setError(errMsg(e)); toast.err(errMsg(e)) }
   }, [doc, docType, nav, toast])

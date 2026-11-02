@@ -6,7 +6,7 @@ import type { Item, ItemType } from '../lib/types'
 import type { Command, EntityRef, InterpretContext, Interpretation, Interpreter, QtyLine, TallyChannel, VoicePhraseRule } from '../lib/voice/types'
 import { interpret, localInterpreter, qtyForItem, warmUp } from '../lib/voice/interpret'
 import { describe } from '../lib/voice/describe'
-import { EXAMPLES } from '../lib/voice/examples'
+import { EXAMPLES, TRY_THESE } from '../lib/voice/examples'
 import { phraseKey } from '../lib/voice/normalize'
 import { cancelSpeech, speak, useSpeechRecognition } from '../lib/voice/speech'
 import {
@@ -14,13 +14,17 @@ import {
   type ExecEnv, type RunningState, type SalePrice,
 } from '../lib/voice/actions'
 import {
-  answerTo, beforeQuestion, cardProblem, countedFor, hasLines, localHour, phrasesMatchPlural, plural, pluralOffer, refSlots, removalNotes,
+  answerTo, beforeQuestion, cardProblem, countedFor, hasLines, localHour, packQuestion, packSizes, phrasesMatchPlural, plural, pluralOffer,
+  refSlots, removalNotes,
   setRefAt, shiftFlags, staleCount, stockLineViews, stockResultText, stockTotalsText, stocktakeList, suggestName, targetOf,
   visibleIssues, type RefSlot, type Solved, type StockLineView, type TallyRow,
 } from '../lib/voiceRules'
+import { parseOrderVoice } from '../lib/orders/orderVoice'
+import { runOrderVoice } from '../lib/orders/orderActions'
 import { CHANNEL_LABEL, COUNT_MOMENT, ITEM_TYPE_LABEL, TALLY_CHANNELS, UNITS, VAT_RATES, docCode } from '../lib/labels'
 import { fmtCost, fmtDate, fmtMoney, fmtQty, round, today } from '../lib/format'
-import { MicIcon, useToast } from '../components/ui'
+import { MicIcon, NumInput, useToast } from '../components/ui'
+import { errMsg, supabase } from '../lib/supabase'
 import { ItemPicker, PartnerPicker } from '../components/Pickers'
 
 /**
@@ -67,7 +71,7 @@ function partnerRoleFor(cmd: Command): 'customer' | 'supplier' | 'any' {
   }
 }
 
-const isQuery = (c: Command) => c.kind === 'query_stock' || c.kind === 'query_balance' || c.kind === 'query_today'
+const isQuery = (c: Command) => c.kind === 'query_stock' || c.kind === 'query_balance' || c.kind === 'query_today' || c.kind === 'query_month'
 
 /** Πώς πιάνονται οι δικές τους φράσεις (ο πληθυντικός θέλει δική του, αν δεν τον πιάνει ο interpreter) */
 const PHRASE_HINT = phrasesMatchPlural()
@@ -105,6 +109,22 @@ interface LogEntry {
   undo?: () => Promise<void>
   state: 'done' | 'undoing' | 'undone'
   error?: string
+  /** από πριν την ανανέωση της σελίδας: χωρίς κουμπί αναίρεσης */
+  restored?: boolean
+}
+
+/** «Τι πέρασε» της ημέρας: μένει και μετά από ανανέωση (χωρίς την αναίρεση) */
+const logKey = (companyId: string) => `pizza-erp.voice-log.${companyId}.${new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Athens' })}`
+function readLog(companyId: string): LogEntry[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(logKey(companyId)) ?? '[]') as { id: number; at: string; heard: string; message: string; state: LogEntry['state'] }[]
+    return raw.map((e) => ({ ...e, at: new Date(e.at), state: e.state === 'undoing' ? 'done' : e.state, restored: true }))
+  } catch { return [] }
+}
+function writeLog(companyId: string, log: LogEntry[]) {
+  try {
+    localStorage.setItem(logKey(companyId), JSON.stringify(log.slice(0, 30).map(({ id, at, heard, message, state }) => ({ id, at: at.toISOString(), heard, message, state }))))
+  } catch { /* ignore */ }
 }
 
 type Tone = 'ok' | 'info' | 'warn' | 'err'
@@ -132,9 +152,10 @@ export function Voice() {
   const location = useLocation()
   const sr = useSpeechRecognition('el-GR')
 
-  const [channel, setChannelState] = useState<TallyChannel>(() => {
+  // «ask»: αν δεν πει από πού, η κάρτα ρωτάει (η προεπιλογή: τίποτα δεν πάει σιωπηλά στο efood)
+  const [channel, setChannelState] = useState<TallyChannel | 'ask'>(() => {
     const c = lsGet(LS_CHANNEL) as TallyChannel | null
-    return c && TALLY_CHANNELS.includes(c) ? c : 'efood'
+    return c && TALLY_CHANNELS.includes(c) ? c : 'ask'
   })
   const [readAloud, setReadAloud] = useState(() => lsGet(LS_READ) !== '0')
   const [voiceConfirm, setVoiceConfirm] = useState(() => lsGet(LS_CONFIRM) === '1')
@@ -143,7 +164,8 @@ export function Voice() {
   const [answer, setAnswer] = useState<Answer | null>(null)
   const [thinking, setThinking] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [log, setLog] = useState<LogEntry[]>([])
+  const [log, setLog] = useState<LogEntry[]>(() => readLog(companyId))
+  useEffect(() => { if (companyId) writeLog(companyId, log) }, [companyId, log])
   const [running, setRunningState] = useState<RunningState | null>(null)
   const runningRef = useRef<RunningState | null>(null)
   const setRunning = (r: RunningState) => { runningRef.current = r; setRunningState(r) }
@@ -160,7 +182,11 @@ export function Voice() {
   const mountedRef = useRef(true)
   // φράση που ήρθε πριν φορτώσει ο κατάλογος
   const queuedRef = useRef<string | null>(null)
+  /** ξανά κατανόηση της ίδιας φράσης όταν φορτώσουν τα είδη (π.χ. μετά από «το σακί έχει 25 κιλά») */
+  const reReadRef = useRef<string | null>(null)
+  // μετά από τα «Τι πέρασε» που ξαναφορτώθηκαν (μοναδικά id)
   const logSeq = useRef(0)
+  if (logSeq.current === 0 && log.length) logSeq.current = Math.max(...log.map((e) => e.id))
   // το είδος της τελευταίας μέτρησης (για «κι άλλα 2 κιλά» χωρίς είδος)
   const lastCountRef = useRef<{ itemId: string; at: number } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -180,7 +206,7 @@ export function Voice() {
 
   // ίδιος πίνακας όσο δεν αλλάζουν οι φράσεις (ο parser κρατά τους κανόνες του ανά πίνακα)
   const rules: VoicePhraseRule[] = useMemo(() => phrases.map((p) => ({ phrase: p.phrase, meaning: p.meaning })), [phrases])
-  const ctx: InterpretContext = useMemo(() => ({ items, partners, defaultChannel: channel, phrases: rules }), [items, partners, channel, rules])
+  const ctx: InterpretContext = useMemo(() => ({ items, partners, defaultChannel: channel === 'ask' ? 'store' : channel, phrases: rules }), [items, partners, channel, rules])
   const env = (): ExecEnv => ({ companyId, today: today(), items, partners, refreshMaster: refresh, refreshPhrases })
 
   // ευρετήριο του καταλόγου από πριν: η πρώτη φράση να μην περιμένει
@@ -197,11 +223,11 @@ export function Voice() {
     return speak(text)
   }
 
-  const setChannel = (c: TallyChannel) => {
+  const setChannel = (c: TallyChannel | 'ask') => {
     setChannelState(c)
     lsSet(LS_CHANNEL, c)
     // εκκρεμής πώληση χωρίς ειπωμένο κανάλι: ακολουθεί την προεπιλογή
-    setPending((p) => (p && p.cmd.kind === 'sale_tally' && !p.cmd.channelHeard ? { ...p, cmd: { ...p.cmd, channel: c } } : p))
+    if (c !== 'ask') setPending((p) => (p && p.cmd.kind === 'sale_tally' && !p.cmd.channelHeard ? { ...p, cmd: { ...p.cmd, channel: c } } : p))
   }
 
   // φεύγοντας από τη σελίδα: ούτε ανάγνωση ούτε μικρόφωνο που μένει ανοιχτό
@@ -299,6 +325,17 @@ export function Voice() {
     const text = raw.trim()
     if (!text || busy || execRef.current) return
     setInput('')
+    // online παραγγελίες («δεκτή η 12 σε 20 λεπτά», «έφυγε η 12»): μόνο καθαρές
+    // φράσεις, αμέσως (η κάρτα που περιμένει, αν υπάρχει, μένει)
+    const oc = parseOrderVoice(text, { strict: true })
+    if (oc) {
+      setThinking(true)
+      const r = await runOrderVoice(oc, companyId)
+      setThinking(false)
+      setAnswer({ text: r.text, tone: r.ok ? 'ok' : 'warn' })
+      say(r.speech ?? r.text)
+      return
+    }
     // ο κατάλογος δεν έχει φορτώσει ακόμα: αλλιώς όλα «δεν βρέθηκε» (και διπλά νέα είδη)
     if (!ready) {
       queuedRef.current = text
@@ -335,6 +372,26 @@ export function Voice() {
     }
   }
   heardRef.current = (t) => { handleText(t) }
+
+  // μετά από απάντηση στην ερώτηση συσκευασίας: η ίδια φράση με τα νέα στοιχεία του είδους
+  useEffect(() => {
+    const t = reReadRef.current
+    if (!t) return
+    reReadRef.current = null
+    void understand(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items])
+
+  /** «Πόσα κιλά έχει κάθε σακί;»: γράφεται στο είδος (για την επόμενη φορά) και ξαναδιαβάζεται η φράση */
+  const savePack = async (item: Item, pack: string, size: number) => {
+    if (!(size > 0)) return
+    setBusy(true)
+    const { error } = await supabase.from('item').update({ pack_name: pack, pack_qty: size }).eq('id', item.id)
+    setBusy(false)
+    if (error) { setAnswer({ text: errMsg(error), tone: 'err' }); return }
+    reReadRef.current = pending?.interp.text ?? null
+    await refresh()
+  }
 
   // ό,τι ειπώθηκε πριν φορτώσει ο κατάλογος
   useEffect(() => {
@@ -464,7 +521,11 @@ export function Voice() {
   /** Η πρόταση της κάρτας (οθόνη και ανάγνωση)· στην απογραφή με το νέο σύνολο */
   const cardSentence = (p: Pending, shownIssues: string[], run: RunningState | null): string => {
     const sv = stockView(p.cmd, countedFor(run, today(), localHour()))
-    const base = describe({ ...p.interp, command: sv ? sv.shown : p.cmd, issues: shownIssues }, ctx)
+    let base = describe({ ...p.interp, command: sv ? sv.shown : p.cmd, issues: shownIssues }, ctx)
+    // δεν ειπώθηκε από πού και η ρύθμιση λέει «να ρωτάει»: η πρόταση δεν δείχνει κανάλι
+    if (p.cmd.kind === 'sale_tally' && !p.cmd.channelHeard && channel === 'ask') {
+      base = base.replace(`Πώληση ${CHANNEL_LABEL[p.cmd.channel]}:`, 'Πώληση (από πού;):')
+    }
     if (!sv || p.cmd.kind !== 'stocktake') return base
     const lines = p.cmd.lines.map((l) => ({ id: l.item.id, qty: l.qty, mode: l.mode }))
     return beforeQuestion(base, stockTotalsText(lines, sv.views, itemLabel))
@@ -481,6 +542,7 @@ export function Voice() {
     running: run,
     hasUndo: !!lastUndoable,
     saleFallback: (id) => salePriceOf(id)?.price,
+    askChannel: channel === 'ask',
   })
 
   /** Ό,τι έλυσε ο χρήστης στην κάρτα (για να κρυφτούν οι αντίστοιχες προειδοποιήσεις) */
@@ -711,6 +773,7 @@ export function Voice() {
               itemById={itemById}
               salePriceOf={salePriceOf}
               setChannel={(c) => updCmd((cmd) => (cmd.kind === 'sale_tally' ? { ...cmd, channel: c, channelHeard: true } : cmd))}
+              askChannel={channel === 'ask'}
               updCmd={updCmd}
               setLine={setLine}
               removeLine={removeLine}
@@ -739,7 +802,19 @@ export function Voice() {
               }}
             />
           </div>
-          {why && <div className="mt-3 text-sm text-red-700">{why}</div>}
+          {(() => {
+            // σακί / κιβώτιο χωρίς μέγεθος: η ερώτηση με κουμπιά, αντί για το κόκκινο κείμενο
+            const ask = (() => {
+              if (!hasLines(pending.cmd)) return null
+              const i = pending.cmd.lines.findIndex((l, j) => !!packQuestion(l, l.item.id ? itemById.get(l.item.id) : undefined) && !pending.edited[`lines.${j}.qty`])
+              const l = i >= 0 ? pending.cmd.lines[i] : null
+              const it = l?.item.id ? itemById.get(l.item.id) : undefined
+              if (!l?.unknownPack || !it) return null
+              return <PackAsk key={`${pending.id}:${i}`} item={it} pack={l.unknownPack.name} count={l.unknownPack.count} busy={busy}
+                onPick={(n) => savePack(it, l.unknownPack!.name, n)} />
+            })()
+            return ask ?? (why && <div className="mt-3 text-sm text-red-700">{why}</div>)
+          })()}
         </div>
       ) : (
         <div className="flex flex-col items-center pt-2 pb-4">
@@ -759,6 +834,17 @@ export function Voice() {
               : sr.supported ? <span className="text-stone-500">Πάτα και πες π.χ. «efood δύο μαργαρίτες»</span>
               : <span className="text-stone-600 text-sm">Ο browser δεν έχει αναγνώριση φωνής. Πάτα το μικρόφωνο του πληκτρολογίου και μίλα στο κουτί κάτω.</span>}
           </div>
+          {!live && ready && (
+            <div className="mt-2 w-full max-w-xl">
+              <div className="text-sm text-stone-600 text-center mb-1">Ή πάτα ένα για να δεις πώς δουλεύει:</div>
+              <div className="flex flex-wrap justify-center gap-2">
+                {TRY_THESE.map(({ say: t }) => (
+                  <button key={t} type="button" className="rounded-full border border-stone-300 bg-white px-3 min-h-11 text-sm text-stone-800 hover:bg-stone-50"
+                    onClick={() => { setInput(t); inputRef.current?.focus() }}>«{t}»</button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -782,8 +868,9 @@ export function Voice() {
 
       {/* Ρυθμίσεις: κανάλι + φωνή (κρυφές όσο περιμένει επιβεβαίωση) */}
       <div className={'card p-3 mb-3 ' + (pending ? 'hidden' : '')}>
-        <div className="text-xs font-medium text-stone-600 mb-2">Κανάλι όταν δεν το λες</div>
+        <div className="text-xs font-medium text-stone-600 mb-2">Αν δεν πω από πού είναι η πώληση:</div>
         <div className="flex gap-2 flex-wrap">
+          <Chip active={channel === 'ask'} onClick={() => setChannel('ask')}>Να με ρωτάει</Chip>
           {TALLY_CHANNELS.map((c) => (
             <Chip key={c} active={c === channel} onClick={() => setChannel(c)}>{CHANNEL_LABEL[c]}</Chip>
           ))}
@@ -824,7 +911,7 @@ export function Voice() {
                     {e.state === 'undoing' ? '…' : 'Αναίρεση'}
                   </button>
                 )}
-                {!e.undo && <span className="text-[11px] text-stone-400 shrink-0 mt-1">χωρίς αναίρεση</span>}
+                {!e.undo && <span className="text-xs text-stone-500 shrink-0 mt-1 max-w-[9rem] text-right">{e.restored && e.state !== 'undone' ? 'αναίρεση: από τη λίστα του, «Διόρθωση»' : 'χωρίς αναίρεση'}</span>}
               </li>
             ))}
           </ul>
@@ -899,6 +986,7 @@ export function Voice() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder={pending ? 'ναι / όχι ή νέα φράση…' : 'Γράψε ή υπαγόρευσε…'}
+              aria-label="Τι έγινε"
               enterKeyHint="send"
               autoComplete="off"
               autoCorrect="off"
@@ -1223,7 +1311,7 @@ function RefField({ label, slot, types, role, newItemDefaults: nd, needPrice, en
 // ---------------------------------------------------------------------
 // Λεπτομέρειες ανά είδος εντολής (επεξεργάσιμες)
 // ---------------------------------------------------------------------
-function Editor({ pending, running, ctx, lastUndo, itemById, salePriceOf, setChannel, updCmd, setLine, removeLine, setPlural, refField }: {
+function Editor({ pending, running, ctx, lastUndo, itemById, salePriceOf, setChannel, askChannel, updCmd, setLine, removeLine, setPlural, refField }: {
   pending: Pending
   running: RunningState | null
   ctx: InterpretContext
@@ -1232,6 +1320,8 @@ function Editor({ pending, running, ctx, lastUndo, itemById, salePriceOf, setCha
   /** τιμή χονδρικής (πελάτη ή γενική) για γραμμή χωρίς ειπωμένη τιμή */
   salePriceOf: (itemId: string) => SalePrice | undefined
   setChannel: (c: TallyChannel) => void
+  /** χωρίς ειπωμένο «από πού»: κανένα κανάλι προεπιλεγμένο, ρωτάει */
+  askChannel: boolean
   updCmd: (f: (c: Command) => Command, edited?: string) => void
   setLine: (i: number, patch: Partial<QtyLine> & { unitPrice?: number | null }) => void
   removeLine: (i: number) => void
@@ -1292,9 +1382,11 @@ function Editor({ pending, running, ctx, lastUndo, itemById, salePriceOf, setCha
       return (
         <>
           <div>
-            <div className="text-xs font-medium text-stone-500 mb-1">Κανάλι{!c.channelHeard && ' (προεπιλογή)'}</div>
+            <div className={'text-xs font-medium mb-1 ' + (askChannel && !c.channelHeard ? 'text-red-700' : 'text-stone-500')}>
+              {askChannel && !c.channelHeard ? 'Από πού είναι;' : `Από πού${!c.channelHeard ? ' (προεπιλογή)' : ''}`}
+            </div>
             <div className="flex gap-2 flex-wrap">
-              {TALLY_CHANNELS.map((ch) => <Chip key={ch} active={ch === c.channel} onClick={() => setChannel(ch)}>{CHANNEL_LABEL[ch]}</Chip>)}
+              {TALLY_CHANNELS.map((ch) => <Chip key={ch} active={ch === c.channel && (c.channelHeard || !askChannel)} onClick={() => setChannel(ch)}>{CHANNEL_LABEL[ch]}</Chip>)}
             </div>
           </div>
           {lines({ label: 'Προϊόν', negative: true })}
@@ -1554,4 +1646,28 @@ function Editor({ pending, running, ctx, lastUndo, itemById, salePriceOf, setCha
     default:
       return null
   }
+}
+
+/** Ερώτηση συσκευασίας: «Πόσα κιλά Αλεύρι έχει κάθε σακί;» με έτοιμα κουμπιά */
+function PackAsk({ item, pack, count, busy, onPick }: { item: Item; pack: string; count: number; busy: boolean; onPick: (n: number) => void }) {
+  const [other, setOther] = useState('')
+  const unit = item.unit
+  return (
+    <div className="mt-3 rounded-md border-2 border-amber-400 bg-amber-50 p-3">
+      <div className="font-semibold">{packQuestion({ unknownPack: { name: pack, count } }, item)}</div>
+      <div className="flex flex-wrap gap-2 mt-2">
+        {packSizes(unit).map((n) => (
+          <button key={n} type="button" className="btn-secondary h-12 min-w-[4.5rem] text-base" disabled={busy} onClick={() => onPick(n)}>
+            {fmtQty(n)} {unit}
+          </button>
+        ))}
+        <span className="flex items-center gap-1">
+          <span className="w-24"><NumInput value={other} onChange={setOther} min={0} placeholder="άλλο" label={`Πόσα ${unit} έχει κάθε ${pack}`} /></span>
+          <button type="button" className="btn-primary h-12" disabled={busy || !(Number(other.replace(',', '.')) > 0)}
+            onClick={() => onPick(Number(other.replace(',', '.')))}>OK</button>
+        </span>
+      </div>
+      <div className="text-xs text-stone-600 mt-2">Το κρατάω στο είδος· την επόμενη φορά τα «{count} {pack}» θα μετριούνται μόνα τους.</div>
+    </div>
+  )
 }

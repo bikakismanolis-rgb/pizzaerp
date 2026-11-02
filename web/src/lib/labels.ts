@@ -40,7 +40,15 @@ export const DOC_PREFIX: Record<DocType, string> = {
   payment: 'ΠΛ',
 }
 
-export const docCode = (t: DocType, no: number) => `${DOC_PREFIX[t]}-${no}`
+/** «αρ. 7»: τα «ΠΩ-7» δεν τα καταλαβαίνει κανείς· το είδος το λέει πάντα η φράση γύρω */
+export const docCode = (_t: DocType, no: number) => `αρ. ${no}`
+
+/**
+ * Τα «ΠΩ-7» / «ΑΠ-3» των μηνυμάτων της βάσης γίνονται «αρ. 7». Μόνο όσα
+ * γράφει η βάση (αγορά, πώληση, παραγωγή, απογραφή): το «ΠΛ» είναι και σειρά
+ * πιστωτικού λιανικής («ΠΛ-1»), που μένει όπως είναι.
+ */
+export const plainDocCodes = (msg: string) => msg.replace(/(^|[^Α-Ωα-ω])(?:ΑΓ|ΠΩ|ΠΑ|ΑΠ)-(\d+)/g, '$1αρ. $2')
 
 export const CHANNEL_LABEL: Record<Channel, string> = {
   wholesale: 'Χονδρική',
@@ -49,6 +57,7 @@ export const CHANNEL_LABEL: Record<Channel, string> = {
   box: 'box',
   phone: 'Τηλέφωνο',
   store: 'Μαγαζί',
+  site: 'Σελίδα μας',
 }
 
 /** Κανάλια λιανικής (μετρητής ημέρας), με τη σειρά που εμφανίζονται */
@@ -62,9 +71,10 @@ export const MOVE_TYPE_LABEL: Record<string, string> = {
   stocktake_adj: 'Διόρθωση απογραφής',
 }
 
+/** Απλά λόγια: «πρόχειρο / καταχωρημένο» δεν τα λέει κανείς στο μαγαζί */
 export const STATUS_LABEL: Record<string, string> = {
-  draft: 'Πρόχειρο',
-  posted: 'Καταχωρημένο',
+  draft: 'Δεν περάστηκε',
+  posted: 'Περάστηκε ✓',
 }
 
 export const UNITS = ['τεμ', 'kg', 'g', 'L', 'ml']

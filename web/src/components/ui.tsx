@@ -15,7 +15,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const push = useCallback((kind: ToastKind, text: string) => {
     const id = ++seq.current
     setToasts((t) => [...t, { id, kind, text }])
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'err' ? 8000 : 3500)
+    // τα λάθη μένουν ώσπου να τα κλείσει (να προλάβει να τα διαβάσει)· τα «έγινε» φεύγουν μόνα τους
+    if (kind !== 'err') setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 5000)
   }, [])
   const api: ToastApi = {
     ok: (t) => push('ok', t),
@@ -35,12 +36,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             title="Πάτα για κλείσιμο"
             onClick={() => setToasts((ts) => ts.filter((x) => x.id !== t.id))}
             className={
-              'rounded-md px-4 py-3 text-sm shadow-lg text-white pointer-events-auto cursor-pointer flex items-start gap-3 ' +
+              'rounded-md px-4 py-3 text-base shadow-lg text-white pointer-events-auto cursor-pointer flex items-start gap-3 ' +
               (t.kind === 'ok' ? 'bg-emerald-700' : t.kind === 'err' ? 'bg-red-700' : 'bg-stone-800')
             }
           >
             <span className="flex-1">{t.text}</span>
-            <span aria-hidden="true" className="opacity-70 leading-5">✕</span>
+            <span aria-hidden="true" className="opacity-80 leading-6 text-lg">✕</span>
           </div>
         ))}
       </div>
@@ -108,6 +109,7 @@ export function Modal({ open, title, onClose, children, wide = false }: {
   return (
     <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/40 p-4 overflow-y-auto" onMouseDown={onClose}>
       <div
+        role="dialog" aria-modal="true" aria-label={title}
         className={'card w-full mt-8 ' + (wide ? 'max-w-3xl' : 'max-w-lg')}
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -121,15 +123,17 @@ export function Modal({ open, title, onClose, children, wide = false }: {
   )
 }
 
-export function Confirm({ open, title, text, onYes, onNo, danger = false }: {
+export function Confirm({ open, title, text, onYes, onNo, danger = false, yes = 'Ναι' }: {
   open: boolean; title: string; text: string; onYes: () => void; onNo: () => void; danger?: boolean
+  /** το κουμπί που κάνει την πράξη (π.χ. «Ναι, σβήσ' το») */
+  yes?: string
 }) {
   return (
     <Modal open={open} title={title} onClose={onNo}>
-      <p className="text-sm mb-4">{text}</p>
+      <p className="text-base mb-4">{text}</p>
       <div className="flex justify-end gap-2">
-        <button className="btn-secondary" onClick={onNo}>Άκυρο</button>
-        <button className={danger ? 'btn-danger' : 'btn-primary'} onClick={onYes}>Ναι</button>
+        <button className="btn-secondary" onClick={onNo}>Όχι, άφησέ το</button>
+        <button className={danger ? 'btn-danger' : 'btn-primary'} onClick={onYes}>{yes}</button>
       </div>
     </Modal>
   )
@@ -138,9 +142,12 @@ export function Confirm({ open, title, text, onYes, onNo, danger = false }: {
 // ---------------------------------------------------------------------
 // Αριθμητικό input (δέχεται και κόμμα)
 // ---------------------------------------------------------------------
-export function NumInput({ value, onChange, className = '', disabled, step = 'any', min, placeholder, autoFocus }: {
+export function NumInput({ value, onChange, className = '', disabled, step = 'any', min, placeholder, autoFocus, onBlur, label }: {
   value: number | string; onChange: (v: string) => void; className?: string; disabled?: boolean;
   step?: string; min?: number; placeholder?: string; autoFocus?: boolean
+  /** όταν φεύγει η εστίαση (και με Enter) */
+  onBlur?: () => void
+  label?: string
 }) {
   return (
     <input
@@ -155,6 +162,9 @@ export function NumInput({ value, onChange, className = '', disabled, step = 'an
       autoFocus={autoFocus}
       onChange={(e) => onChange(e.target.value)}
       onFocus={(e) => e.target.select()}
+      onBlur={onBlur}
+      onKeyDown={onBlur ? (e) => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } } : undefined}
+      aria-label={label}
     />
   )
 }
@@ -170,4 +180,18 @@ export function MicIcon({ className = 'h-6 w-6' }: { className?: string }) {
       <path d="M12 18v4" />
     </svg>
   )
+}
+
+/** Στενή οθόνη (κινητό, κάτω από 640px): οι πίνακες με κουτιά γίνονται κάρτες */
+export function useNarrow(): boolean {
+  const q = '(max-width: 639px)'
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.(q).matches)
+  useEffect(() => {
+    const m = window.matchMedia?.(q)
+    if (!m) return
+    const h = () => setNarrow(m.matches)
+    m.addEventListener('change', h)
+    return () => m.removeEventListener('change', h)
+  }, [])
+  return narrow
 }

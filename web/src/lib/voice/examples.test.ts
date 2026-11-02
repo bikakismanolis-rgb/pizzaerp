@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EXAMPLES } from './examples'
+import { EXAMPLES, TRY_THESE } from './examples'
 import { interpret } from './interpret'
 import { describe as describeCmd } from './describe'
 import type { Command, CommandKind, InterpretContext, Interpretation, VoicePhraseRule } from './types'
@@ -114,7 +114,7 @@ describe('EXAMPLES: ενότητες του οδηγού', () => {
     const every: CommandKind[] = [
       'sale_tally', 'sale', 'purchase', 'production', 'stocktake', 'receipt', 'payment', 'new_item', 'new_partner', 'recipe',
       'item_price', 'partner_price', 'new_phrase', 'close_day', 'close_stocktake', 'undo', 'query_stock', 'query_balance',
-      'query_today', 'help',
+      'query_today', 'query_month', 'help',
     ]
     for (const k of every) expect(kinds.has(k), k).toBe(true)
     const modes = new Set(ALL.flatMap((x) => (x.r.command.kind === 'stocktake' ? x.r.command.lines.map((l) => l.mode) : [])))
@@ -138,5 +138,11 @@ describe.each(EXAMPLES.map((s) => [s.section]))('%s', (section) => {
     expect(JSON.stringify(r.command)).not.toMatch(/"id":null/)
     expect(describeCmd(r, ctx)).not.toMatch(/^Δεν κατάλαβα/)
     KEY[x.say]?.(r.command)
+  })
+})
+
+describe('τα παραδείγματα κάτω από το μικρόφωνο', () => {
+  it.each(TRY_THESE.map((t) => [t.say, t.kind] as const))('%s → %s', (say, kind) => {
+    expect(interpret(say, CTX).command.kind).toBe(kind)
   })
 })

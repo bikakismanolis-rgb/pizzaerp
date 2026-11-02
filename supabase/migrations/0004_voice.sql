@@ -104,6 +104,8 @@ revoke all on public.voice_phrase from anon;
 -- ---------------------------------------------------------------------
 -- Κανάλια: + wolt, box. Ο αρχικός περιορισμός έχει αυτόματο όνομα, οπότε
 -- σβήνουμε κάθε check που αφορά μόνο τη στήλη channel και τον ξαναφτιάχνουμε.
+-- Το 'site' (online παραγγελίες) είναι του 0005: είναι κι εδώ, για να
+-- ξανατρέχει το 0004 και σε βάση που έχει ήδη online πωλήσεις.
 -- ---------------------------------------------------------------------
 do $$
 declare r record;
@@ -120,7 +122,7 @@ begin
   end loop;
 end $$;
 alter table public.doc add constraint doc_channel_check
-  check (channel in ('wholesale','efood','wolt','box','phone','store'));
+  check (channel in ('wholesale','efood','wolt','box','phone','store','site'));
 
 -- ---------------------------------------------------------------------
 -- Σύνδεση με άλλο παραστατικό (source_doc_id) και "αυτόματο" τα γράφουν

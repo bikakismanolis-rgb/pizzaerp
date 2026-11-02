@@ -4,14 +4,20 @@ import { useMaster } from '../../context/MasterData'
 import { supabase } from '../../lib/supabase'
 import type { Doc, DocType } from '../../lib/types'
 import { CHANNEL_LABEL } from '../../lib/labels'
-import { fmtCost, fmtDate, fmtMoney, round, toNum, today } from '../../lib/format'
-import { ErrorBox, Field, NumInput, Spinner } from '../../components/ui'
+import { fmtCost, fmtDate, fmtMoney, fmtQty, round, toNum, today } from '../../lib/format'
+import { ErrorBox, Field, NumInput, Spinner, useNarrow } from '../../components/ui'
 import { ItemPicker, PartnerPicker } from '../../components/Pickers'
+import { FiscalBox } from '../../components/FiscalBox'
 import type { LineInput } from '../../lib/docs'
 import { useDocEditor } from './useDocEditor'
 import { DocShell } from './DocShell'
 
 interface Row { key: number; item_id: string | null; qty: string; unit_price: string; discount_pct: string; vat_rate: string }
+
+/** η τελευταία καταχωρημένη πώληση στον πελάτη */
+interface LastSale { id: string; doc_no: number; doc_date: string; doc_line: { item_id: string; qty: number; line_no: number; role: string }[] }
+
+const NO_ID = '00000000-0000-0000-0000-000000000000'
 
 /** Αγορά ή Πώληση: κοινή δομή με γραμμές (είδος, ποσότητα, τιμή, ΦΠΑ) */
 export function TradeDoc({ docType }: { docType: DocType }) {
@@ -21,6 +27,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
   const { itemById } = useMaster()
 
   const ed = useDocEditor({ docType, isNew, id, initialFields: () => ({ doc_date: today() }) })
+  const narrow = useNarrow()
   const { doc, lines, loading, saving, posting } = ed
 
   const [date, setDate] = useState(today())
@@ -34,6 +41,25 @@ export function TradeDoc({ docType }: { docType: DocType }) {
   // ανοιχτές πωλήσεις ημέρας: μόνο προβολή (οι γραμμές αλλάζουν από άλλες οθόνες/συσκευές)
   const running = ed.runningOpen
   const locked = posted || running
+
+  // πώληση έτοιμων από την αποθήκη (κατεψυγμένες, αναψυκτικά): πόσα έχουμε
+  const [onHand, setOnHand] = useState<Map<string, number>>(new Map())
+  useEffect(() => {
+    if (!isSale || locked || !ed.companyId) return
+    let alive = true
+    supabase.from('v_stock_balance').select('item_id, on_hand').eq('company_id', ed.companyId)
+      .then(({ data }) => { if (alive) setOnHand(new Map(((data ?? []) as { item_id: string; on_hand: number }[]).map((r) => [r.item_id, Number(r.on_hand)]))) })
+    return () => { alive = false }
+  }, [isSale, locked, ed.companyId])
+  /** «Στην αποθήκη έχουμε μόνο 12»: για ό,τι δεν φτιάχνεται τη στιγμή */
+  const shortNote = (itemId: string | null, qty: string): string | null => {
+    if (!isSale || locked || !itemId) return null
+    const it = itemById.get(itemId)
+    if (!it || it.make_to_order || it.is_service || !onHand.has(itemId)) return null
+    const have = onHand.get(itemId) ?? 0
+    const want = toNum(qty)
+    return want > 0 && want > have ? `Στην αποθήκη ${have > 0 ? `έχουμε μόνο ${fmtQty(have)}` : 'δεν έχουμε'} ${it.unit}. Περνάει, αλλά το απόθεμα θα βγει μείον.` : null
+  }
 
   const nextKey = () => { const k = seq; setSeq(seq + 1); return k }
   const addRow = () => setRows((r) => [...r, { key: nextKey(), item_id: null, qty: '', unit_price: '', discount_pct: '0', vat_rate: '13' }])
@@ -78,8 +104,42 @@ export function TradeDoc({ docType }: { docType: DocType }) {
     return { net: round(net), vat: round(vat), gross: round(net + vat) }
   }, [rows])
 
+  // χονδρική: πελάτης (υπόλοιπο, τελευταία πώληση για «όπως την προηγούμενη»)
+  const wholesale = isSale && channel === 'wholesale'
+  const [cust, setCust] = useState<{ balance: number; last: LastSale | null } | null>(null)
+  useEffect(() => {
+    if (!wholesale || !partnerId) { setCust(null); return }
+    let alive = true
+    ;(async () => {
+      const [b, l] = await Promise.all([
+        supabase.from('v_partner_balance').select('customer_balance').eq('partner_id', partnerId).maybeSingle(),
+        supabase.from('doc').select('id, doc_no, doc_date, doc_line(item_id, qty, line_no, role)')
+          .eq('doc_type', 'sale').eq('partner_id', partnerId).eq('status', 'posted').neq('id', doc?.id ?? NO_ID)
+          .order('doc_date', { ascending: false }).order('doc_no', { ascending: false }).limit(1).maybeSingle(),
+      ])
+      if (!alive) return
+      setCust({ balance: Number(b.data?.customer_balance ?? 0), last: (l.data as LastSale | null) ?? null })
+    })()
+    return () => { alive = false }
+  }, [wholesale, partnerId, doc?.id, doc?.status])
+
+  const copyLast = () => {
+    const last = cust?.last
+    if (!last) return
+    const lines = last.doc_line.filter((l) => l.role === 'item').sort((a, b) => a.line_no - b.line_no)
+    const fresh = lines.map((l, i) => ({
+      key: seq + i, item_id: l.item_id, qty: String(l.qty), unit_price: '', discount_pct: '0',
+      vat_rate: String(itemById.get(l.item_id)?.vat_rate ?? 13),
+    }))
+    setSeq(seq + fresh.length)
+    setRows(fresh)
+    // τιμές του πελάτη όπως ισχύουν σήμερα (όχι οι παλιές της πώλησης)
+    for (const r of fresh) applyPrice(r.key, r.item_id)
+  }
+
   const validRows = rows.filter((r) => r.item_id && toNum(r.qty) > 0)
-  const canSave = validRows.length > 0 && (!isSale ? !!partnerId : true)
+  // αγορά: προμηθευτής· χονδρική: πελάτης (αλλιώς δεν φαίνεται τι χρωστάει)
+  const canSave = validRows.length > 0 && (!isSale || wholesale ? !!partnerId : true)
 
   const buildFields = (): Partial<Doc> => ({
     doc_date: date,
@@ -96,6 +156,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
   if (loading) return <Spinner />
 
   const pickerTypes = isSale ? (['finished'] as const) : undefined
+  const setRow = (idx: number, patch: Partial<typeof rows[number]>) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, ...patch } : x))
 
   return (
     <DocShell
@@ -109,37 +170,92 @@ export function TradeDoc({ docType }: { docType: DocType }) {
       <ErrorBox text={ed.error} />
       {running && (
         <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
-          Πωλήσεις ημέρας σε εξέλιξη: γεμίζουν από τις <Link className="underline" to="/daily-sales">Πωλήσεις ημέρας</Link> και
-          το <Link className="underline" to="/voice">Πες το</Link>, γι' αυτό εδώ μόνο φαίνονται. Κλείνουν με «Κλείσιμο ημέρας»
-          ή αυτόματα την επόμενη μέρα. Για αλλαγή τιμής ή γραμμών: «Χειροκίνητη επεξεργασία».
+          Ανοιχτές πωλήσεις ημέρας: γεμίζουν από τις <Link className="underline" to="/daily-sales">Πωλήσεις ημέρας</Link> και
+          το <Link className="underline" to="/voice">Πες το</Link>, γι' αυτό εδώ μόνο φαίνονται. Κλείνουν μόνες τους την επόμενη μέρα
+          (ή με «Κλείσιμο ημέρας»). Για αλλαγή τιμής ή γραμμών: «Αλλαγή με το χέρι».
         </div>
       )}
       <div className="card p-4 mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Field label="Ημερομηνία"><input type="date" className="input" value={date} disabled={locked} onChange={(e) => setDate(e.target.value)} /></Field>
         <Field label={isSale ? 'Πελάτης' : 'Προμηθευτής'} className={isSale ? '' : 'lg:col-span-2'}>
-          <PartnerPicker kind={isSale ? 'customer' : 'supplier'} value={partnerId} disabled={locked}
+          <PartnerPicker kind={isSale ? 'customer' : 'supplier'} value={partnerId} disabled={locked} allowCreate
             onChange={(v) => { setPartnerId(v); if (isSale) rows.forEach((r) => applyPrice(r.key, r.item_id)) }} />
         </Field>
         {isSale && (
-          <Field label="Κανάλι">
+          <Field label="Από πού">
             <select className="input" value={channel ?? ''} disabled={locked} onChange={(e) => setChannel(e.target.value as Doc['channel'])}>
               {(['wholesale', 'efood', 'wolt', 'box', 'phone', 'store'] as const).map((c) => <option key={c} value={c}>{CHANNEL_LABEL[c]}</option>)}
+              {/* το site το γράφει μόνο η αποδοχή online παραγγελίας */}
+              {channel === 'site' && <option value="site">{CHANNEL_LABEL.site}</option>}
             </select>
           </Field>
         )}
-        {!isSale && <Field label="Αρ. παραστατικού προμηθευτή"><input className="input" value={refNo} disabled={locked} onChange={(e) => setRefNo(e.target.value)} /></Field>}
+        {!isSale && <Field label="Αριθμός τιμολογίου (αν θες)"><input className="input" value={refNo} disabled={locked} onChange={(e) => setRefNo(e.target.value)} /></Field>}
+        {wholesale && !partnerId && !locked && (
+          <div className="sm:col-span-2 lg:col-span-4 text-xs text-amber-800">Η χονδρική θέλει πελάτη, για να γράφεται τι χρωστάει.</div>
+        )}
+        {wholesale && partnerId && cust && (
+          <div className="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 text-sm">
+            <span>
+              Υπόλοιπο πελάτη: <b className={cust.balance > 0 ? 'text-red-700' : ''}>{fmtMoney(cust.balance)}</b>
+              {cust.balance > 0 && <span className="text-stone-500"> (μας χρωστάει)</span>}
+            </span>
+            {cust.last && !locked && (
+              <button type="button" className="btn-secondary" onClick={copyLast}>
+                Όπως την προηγούμενη (αρ. {cust.last.doc_no}, {fmtDate(cust.last.doc_date)})
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
+      {narrow ? (
+        /* κινητό: μία κάρτα ανά είδος, μεγάλα κουτιά με όνομα */
+        <ul className="grid gap-2">
+          {rows.map((r, idx) => {
+            const it = r.item_id ? itemById.get(r.item_id) : null
+            const net = toNum(r.qty) * toNum(r.unit_price) * (1 - toNum(r.discount_pct) / 100)
+            return (
+              <li key={r.key} className="card p-3 grid gap-2">
+                <div className="flex gap-2 items-start">
+                  <div className="flex-1 min-w-0">
+                    <ItemPicker value={r.item_id} types={pickerTypes as unknown as undefined} disabled={locked}
+                      onChange={(v) => { setRow(idx, { item_id: v }); if (isSale) applyPrice(r.key, v); else setCost(r.key, v) }} />
+                  </div>
+                  {!locked && <button className="btn-ghost w-11 p-0" aria-label="Βγάλε τη γραμμή" onClick={() => setRows((rs) => rs.filter((_, i) => i !== idx))}>✕</button>}
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block"><span className="label">Πόσα{it ? ` (${it.unit})` : ''}</span>
+                    <NumInput value={r.qty} disabled={locked} label="Πόσα" onChange={(v) => setRow(idx, { qty: v })} /></label>
+                  <label className="block"><span className="label">Τιμή{it ? ` ανά ${it.unit}` : ''} (χωρίς ΦΠΑ)</span>
+                    <NumInput value={r.unit_price} disabled={locked} label="Τιμή" onChange={(v) => setRow(idx, { unit_price: v })} /></label>
+                </div>
+                <details className="text-sm">
+                  <summary className="cursor-pointer text-stone-600">ΦΠΑ {r.vat_rate || 0}%{toNum(r.discount_pct) ? ` · έκπτωση ${r.discount_pct}%` : ''} · σύνολο <b className="tabular-nums text-stone-900">{fmtMoney(net)}</b> χωρίς ΦΠΑ</summary>
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <label className="block"><span className="label">Έκπτωση %</span>
+                      <NumInput value={r.discount_pct} disabled={locked} label="Έκπτωση %" onChange={(v) => setRow(idx, { discount_pct: v })} /></label>
+                    <label className="block"><span className="label">ΦΠΑ %</span>
+                      <NumInput value={r.vat_rate} disabled={locked} label="ΦΠΑ %" onChange={(v) => setRow(idx, { vat_rate: v })} /></label>
+                  </div>
+                </details>
+                {shortNote(r.item_id, r.qty) && <div className="text-sm text-amber-800">⚠️ {shortNote(r.item_id, r.qty)}</div>}
+              </li>
+            )
+          })}
+          {!locked && <li><button className="btn-secondary w-full" onClick={addRow}>+ Κι άλλο είδος</button></li>}
+        </ul>
+      ) : (
       <div className="card overflow-x-auto">
         <table className="tbl">
           <thead>
             <tr>
               <th className="min-w-[14rem]">Είδος</th>
-              <th className="num w-24">Ποσότητα</th>
-              <th className="num w-28">{isSale ? 'Τιμή' : 'Κόστος/μον.'}</th>
-              <th className="num w-20">Έκπτ.%</th>
-              <th className="num w-20">ΦΠΑ%</th>
-              <th className="num w-28">Καθαρή</th>
+              <th className="num w-24">Πόσα</th>
+              <th className="num w-28">{isSale ? 'Τιμή' : 'Τιμή/μον.'}</th>
+              <th className="num w-20">Έκπτωση %</th>
+              <th className="num w-20">ΦΠΑ %</th>
+              <th className="num w-28">Χωρίς ΦΠΑ</th>
               {!locked && <th className="w-8"></th>}
             </tr>
           </thead>
@@ -153,6 +269,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
                     <ItemPicker value={r.item_id} types={pickerTypes as unknown as undefined} disabled={locked}
                       onChange={(v) => { setRows((rs) => rs.map((x, i) => i === idx ? { ...x, item_id: v } : x)); if (isSale) applyPrice(r.key, v); else setCost(r.key, v) }} />
                     {it && <div className="text-xs text-stone-500 mt-0.5">{it.unit}{!isSale && ` · μέσο κόστος ${fmtCost(it.avg_cost)}`}</div>}
+                    {shortNote(r.item_id, r.qty) && <div className="text-sm text-amber-800 mt-0.5">⚠️ {shortNote(r.item_id, r.qty)}</div>}
                   </td>
                   <td><NumInput value={r.qty} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, qty: v } : x))} /></td>
                   <td><NumInput value={r.unit_price} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, unit_price: v } : x))} /></td>
@@ -165,14 +282,24 @@ export function TradeDoc({ docType }: { docType: DocType }) {
             })}
           </tbody>
         </table>
-        {!locked && <div className="p-3"><button className="btn-secondary" onClick={addRow}>+ Γραμμή</button></div>}
+        {!locked && <div className="p-3"><button className="btn-secondary" onClick={addRow}>+ Κι άλλο είδος</button></div>}
       </div>
+      )}
 
       <div className="flex flex-col items-end gap-1 mt-3 text-sm">
-        <div>Καθαρή αξία: <b className="tabular-nums">{fmtMoney(totals.net)}</b></div>
+        <div>Χωρίς ΦΠΑ: <b className="tabular-nums">{fmtMoney(totals.net)}</b></div>
         <div>ΦΠΑ: <b className="tabular-nums">{fmtMoney(totals.vat)}</b></div>
-        <div className="text-base">Σύνολο: <b className="tabular-nums">{fmtMoney(totals.gross)}</b></div>
+        <div className="text-lg">Σύνολο: <b className="tabular-nums">{fmtMoney(totals.gross)}</b></div>
       </div>
+
+      {/* παραστατικό: χονδρική (τιμολόγιο) και online παραγγελία (απόδειξη)· οι πωλήσεις
+          ημέρας efood / Wolt / ταμείου είναι σύνολα, οι αποδείξεις τους βγαίνουν από την ταμειακή */}
+      {isSale && posted && doc && (channel === 'wholesale' || channel === 'site') && (
+        <div className="card p-4 mt-3">
+          <h3 className="font-semibold mb-2">Παραστατικό</h3>
+          <FiscalBox saleDoc={doc.id} canInvoice={channel === 'wholesale' && !!partnerId} />
+        </div>
+      )}
 
       <div className="card p-4 mt-3">
         <Field label="Σημειώσεις"><textarea className="input" rows={2} value={notes} disabled={locked} onChange={(e) => setNotes(e.target.value)} /></Field>
