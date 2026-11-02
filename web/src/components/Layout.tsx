@@ -26,6 +26,7 @@ const NAV: NavGroup[] = [
       { to: '/docs/receipt', label: 'Εισπράξεις' },
       { to: '/docs/payment', label: 'Πληρωμές' },
       { to: '/fiscal', label: 'Αποδείξεις & τιμολόγια' },
+      { to: '/costs', label: 'Γενικά έξοδα' },
     ],
   },
   {
@@ -39,6 +40,7 @@ const NAV: NavGroup[] = [
   {
     title: 'Αναφορές',
     items: [
+      { to: '/reports/profit', label: 'Κέρδος του μήνα' },
       { to: '/reports/stock', label: 'Υπόλοιπα αποθήκης' },
       { to: '/reports/balances', label: 'Υπόλοιπα συναλλασσομένων' },
       { to: '/reports/sales', label: 'Πωλήσεις ανά πελάτη/είδος' },

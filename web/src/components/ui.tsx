@@ -139,9 +139,12 @@ export function Confirm({ open, title, text, onYes, onNo, danger = false }: {
 // ---------------------------------------------------------------------
 // Αριθμητικό input (δέχεται και κόμμα)
 // ---------------------------------------------------------------------
-export function NumInput({ value, onChange, className = '', disabled, step = 'any', min, placeholder, autoFocus }: {
+export function NumInput({ value, onChange, className = '', disabled, step = 'any', min, placeholder, autoFocus, onBlur, label }: {
   value: number | string; onChange: (v: string) => void; className?: string; disabled?: boolean;
   step?: string; min?: number; placeholder?: string; autoFocus?: boolean
+  /** όταν φεύγει η εστίαση (και με Enter) */
+  onBlur?: () => void
+  label?: string
 }) {
   return (
     <input
@@ -156,6 +159,9 @@ export function NumInput({ value, onChange, className = '', disabled, step = 'an
       autoFocus={autoFocus}
       onChange={(e) => onChange(e.target.value)}
       onFocus={(e) => e.target.select()}
+      onBlur={onBlur}
+      onKeyDown={onBlur ? (e) => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } } : undefined}
+      aria-label={label}
     />
   )
 }

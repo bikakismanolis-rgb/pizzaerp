@@ -34,6 +34,9 @@ const VoiceWords = lazy(() => import('./pages/VoiceWords').then((m) => ({ defaul
 // online παραγγελίες: η κουζίνα και οι ρυθμίσεις του site
 const Orders = lazy(() => import('./pages/Orders').then((m) => ({ default: m.Orders })))
 const ShopSettings = lazy(() => import('./pages/ShopSettings').then((m) => ({ default: m.ShopSettings })))
+// γενικά έξοδα και κέρδος (μόνο ο ιδιοκτήτης)
+const Overheads = lazy(() => import('./pages/Overheads').then((m) => ({ default: m.Overheads })))
+const Profit = lazy(() => import('./pages/reports/Profit').then((m) => ({ default: m.Profit })))
 const Drivers = lazy(() => import('./pages/Drivers').then((m) => ({ default: m.Drivers })))
 const SiteCustomers = lazy(() => import('./pages/SiteCustomers').then((m) => ({ default: m.SiteCustomers })))
 // παραστατικά: λίστα και ρυθμίσεις
@@ -68,6 +71,8 @@ function CompanyGate() {
           <Route path="orders/drivers" element={<Suspense fallback={<Spinner />}><Drivers /></Suspense>} />
           <Route path="fiscal" element={<Suspense fallback={<Spinner />}><FiscalList /></Suspense>} />
           <Route path="fiscal/settings" element={<Suspense fallback={<Spinner />}><FiscalSettingsPage /></Suspense>} />
+          <Route path="costs" element={<Suspense fallback={<Spinner />}><Overheads /></Suspense>} />
+          <Route path="reports/profit" element={<Suspense fallback={<Spinner />}><Profit /></Suspense>} />
           <Route path="daily-sales" element={<DailySales />} />
           <Route path="items" element={<Items />} />
           <Route path="items/:id" element={<ItemEdit />} />

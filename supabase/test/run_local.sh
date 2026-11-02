@@ -15,20 +15,23 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_test \
   -f supabase/migrations/0004_voice.sql \
   -f supabase/migrations/0005_online.sql \
   -f supabase/migrations/0006_pay_fiscal.sql \
-  -f supabase/migrations/0007_delivery.sql
+  -f supabase/migrations/0007_delivery.sql \
+  -f supabase/migrations/0008_overhead.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/01_scenario.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/02_voice.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/04_orders.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/05_pay_fiscal.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/06_loyalty_privacy.sql
 sudo -u postgres psql -d pizza_test -f supabase/test/07_delivery.sql
+sudo -u postgres psql -d pizza_test -f supabase/test/08_overhead.sql
 # το 0004 και το 0005 πρέπει να ξανατρέχουν χωρίς σφάλμα, και πάνω σε
 # υπάρχοντα δεδομένα (και online πωλήσεις)
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_test -f supabase/migrations/0004_voice.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_test -f supabase/migrations/0005_online.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_test -f supabase/migrations/0006_pay_fiscal.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_test -f supabase/migrations/0007_delivery.sql
-echo "OK: τα 0004–0007 ξανατρέχουν χωρίς σφάλμα"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_test -f supabase/migrations/0008_overhead.sql
+echo "OK: τα 0004–0008 ξανατρέχουν χωρίς σφάλμα"
 
 echo "== αναβάθμιση (pizza_upgrade): 0001–0003 + δεδομένα με τις παλιές functions -> 0004 =="
 sudo -u postgres psql -q -c "drop database if exists pizza_upgrade;" -c "create database pizza_upgrade;"
@@ -64,3 +67,8 @@ sudo -u postgres psql -d pizza_upgrade -f supabase/test/07_delivery.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_upgrade -f supabase/migrations/0006_pay_fiscal.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_upgrade -f supabase/migrations/0007_delivery.sql
 echo "OK: αναβάθμιση -> 0007, και ξανά 0006 / 0007"
+# μετά το 0008: γενικά έξοδα, και ξανά 0008
+sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_upgrade -f supabase/migrations/0008_overhead.sql
+sudo -u postgres psql -d pizza_upgrade -f supabase/test/08_overhead.sql
+sudo -u postgres psql -v ON_ERROR_STOP=1 -q -d pizza_upgrade -f supabase/migrations/0008_overhead.sql
+echo "OK: αναβάθμιση -> 0008, και ξανά 0008"
