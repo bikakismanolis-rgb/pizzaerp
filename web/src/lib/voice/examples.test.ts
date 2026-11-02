@@ -114,7 +114,7 @@ describe('EXAMPLES: ενότητες του οδηγού', () => {
     const every: CommandKind[] = [
       'sale_tally', 'sale', 'purchase', 'production', 'stocktake', 'receipt', 'payment', 'new_item', 'new_partner', 'recipe',
       'item_price', 'partner_price', 'new_phrase', 'close_day', 'close_stocktake', 'undo', 'query_stock', 'query_balance',
-      'query_today', 'help',
+      'query_today', 'query_month', 'help',
     ]
     for (const k of every) expect(kinds.has(k), k).toBe(true)
     const modes = new Set(ALL.flatMap((x) => (x.r.command.kind === 'stocktake' ? x.r.command.lines.map((l) => l.mode) : [])))

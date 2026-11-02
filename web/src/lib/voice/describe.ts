@@ -49,6 +49,8 @@ function qtyPart(ctx: InterpretContext, l: QtyLine, abs = false): string | null 
   const q = abs ? Math.abs(Number(l.qty) || 0) : Number(l.qty) || 0
   // 0 χωρίς heardQty = δεν ειπώθηκε ποσότητα (όχι "0 kg")
   if (q === 0 && !l.heardQty?.trim()) return null
+  // σακί / κιβώτιο χωρίς γνωστό μέγεθος: όπως ακούστηκε ("δύο σακιά Αλεύρι"), όχι "2 kg"
+  if (l.unknownPack) return l.heardQty?.trim() || `${fmtQty(l.unknownPack.count)} × ${l.unknownPack.name}`
   // άγνωστο είδος: η μονάδα όπως ακούστηκε ("10 σακιά «σιμιγδάλι»")
   if (!it && l.heardQty) {
     const last = normText(l.heardQty).split(' ').pop() ?? ''
@@ -197,6 +199,8 @@ function describeInner(interp: Interpretation, ctx: InterpretContext): string {
       return sentence(`Υπόλοιπο για ${refText(ctx, c.partner, 'partner')}`)
     case 'query_today':
       return 'Οι σημερινές πωλήσεις.'
+    case 'query_month':
+      return 'Τα λεφτά του μήνα.'
     case 'help':
       return HELP
     default:

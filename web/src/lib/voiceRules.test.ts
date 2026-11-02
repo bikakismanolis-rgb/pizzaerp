@@ -114,8 +114,8 @@ describe('αφαίρεση από τον μετρητή όταν έχουν κα
   it('όλες καταχωρημένες: εμποδίζει και λέει πού διορθώνεται', () => {
     const running: RunningState = { ...EMPTY, totals: [posted(3)] }
     const why = cardProblem(remove1, env({ running }))
-    expect(why).toMatch(/^«Μαργαρίτα» στο efood σήμερα: 3 έχουν ήδη καταχωρηθεί \(ΠΩ-1\) και δεν αφαιρούνται από εδώ/)
-    expect(why).toMatch(/διόρθωση από το παραστατικό ΠΩ-1/)
+    expect(why).toMatch(/^«Μαργαρίτα» στο efood σήμερα: 3 έχουν ήδη περαστεί \(αρ\. 1\) και δεν αφαιρούνται από εδώ/)
+    expect(why).toMatch(/διόρθωση από την πώληση αρ\. 1 στις Πωλήσεις \(κουμπί «Διόρθωση»\)/)
     expect(removalNotes(remove1, running, () => 'Μαργαρίτα')).toEqual([why])
   })
   it('καμία ούτε ανοιχτή ούτε καταχωρημένη: εμποδίζει', () => {
@@ -127,7 +127,7 @@ describe('αφαίρεση από τον μετρητή όταν έχουν κα
     expect(removalNotes(remove1, running, () => 'Μαργαρίτα')).toEqual([])
     const remove2: Command = { ...remove1, lines: [{ item: ref(ITEMS.margarita), qty: -2 }] } as Command
     expect(cardProblem(remove2, env({ running }))).toBeNull()
-    expect(removalNotes(remove2, running, () => 'Μαργαρίτα')[0]).toMatch(/^«Μαργαρίτα» στο efood: ανοιχτές μόνο 1, βγαίνουν αυτές\. Οι άλλες 3 έχουν ήδη καταχωρηθεί \(ΠΩ-1\)/)
+    expect(removalNotes(remove2, running, () => 'Μαργαρίτα')[0]).toMatch(/^«Μαργαρίτα» στο efood: ανοιχτές μόνο 1, βγαίνουν αυτές\. Οι άλλες 3 έχουν ήδη περαστεί \(αρ\. 1\)/)
   })
   it('με πρόσθεση στην ίδια φράση: δεν εμποδίζει· άγνωστη κατάσταση (null): δεν εμποδίζει', () => {
     const mixed: Command = { kind: 'sale_tally', channel: 'efood', channelHeard: true, lines: [{ item: ref(ITEMS.margarita), qty: -1 }, { item: ref(ITEMS.special), qty: 1 }] }
@@ -264,11 +264,14 @@ describe('κείμενα', () => {
     expect(friendlyMessage('NetworkError when attempting to fetch resource.')).toBe(NET_MSG)
     expect(friendlyMessage('Load failed')).toBe(NET_MSG)
     expect(friendlyMessage('Δεν βρέθηκε το είδος')).toBe('Δεν βρέθηκε το είδος')
+    expect(friendlyMessage('Η πώληση ΠΩ-12 έμεινε, απογραφή ΑΠ-3')).toBe('Η πώληση αρ. 12 έμεινε, απογραφή αρ. 3')
+    // σειρές αποδείξεων μένουν: ΑΛΠ-1, ΠΛ-2, ΤΠ-4
+    expect(friendlyMessage('Υπάρχει ήδη ΑΛΠ-1 και ΠΛ-2 και ΤΠ-4')).toBe('Υπάρχει ήδη ΑΛΠ-1 και ΠΛ-2 και ΤΠ-4')
     expect(friendlyMessage('Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην απογραφή σε εξέλιξη ΑΠ-1 (2026-10-16) μετά από αυτή την κίνηση'))
-      .toBe('Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην απογραφή σε εξέλιξη ΑΠ-1 (16/10/2026) μετά από αυτή την κίνηση')
+      .toBe('Κλειδωμένη περίοδος: το είδος "Αλεύρι" μετρήθηκε στην απογραφή σε εξέλιξη αρ. 1 (16/10/2026) μετά από αυτή την κίνηση')
     // μετρητής σε κλειδωμένη μέρα: όχι «μεταγενέστερη ημερομηνία»
     const locked = tallyMessage('Κλειδωμένη περίοδος: υπάρχει απογραφή ΑΠ-3 (2026-10-15) που περιλαμβάνει το είδος "Αλεύρι". Χρησιμοποιήστε μεταγενέστερη ημερομηνία.')
-    expect(locked).toMatch(/^Κλειδωμένη περίοδος: .*ΑΠ-3 \(15\/10\/2026\).*"Αλεύρι"\. Η μέρα είναι πριν από αυτή την απογραφή/)
+    expect(locked).toMatch(/^Κλειδωμένη περίοδος: .*αρ\. 3 \(15\/10\/2026\).*"Αλεύρι"\. Η μέρα είναι πριν από αυτή την απογραφή/)
     expect(locked).not.toMatch(/μεταγενέστερη/)
     expect(tallyMessage('Μη έγκυρη ποσότητα')).toBe('Μη έγκυρη ποσότητα')
   })
@@ -406,5 +409,28 @@ describe('δικές τους φράσεις: και ο πληθυντικός (
     const c = interpret('efood 2 οικογενειακές', { ...CTX, phrases: [...phrases, { phrase: pl, meaning: 'μαργαρίτα' }] }).command
     expect(c.kind).toBe('sale_tally')
     if (c.kind === 'sale_tally') expect(c.lines.map((l) => [l.item.id, l.qty])).toEqual([[ITEMS.margarita.id, 2]])
+  })
+})
+
+describe('συσκευασία που δεν ξέρουμε: ρωτάει πριν το «ναι»', () => {
+  it('«δέκα σακιά μοτσαρέλα» (η μοτσαρέλα δεν έχει σακί): ερώτηση, όχι 10 κιλά', () => {
+    const r = interpret('ήρθαν από τον μύλο δέκα σακιά μοτσαρέλα 7 ευρώ το κιλό', CTX)
+    const c = r.command as Extract<Command, { kind: 'purchase' }>
+    expect(c.lines[0].unknownPack).toEqual({ name: 'σακί', count: 10 })
+    expect(cardProblem(c, env())).toBe('Πόσα κιλά Μοτσαρέλα έχει κάθε σακί;')
+    // αν γράψει την ποσότητα με το χέρι, περνάει
+    expect(cardProblem(c, env({ edited: { 'lines.0.qty': true } }))).toBeNull()
+  })
+
+  it('γνωστή συσκευασία: καμία ερώτηση (10 σακιά αλεύρι = 250 κιλά)', () => {
+    const r = interpret('ήρθαν από τον μύλο δέκα σακιά αλεύρι 0,62 το κιλό', CTX)
+    const c = r.command as Extract<Command, { kind: 'purchase' }>
+    expect(c.lines[0].unknownPack).toBeUndefined()
+    expect(c.lines[0].qty).toBe(250)
+    expect(cardProblem(c, env())).toBeNull()
+  })
+
+  it('και στην απογραφή', () => {
+    expect(problemOf('μέτρησα 3 κούτες μοτσαρέλα')).toBe('Πόσα κιλά Μοτσαρέλα έχει κάθε κούτα;')
   })
 })

@@ -179,7 +179,10 @@ as $$
   select jsonb_build_object(
            'id', o.id, 'order_no', o.order_no, 'status', o.status, 'customer_name', o.customer_name,
            'phone', o.phone, 'address', o.address, 'notes', o.notes, 'total', o.total, 'payment', o.payment,
-           'pay_status', o.pay_status, 'created_at', o.created_at, 'accepted_at', o.accepted_at,
+           'pay_status', o.pay_status,
+           -- δοκιμαστική πληρωμή: δεν πληρώθηκε στ' αλήθεια, ο διανομέας εισπράττει
+           'pay_test', exists (select 1 from public.online_payment p where p.order_id = o.id and p.provider = 'test'),
+           'created_at', o.created_at, 'accepted_at', o.accepted_at,
            'ready_minutes', o.ready_minutes, 'done_at', o.done_at,
            'lines', coalesce((select jsonb_agg(jsonb_build_object('name', l.name, 'qty', l.qty, 'line_no', l.line_no,
                                                                   'parent_line', l.parent_line, 'note', l.note) order by l.line_no)
@@ -358,5 +361,34 @@ grant execute on function public.driver_app(uuid), public.driver_take(uuid, uuid
   public.driver_delivered(uuid, uuid), public.driver_ping(uuid, double precision, double precision, real),
   public.order_track(uuid) to anon, authenticated;
 
-revoke execute on function public.driver_link(uuid, text), public.order_send(uuid, uuid), public.driver_settle(uuid) from public, anon;
-grant execute on function public.driver_link(uuid, text), public.order_send(uuid, uuid), public.driver_settle(uuid) to authenticated;
+-- η κουζίνα πάτησε «Έφυγε» κατά λάθος: γυρνά στο «σε ετοιμασία», μόνο αν
+-- δεν παραδόθηκε και μέσα σε 30 λεπτά (μετά, κάτι άλλο έγινε: ακύρωση)
+create or replace function public.order_back(p_order uuid)
+returns jsonb
+language plpgsql security definer
+set search_path = public
+as $$
+declare o public.online_order%rowtype;
+begin
+  select * into o from public.online_order where id = p_order for update;
+  if not found or not public.is_member(o.company_id) then
+    raise exception 'Δεν βρέθηκε η παραγγελία';
+  end if;
+  if o.status = 'accepted' then
+    raise exception 'Η #% είναι ήδη σε ετοιμασία.', o.order_no;
+  elsif o.status <> 'done' then
+    raise exception 'Η παραγγελία #% %.', o.order_no, public._order_state_text(o.status);
+  end if;
+  if o.delivered_at is not null then
+    raise exception 'Η #% έχει ήδη παραδοθεί.', o.order_no;
+  end if;
+  if o.done_at < now() - interval '30 minutes' then
+    raise exception 'Η #% έφυγε πριν από πάνω από μισή ώρα: δεν γυρνά πίσω. Αν δεν έφυγε ποτέ, ακύρωσέ την.', o.order_no;
+  end if;
+  update public.online_order set status = 'accepted', done_at = null, driver_id = null where id = o.id;
+  if o.driver_id is not null then perform public._driver_clear_pos(o.driver_id); end if;
+  return jsonb_build_object('order_no', o.order_no);
+end $$;
+
+revoke execute on function public.driver_link(uuid, text), public.order_send(uuid, uuid), public.driver_settle(uuid), public.order_back(uuid) from public, anon;
+grant execute on function public.driver_link(uuid, text), public.order_send(uuid, uuid), public.driver_settle(uuid), public.order_back(uuid) to authenticated;

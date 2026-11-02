@@ -1,5 +1,5 @@
 import { fmtMoney } from '../format'
-import { clock, DISCOUNT_LABEL, fmtPhone, MODE_LABEL, nestLines, readyAt, type OnlineOrder } from '../online'
+import { clock, DISCOUNT_LABEL, fmtPhone, MODE_LABEL, nestLines, paidTest, readyAt, type OnlineOrder } from '../online'
 
 /**
  * Δελτίο κουζίνας για εκτυπωτή 80mm (ή A4): μεγάλος αριθμός, είδη με τα
@@ -10,12 +10,14 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 
 type TicketOrder = Pick<OnlineOrder, 'order_no' | 'created_at' | 'mode' | 'payment' | 'pay_status' | 'customer_name' | 'phone'
   | 'address' | 'notes' | 'total' | 'delivery_fee' | 'discount' | 'discount_pct' | 'discount_kind' | 'accepted_at' | 'ready_minutes'
-  | 'online_order_line'>
+  | 'online_order_line'> & Partial<Pick<OnlineOrder, 'online_payment'>>
 
 export function ticketHtml(o: TicketOrder, shop: string): string {
   const at = readyAt(o)
-  const paid = o.payment === 'online' && o.pay_status === 'paid'
-  const pay = paid ? 'ΠΛΗΡΩΜΕΝΗ ONLINE' : o.payment === 'card' ? `ΚΑΡΤΑ: ${fmtMoney(o.total)}` : `ΜΕΤΡΗΤΑ: ${fmtMoney(o.total)}`
+  const test = paidTest(o)
+  const paid = o.payment === 'online' && o.pay_status === 'paid' && !test
+  const pay = paid ? 'ΠΛΗΡΩΜΕΝΗ ONLINE' : test ? `ΔΟΚΙΜΗ - ΜΕΤΡΗΤΑ: ${fmtMoney(o.total)}`
+    : o.payment === 'card' ? `ΚΑΡΤΑ: ${fmtMoney(o.total)}` : `ΜΕΤΡΗΤΑ: ${fmtMoney(o.total)}`
   const lines = nestLines(o.online_order_line).map((l) => `
     <div class="ln"><b>${l.qty}×</b> ${esc(l.name)}</div>
     ${l.extras.map((x) => `<div class="ex">+ ${esc(x.name)}</div>`).join('')}

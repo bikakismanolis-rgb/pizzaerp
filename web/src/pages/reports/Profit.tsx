@@ -6,7 +6,7 @@ import { useLoad } from '../../lib/useLoad'
 import { supabase } from '../../lib/supabase'
 import { fmtMoney, fmtQty } from '../../lib/format'
 import { addMonths, allocateOverhead, monthAcc, monthKey, monthLabel, monthShare, type OverheadMethod, type SaleRow } from '../../lib/overhead'
-import { ErrorBox, PageTitle, Spinner } from '../../components/ui'
+import { ErrorBox, PageTitle, Spinner, useNarrow } from '../../components/ui'
 
 /**
  * Κέρδος του μήνα: πωλήσεις − υλικά − γενικά έξοδα, συνολικά και ανά
@@ -22,15 +22,18 @@ export function Profit() {
   const { itemById } = useMaster()
   const [month, setMonth] = useState(monthKey)
   const [method, setMethod] = useState<OverheadMethod>(readMethod)
+  const narrow = useNarrow()
   useEffect(() => { try { localStorage.setItem(METHOD_KEY, method) } catch { /* ignore */ } }, [method])
 
   const rep = useLoad(async () => {
     const { data: owner } = await supabase.rpc('is_owner', { p_company: companyId })
     if (owner === false) return 'denied' as const
-    const [sales, oh, boms] = await Promise.all([
+    const [sales, oh, boms, open] = await Promise.all([
       supabase.from('v_sales_by_partner_item').select('item_id, item_name, qty, net, cogs').eq('company_id', companyId).eq('month', month),
       supabase.from('v_overhead_month').select('total').eq('company_id', companyId).eq('month', month).maybeSingle(),
       supabase.from('bom').select('item_id').eq('company_id', companyId),
+      supabase.from('doc').select('doc_line(net)').eq('company_id', companyId).eq('doc_type', 'sale')
+        .eq('status', 'draft').eq('is_running', true).gte('doc_date', month).lt('doc_date', addMonths(month, 1)),
     ])
     if (sales.error) throw sales.error
     return {
@@ -38,6 +41,9 @@ export function Profit() {
       // βάση χωρίς το 0008: χωρίς γενικά έξοδα
       overhead: oh.error ? null : Number((oh.data as { total?: number } | null)?.total ?? 0),
       withRecipe: new Set(((boms.data ?? []) as { item_id: string }[]).map((b) => b.item_id)),
+      // ανοιχτές πωλήσεις ημέρας: δεν μετράνε ακόμα (το κόστος τους γράφεται στο κλείσιμο)
+      openNet: ((open.data ?? []) as unknown as { doc_line: { net: number }[] }[])
+        .reduce((s, d) => s + d.doc_line.reduce((a, l) => a + Number(l.net), 0), 0),
     }
   }, [companyId, month])
 
@@ -58,6 +64,9 @@ export function Profit() {
   }
 
   const noOverhead = !!rep.data && rep.data.overhead === 0
+  // πουλήθηκαν χωρίς κόστος υλικών (όχι μεταφορικά): το κέρδος τους φαίνεται όλη η τιμή
+  const noCost = (res?.rows ?? []).filter((r) => r.qty > 0 && r.material <= 0 && !itemById.get(r.item_id)?.is_service)
+  const openNet = rep.data ? rep.data.openNet : 0
   // «από κάθε 10 €» μόνο όταν έχει νόημα (όχι «σού λείπουν 300 € στα 10»)
   const per10 = res && res.net > 0 && Math.abs(res.profit) <= res.net ? (res.profit / res.net) * 10 : null
 
@@ -95,6 +104,17 @@ export function Profit() {
               Από κάθε <b>10 €</b> πωλήσεις σού {per10 >= 0 ? 'μένουν' : 'λείπουν'} <b className={per10 >= 0 ? 'text-emerald-800' : 'text-red-700'}>{fmtMoney(Math.abs(per10))}</b>.
             </p>
           )}
+          {openNet > 0 && (
+            <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
+              + {fmtMoney(openNet)} (χωρίς ΦΠΑ) από ανοιχτές <Link className="underline font-medium" to="/daily-sales">πωλήσεις ημέρας</Link>: δεν μετράνε ακόμα, μετράνε όταν κλείσει η μέρα.
+            </div>
+          )}
+          {noCost.length > 0 && (
+            <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
+              Χωρίς κόστος υλικών: {noCost.map((r) => r.name).join(', ')}. Δεν έχουν συνταγή ή τιμή αγοράς, οπότε φαίνεται κέρδος όλη η τιμή τους.{' '}
+              <Link className="underline font-medium" to="/items">Δες τα είδη</Link>
+            </div>
+          )}
           {noOverhead && (
             <div className="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2 mb-3">
               Δεν έχεις γράψει γενικά έξοδα για τον {monthAcc(month)}: το κέρδος φαίνεται μεγαλύτερο απ' ό,τι είναι.{' '}
@@ -127,6 +147,28 @@ export function Profit() {
           {res.rows.length === 0 ? (
             <div className="card p-4 text-sm text-stone-600">Καμία καταχωρημένη πώληση τον {monthAcc(month)}.</div>
           ) : (
+            narrow ? (
+            /* κινητό: μία κάρτα ανά είδος */
+            <ul className="grid gap-2">
+              {res.rows.map((r) => {
+                const q = r.qty || 1
+                return (
+                  <li key={r.item_id} className="card p-3">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="font-semibold">{r.name}</span>
+                      <span className={'text-lg font-bold tabular-nums ' + (r.profit < 0 ? 'text-red-700' : 'text-emerald-800')}>{fmtMoney(r.profit)}</span>
+                    </div>
+                    <div className="text-sm text-stone-700">
+                      Πουλήθηκαν {fmtQty(r.qty)} · κάθε μία {r.profit < 0 ? 'χάνει' : 'αφήνει'} <b className="tabular-nums">{fmtMoney(Math.abs(r.profit / q))}</b>
+                    </div>
+                    <div className="text-sm text-stone-500 tabular-nums">
+                      Τιμή {fmtMoney(r.net / q)} − υλικά {fmtMoney(r.material / q)} − έξοδα {fmtMoney(r.overhead / q)}
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+            ) : (
             <div className="card overflow-x-auto">
               <table className="tbl">
                 <thead>
@@ -153,6 +195,7 @@ export function Profit() {
                 </tbody>
               </table>
             </div>
+            )
           )}
           <p className="text-xs text-stone-500 mt-2">
             Πωλήσεις και υλικά από τις καταχωρημένες πωλήσεις του μήνα (οι «Πωλήσεις ημέρας» μετράνε όταν κλείσουν). Υλικά = κόστος τη

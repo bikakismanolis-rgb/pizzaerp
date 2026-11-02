@@ -4,6 +4,7 @@ import { useCompanyId } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { supabase, errMsg } from '../lib/supabase'
 import { tallyMessage } from '../lib/errors'
+import { grossPrice, lineGross } from '../lib/online'
 import { postDoc } from '../lib/docs'
 import type { TallyChannel } from '../lib/voice/types'
 import { CHANNEL_LABEL, TALLY_CHANNELS, TALLY_NOTES, docCode } from '../lib/labels'
@@ -82,7 +83,14 @@ export function DailySales() {
   const base = baseRef.current
   const inflight = inflightRef.current
 
-  const retail = useMemo(() => items.filter((i) => i.item_type === 'finished' && i.is_active && i.make_to_order), [items])
+  // ό,τι πουλιέται στο κομμάτι: πίτσες (κατά παραγγελία) και ό,τι είναι στη σελίδα (αναψυκτικά κ.λπ.)·
+  // όχι μεταφορικά. Πρώτα οι πίτσες, μετά τα extra, μετά τα υπόλοιπα, σε ομάδες ανά κατηγορία.
+  const retail = useMemo(() => {
+    const rank = (i: typeof items[number]) => (i.make_to_order && !i.is_extra ? 0 : i.is_extra ? 1 : 2)
+    return items
+      .filter((i) => i.item_type === 'finished' && i.is_active && !i.is_service && (i.make_to_order || i.online === true))
+      .sort((a, b) => rank(a) - rank(b) || (a.category ?? '').localeCompare(b.category ?? '', 'el') || a.name.localeCompare(b.name, 'el'))
+  }, [items])
   // + ό,τι άλλο έτοιμο έχει ήδη μπει (π.χ. από το «Πες το»)
   const products = [...retail, ...items.filter((i) => i.item_type === 'finished' && !retail.includes(i) && ((base.get(i.id) ?? 0) > 0 || (postedQty.get(i.id) ?? 0) > 0))]
   const postedOf = (id: string) => postedQty.get(id) ?? 0
@@ -234,7 +242,7 @@ export function DailySales() {
     const fresh = here() && inflightRef.current.has(itemId) ? null : await serverQty(itemId, where)
     const done = fresh ? fresh.posted : here() ? postedOf(itemId) : 0
     const target = Math.max(0, round(total - done, 4))
-    if (total < done) toast.info(`Έχουν ήδη καταχωρηθεί ${fmtQty(done)}: δεν αφαιρούνται από εδώ (ακύρωση καταχώρησης από τις Πωλήσεις).`)
+    if (total < done) toast.info(`Έχουν ήδη καταχωρηθεί ${fmtQty(done)}: δεν αφαιρούνται από εδώ: άνοιξε την πώληση στις Πωλήσεις και πάτα «Διόρθωση».`)
     if (here()) {
       // ξαναγράφτηκε άλλη τιμή ή πατήθηκε +/− στο μεταξύ
       if (editRef.current.get(itemId) !== v) return
@@ -270,7 +278,7 @@ export function DailySales() {
   /** ανοιχτές (αυτές αλλάζουν από εδώ) */
   const lineQty = (id: string) => (edit.has(id) ? Math.max(0, round(toNum(edit.get(id)) - postedOf(id), 4)) : confirmed(id))
   const openQty = products.reduce((s, p) => s + lineQty(p.id), 0)
-  const openGross = round(products.reduce((s, p) => s + lineQty(p.id) * Number(p.sale_price) * (1 + Number(p.vat_rate) / 100), 0))
+  const openGross = round(products.reduce((s, p) => s + lineGross(lineQty(p.id), p.sale_price, p.vat_rate), 0))
   const postedTotal = [...postedQty.values()].reduce((s, q) => s + q, 0)
   const totalQty = round(postedTotal + openQty, 4)
   const total = round(postedGross + openGross)
@@ -322,27 +330,27 @@ export function DailySales() {
         <div className="flex flex-wrap gap-3 items-end">
           <Field label="Ημερομηνία"><input type="date" className="input h-11" value={date} max={today()} onChange={(e) => e.target.value && setDate(e.target.value)} /></Field>
           <div className="text-xs text-stone-500 flex-1 min-w-[12rem]">
-            Κάθε αλλαγή αποθηκεύεται αμέσως. Οι πίτσες «κατεβαίνουν» από την αποθήκη μαζί με τα υλικά τους όταν κλείσει η μέρα.
+            Κάθε αλλαγή κρατιέται αμέσως. Η μέρα κλείνει και μόνη της την επόμενη μέρα (δεν χρειάζεται «Κλείσιμο ημέρας»). Τότε βγαίνουν από την αποθήκη και τα υλικά.
           </div>
         </div>
         {isPast && running && (
           <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
-            Παλιά ημέρα: κλείνει αυτόματα με την επόμενη σύνδεση ή με «Κλείσιμο ημέρας».
+            Παλιά μέρα: κλείνει μόνη της με το επόμενο άνοιγμα της εφαρμογής, ή με «Κλείσιμο ημέρας».
           </div>
         )}
         {lockedBy && (
           <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
-            Μετά από αυτή τη μέρα καταχωρήθηκε η απογραφή {docCode('stocktake', lockedBy.doc_no)} ({fmtDate(lockedBy.doc_date)}):
-            όσα προϊόντα χρησιμοποιούν είδη που μέτρησε δεν αλλάζουν πια για τις {fmtDate(date)} (κλειδωμένη περίοδος).
+            Μετά από αυτή τη μέρα περάστηκε η μέτρηση αποθήκης {docCode('stocktake', lockedBy.doc_no)} ({fmtDate(lockedBy.doc_date)}):
+            όσα προϊόντα έχουν υλικά που μετρήθηκαν δεν αλλάζουν πια για τις {fmtDate(date)}.
           </div>
         )}
         {posted.length > 0 && (
           <div className="text-xs text-stone-600 bg-stone-50 border border-stone-200 rounded-md px-2 py-1">
-            Ήδη καταχωρημένες για {CHANNEL_LABEL[channel]} {fmtDate(date)} ({fmtQty(postedTotal)} τεμ):{' '}
+            Ήδη περασμένες για {CHANNEL_LABEL[channel]} {fmtDate(date)} ({fmtQty(postedTotal)} τεμ):{' '}
             {posted.map((p, i) => (
               <span key={p.id}>{i > 0 && ', '}<Link className="text-red-700 hover:underline" to={`/docs/sale/${p.id}`}>{docCode('sale', p.doc_no)}</Link></span>
             ))}
-            . Μετράνε στα σύνολα. Τα +/− αλλάζουν μόνο όσες είναι ακόμα ανοιχτές (π.χ. όσες πουλήθηκαν μετά από μια μέτρηση απογραφής).
+            . Μετράνε στα σύνολα. Τα +/− αλλάζουν μόνο όσες είναι ακόμα ανοιχτές.
           </div>
         )}
         {others.length > 0 && (
@@ -357,11 +365,15 @@ export function DailySales() {
 
       {loading || !ready ? <Spinner /> : products.length === 0 ? (
         <div className="card p-6 text-sm text-stone-600">
-          Δεν υπάρχουν προϊόντα λιανικής. Πήγαινε στα «Είδη», φτιάξε τις πίτσες ως «Έτοιμα προϊόντα» και τσέκαρε «Φτιάχνεται κατά παραγγελία».
+          Δεν υπάρχουν ακόμα πίτσες. Πες στο «Πες το»: «νέα πίτσα μαργαρίτα 9 ευρώ», ή πρόσθεσέ τες στα «Είδη».
         </div>
       ) : (
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {products.map((p) => {
+        <div className="grid gap-1">
+          {groupBy(products).map((g) => (
+          <section key={g.title} className="mb-2">
+          {g.title && <h2 className="text-sm font-semibold text-stone-600 mb-1">{g.title}</h2>}
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {g.list.map((p) => {
             const q = lineQty(p.id)
             const done = postedOf(p.id)
             const busy = inflight.has(p.id)
@@ -371,9 +383,9 @@ export function DailySales() {
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{p.name}</div>
                   <div className={'text-xs ' + (noPrice ? 'text-red-700' : 'text-stone-500')}>
-                    {noPrice ? 'Χωρίς τιμή: γράφεται 0 € (βάλε τιμή στα Είδη)' : `${fmtMoney(Number(p.sale_price) * (1 + Number(p.vat_rate) / 100))} με ΦΠΑ`}{busy && ' · αποθήκευση…'}
+                    {noPrice ? 'Χωρίς τιμή: γράφεται 0 € (βάλε τιμή στα Είδη)' : `${fmtMoney(grossPrice(p.sale_price, p.vat_rate))} με ΦΠΑ`}{busy && ' · αποθήκευση…'}
                   </div>
-                  {done > 0 && <div className="text-xs text-stone-500">{fmtQty(done)} καταχωρημένες{q > 0 ? ` + ${fmtQty(q)} ανοιχτές` : ''}</div>}
+                  {done > 0 && <div className="text-xs text-stone-500">{fmtQty(done)} περασμένες{q > 0 ? ` + ${fmtQty(q)} ανοιχτές` : ''}</div>}
                 </div>
                 <button type="button" className="btn-secondary h-11 w-11 p-0 text-xl" aria-label={`Μείον ${p.name}`}
                   onClick={() => bump(p.id, -1)} disabled={q <= 0}>−</button>
@@ -391,6 +403,9 @@ export function DailySales() {
               </div>
             )
           })}
+          </div>
+          </section>
+          ))}
         </div>
       )}
 
@@ -407,10 +422,22 @@ export function DailySales() {
       <Confirm
         open={askClose}
         title="Κλείσιμο ημέρας"
-        text={`Να καταχωρηθούν οι ανοιχτές πωλήσεις ${CHANNEL_LABEL[channel]} της ${fmtDate(date)} (${fmtQty(openQty)} τεμ, ${fmtMoney(openGross)}); Μετά δεν αλλάζουν από εδώ.`}
+        text={`Να περαστούν οι πωλήσεις ${CHANNEL_LABEL[channel]} της ${fmtDate(date)} (${fmtQty(openQty)} τεμ, ${fmtMoney(openGross)}); Μετά αλλάζουν μόνο με «Διόρθωση» από τις Πωλήσεις.`}
+        yes="Ναι, κλείσε τη μέρα"
         onYes={closeDay}
         onNo={() => setAskClose(false)}
       />
     </div>
   )
+}
+
+/** Ομάδες της οθόνης: κατά κατηγορία, με τη σειρά που ήρθαν (πίτσες πρώτα) */
+function groupBy<T extends { category: string | null; is_extra?: boolean; make_to_order: boolean }>(list: T[]): { title: string; list: T[] }[] {
+  const out: { title: string; list: T[] }[] = []
+  for (const p of list) {
+    const title = p.category?.trim() || (p.is_extra ? 'Extra' : p.make_to_order ? 'Πίτσες' : 'Άλλα')
+    const g = out.find((x) => x.title === title)
+    if (g) g.list.push(p); else out.push({ title, list: [p] })
+  }
+  return out.length === 1 ? [{ title: '', list: out[0].list }] : out
 }

@@ -27,28 +27,27 @@ export function StockReport() {
 
   return (
     <div>
-      <PageTitle title="Υπόλοιπα αποθήκης" />
+      <PageTitle title="Τι έχει η αποθήκη" />
       <div className="card p-3 mb-3 flex flex-wrap gap-2 items-center">
         <select className="input max-w-[12rem]" value={type} onChange={(e) => setType(e.target.value as ItemType | '')}>
           <option value="">Όλοι οι τύποι</option><option value="raw">Πρώτες ύλες</option><option value="semi">Ημιέτοιμα</option><option value="finished">Έτοιμα</option>
         </select>
-        <label className="text-sm flex items-center gap-1"><input type="checkbox" checked={onlyBelow} onChange={(e) => setOnlyBelow(e.target.checked)} /> Μόνο κάτω από ελάχιστο</label>
-        <div className="ml-auto text-sm">Συνολική αξία: <b>{fmtMoney(totalValue)}</b></div>
+        <label className="text-sm flex items-center gap-1"><input type="checkbox" checked={onlyBelow} onChange={(e) => setOnlyBelow(e.target.checked)} /> Μόνο όσα τελειώνουν</label>
+        <div className="ml-auto text-sm">Αξία όλων: <b>{fmtMoney(totalValue)}</b></div>
       </div>
       <div className="card overflow-x-auto">
         {rep.loading ? <Spinner /> : list.length === 0 ? <Empty /> : (
           <table className="tbl">
-            <thead><tr><th>Κωδικός</th><th>Είδος</th><th>Τύπος</th><th>Μον.</th><th className="num">Υπόλοιπο</th><th className="num">Μέσο κόστος</th><th className="num">Αξία</th></tr></thead>
+            <thead><tr><th className="wide">Κωδικός</th><th>Είδος</th><th className="wide">Τύπος</th><th className="num">Έχουμε</th><th className="num wide">Μέσο κόστος</th><th className="num">Αξία</th></tr></thead>
             <tbody>
               {list.map((r) => (
                 <tr key={r.item_id} className={r.below_min ? 'bg-red-50' : ''}>
-                  <td className="whitespace-nowrap">{r.code}</td>
+                  <td className="whitespace-nowrap wide">{r.code}</td>
                   <td><Link to={`/reports/item-ledger/${r.item_id}`} className="text-red-700 hover:underline">{r.name}</Link>
-                    {r.below_min && <span className="text-xs text-red-700 ml-2">κάτω από ελάχιστο</span>}</td>
-                  <td><Badge className={ITEM_TYPE_BADGE[r.item_type]}>{ITEM_TYPE_LABEL[r.item_type]}</Badge></td>
-                  <td>{r.unit}</td>
-                  <td className={'num ' + (Number(r.on_hand) < 0 ? 'text-red-700' : '')}>{fmtQty(r.on_hand)}</td>
-                  <td className="num">{fmtCost(r.avg_cost)}</td>
+                    {r.below_min && <span className="block text-sm text-red-700">τελειώνει</span>}</td>
+                  <td className="wide"><Badge className={ITEM_TYPE_BADGE[r.item_type]}>{ITEM_TYPE_LABEL[r.item_type]}</Badge></td>
+                  <td className={'num whitespace-nowrap font-medium ' + (Number(r.on_hand) < 0 ? 'text-red-700' : '')}>{fmtQty(r.on_hand)} {r.unit}</td>
+                  <td className="num wide">{fmtCost(r.avg_cost)}</td>
                   <td className="num">{fmtMoney(r.stock_value)}</td>
                 </tr>
               ))}

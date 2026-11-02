@@ -121,7 +121,7 @@ export function staleCount(stale: RunningStocktake[], itemId: string): { date: s
   return null
 }
 
-/** "ΑΠ-3 της 15/10/2026, ΑΠ-4 της 16/10/2026" */
+/** "αρ. 3 της 15/10/2026, αρ. 4 της 16/10/2026" */
 export const stocktakeList = (sts: { docNo: number; date: string }[]) =>
   sts.map((s) => `${docCode('stocktake', s.docNo)} της ${fmtDate(s.date)}`).join(', ')
 
@@ -243,7 +243,7 @@ export function removalNote(name: string, channel: TallyChannel, asked: number, 
   const p = posted && posted.qty > 0 ? posted : null
   const docs = p && p.docs.length ? p.docs.map((n) => docCode('sale', n)).join(', ') : ''
   const done = p
-    ? `${fmtQty(p.qty)} έχουν ήδη καταχωρηθεί${docs ? ` (${docs})` : ''} και δεν αφαιρούνται από εδώ: διόρθωση από το παραστατικό${docs ? ` ${docs}` : ''} στις Πωλήσεις (ακύρωση καταχώρησης).`
+    ? `${fmtQty(p.qty)} έχουν ήδη περαστεί${docs ? ` (${docs})` : ''} και δεν αφαιρούνται από εδώ: διόρθωση από την πώληση${docs ? ` ${docs}` : ''} στις Πωλήσεις (κουμπί «Διόρθωση»).`
     : ''
   if (have === 0) return p ? `«${name}» στο ${ch} σήμερα: ${done}` : `Δεν υπάρχει «${name}» στο ${ch} σήμερα για αφαίρεση.`
   return `«${name}» στο ${ch}: ανοιχτές μόνο ${fmtQty(have)}, βγαίνουν αυτές.${p ? ` Οι άλλες ${done}` : ''}`
@@ -319,6 +319,8 @@ export interface CardEnv {
   hasUndo: boolean
   /** τιμή (χωρίς ΦΠΑ) που θα πάρει γραμμή χονδρικής χωρίς ειπωμένη τιμή· undefined = δεν είναι γνωστή ακόμα */
   saleFallback?: (itemId: string) => number | undefined
+  /** πώληση ημέρας χωρίς «από πού»: ρωτάει (αντί να πάει σιωπηλά σε ένα κανάλι) */
+  askChannel?: boolean
 }
 
 const okNum = (n: number | null | undefined): n is number => typeof n === 'number' && Number.isFinite(n)
@@ -335,9 +337,17 @@ export function cardProblem(cmd: Command, env: CardEnv): string | null {
   const itemOf = (r: EntityRef) => (r.id ? env.itemById.get(r.id) : undefined)
   const nameOf = (r: EntityRef) => itemOf(r)?.name ?? r.heard
   const ed = (k: string) => !!env.edited[k]
+  // «10 σακιά» χωρίς να ξέρουμε πόσο έχει το σακί: πρώτα αυτό (αλλιώς γράφονται 10 κιλά)
+  if (hasLines(cmd)) {
+    for (const [i, l] of cmd.lines.entries()) {
+      const ask = packQuestion(l, itemOf(l.item))
+      if (ask && !ed(`lines.${i}.qty`)) return ask
+    }
+  }
   switch (cmd.kind) {
     case 'sale_tally': {
       if (cmd.lines.length === 0) return 'Δεν έμεινε καμία γραμμή.'
+      if (env.askChannel && !cmd.channelHeard) return 'Από πού είναι; Πάτα efood, Wolt, Box, τηλέφωνο ή μαγαζί.'
       for (const l of cmd.lines) {
         if (!okNum(l.qty) || l.qty === 0) return `Βάλε ποσότητα για «${nameOf(l.item)}».`
         const it = itemOf(l.item)
@@ -403,6 +413,22 @@ export function cardProblem(cmd: Command, env: CardEnv): string | null {
     case 'undo': return env.hasUndo ? null : 'Δεν υπάρχει κάτι για αναίρεση.'
     default: return null
   }
+}
+
+const PACK_UNIT: Record<string, string> = { kg: 'κιλά', g: 'γραμμάρια', L: 'λίτρα', ml: 'ml', τεμ: 'τεμάχια' }
+
+/** «Πόσα κιλά Αλεύρι έχει κάθε σακί;» για γραμμή σε άγνωστη συσκευασία (αλλιώς null) */
+export function packQuestion(l: { unknownPack?: { name: string; count: number } }, item: Item | undefined): string | null {
+  if (!l.unknownPack || !item) return null
+  return `Πόσα ${PACK_UNIT[item.unit] ?? item.unit} ${item.name} έχει κάθε ${l.unknownPack.name};`
+}
+
+/** Συνηθισμένα μεγέθη συσκευασίας για τα κουμπιά της ερώτησης */
+export function packSizes(unit: string): number[] {
+  if (unit === 'kg') return [5, 10, 20, 25, 50]
+  if (unit === 'L') return [1, 5, 10, 20]
+  if (unit === 'g' || unit === 'ml') return [250, 500, 1000]
+  return [6, 12, 24, 48]
 }
 
 /** Ό,τι εμποδίζει μια δική τους φράση (null = εντάξει) */

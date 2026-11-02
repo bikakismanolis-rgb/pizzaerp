@@ -36,7 +36,7 @@ export async function loadShop(companyId: string): Promise<OnlineShop | null | '
 export async function loadOrders(companyId: string, day = today()): Promise<OnlineOrder[]> {
   const { data, error } = await supabase
     .from('online_order')
-    .select('*, online_order_line(*)')
+    .select('*, online_order_line(*), online_payment(provider, status)')
     .eq('company_id', companyId)
     .or(`status.in.(new,accepted),order_date.eq.${day}`)
     .order('created_at', { ascending: true })
@@ -85,7 +85,7 @@ export async function acceptOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, minut
   if (minutes) rememberMinutes(minutes)
   const base = `Δεκτή η ${o.order_no}${minutes ? `, σε ${minutes} λεπτά` : ''}.`
   if (r.stock_note) {
-    return { ok: true, acceptedId: o.id, text: `${base} Η πώληση ΠΩ-${r.doc_no} δεν πέρασε στην αποθήκη: ${r.stock_note}`, speech: `${base} Προσοχή, δεν πέρασε στην αποθήκη.` }
+    return { ok: true, acceptedId: o.id, text: `${base} Η πώληση αρ. ${r.doc_no} δεν πέρασε στην αποθήκη: ${r.stock_note}`, speech: `${base} Προσοχή, δεν πέρασε στην αποθήκη.` }
   }
   if (opts.autoReceipt) {
     const rc = await receiptOrder(o)
@@ -143,6 +143,16 @@ export async function doneOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promis
   await call('order_done', { p_order: o.id })
   return { ok: true, text: `Έφυγε η ${o.order_no}.` }
 }
+
+/** «Δεν έφυγε»: λάθος πάτημα στο «Έφυγε» (μέσα σε μισή ώρα, αν δεν παραδόθηκε) */
+export async function backOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>): Promise<OrderResult> {
+  await call('order_back', { p_order: o.id })
+  return { ok: true, text: `Η ${o.order_no} γύρισε στο «Σε ετοιμασία».` }
+}
+
+/** Φαίνεται το «Δεν έφυγε»; (η βάση ελέγχει ξανά) */
+export const canGoBack = (o: Pick<OnlineOrder, 'status' | 'done_at'> & { delivered_at?: string | null }, now = Date.now()): boolean =>
+  o.status === 'done' && !o.delivered_at && !!o.done_at && now - new Date(o.done_at).getTime() < 30 * 60_000
 
 export async function cancelOrder(o: Pick<OnlineOrder, 'id' | 'order_no'>, reason: string | null): Promise<OrderResult> {
   const r = await call<{ note: string | null; refund?: boolean }>('order_cancel', { p_order: o.id, p_reason: reason })

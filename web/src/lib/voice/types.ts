@@ -39,6 +39,12 @@ export interface QtyLine {
    * ήδη μέτρηση ρωτάει, με προεπιλογή την πρόσθεση).
    */
   mode?: 'add' | 'set'
+  /**
+   * Ειπώθηκε σε συσκευασία που δεν ξέρουμε πόσο έχει («10 σακιά» και το
+   * είδος δεν έχει συσκευασία): name = κανονική μορφή («σακί»), count = πόσες.
+   * Η κάρτα ρωτάει και το «ναι» περιμένει.
+   */
+  unknownPack?: { name: string; count: number }
 }
 
 export interface PricedLine extends QtyLine {
@@ -95,6 +101,8 @@ export type Command =
   | { kind: 'query_stock'; item: EntityRef }
   | { kind: 'query_balance'; partner: EntityRef }
   | { kind: 'query_today' }
+  /** «πόσα λεφτά βγάλαμε αυτό τον μήνα»: πωλήσεις, υλικά, γενικά έξοδα, κέρδος */
+  | { kind: 'query_month' }
   | { kind: 'help' }
   | { kind: 'unknown' }
 

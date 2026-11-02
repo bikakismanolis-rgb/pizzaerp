@@ -38,3 +38,9 @@ describe('δελτίο κουζίνας', () => {
     expect(h).not.toContain('ΜΕΤΡΗΤΑ')
   })
 })
+
+test('δοκιμαστική πληρωμή: ο διανομέας εισπράττει', () => {
+  const h = ticketHtml({ ...base, payment: 'online', pay_status: 'paid', online_payment: [{ provider: 'test', status: 'paid' }] }, 'Π')
+  expect(h).toContain('ΔΟΚΙΜΗ - ΜΕΤΡΗΤΑ: 24,27')
+  expect(h).not.toContain('ΠΛΗΡΩΜΕΝΗ ONLINE')
+})

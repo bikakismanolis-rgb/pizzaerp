@@ -5,10 +5,10 @@ import { supabase } from '../lib/supabase'
 import { fmtDate, fmtMoney, monthStart } from '../lib/format'
 import {
   clock, DISCOUNT_LABEL, fmtPhone, minutesSince, MODE_LABEL, nestLines, NEW_ORDERS_EVENT, ORDER_STATUS_LABEL, orderSpeech, PAY_STATUS_LABEL,
-  PAYMENT_LABEL, READY_MINUTES, readyAt, REJECT_REASONS, shopIsOpen, shopUrl, sourceLabel, type OnlineOrder, type OnlineShop,
+  PAYMENT_LABEL, paidTest, READY_MINUTES, readyAt, REJECT_REASONS, shopIsOpen, shopUrl, sourceLabel, type OnlineOrder, type OnlineShop,
 } from '../lib/online'
 import {
-  acceptOrder, autoReceiptOn, cancelOrder, defaultMinutes, doneOrder, loadOrders, loadShop, refundOrder, rejectOrder, runOrderVoice,
+  acceptOrder, autoReceiptOn, backOrder, canGoBack, cancelOrder, defaultMinutes, doneOrder, loadOrders, loadShop, refundOrder, rejectOrder, runOrderVoice,
   sendOrder, setShopOpen, type OrderResult,
 } from '../lib/orders/orderActions'
 import type { DriverRow } from '../lib/delivery/api'
@@ -322,6 +322,13 @@ export function Orders() {
       </PageTitle>
       <ErrorBox text={error} />
 
+      {shop && shop.pay_provider === 'test' && (
+        <div role="alert" className="rounded-md bg-red-600 text-white font-semibold px-3 py-3 mb-3">
+          ⚠️ Οι online πληρωμές είναι σε ΔΟΚΙΜΗ: κανείς δεν πληρώνει πραγματικά. Πάρε μετρητά, ή άλλαξε την πληρωμή στις{' '}
+          <Link className="underline" to="/orders/settings">Ρυθμίσεις</Link>.
+        </div>
+      )}
+
       {soundOn && !touched && (
         <button className="w-full rounded-md bg-amber-100 border border-amber-300 text-amber-900 text-sm px-3 py-3 mb-3 text-left" onClick={() => { unlockAudio(); setTouched(true) }}>
           👆 Άγγιξε εδώ μία φορά για να ακούγονται οι νέες παραγγελίες (ο browser δεν αφήνει ήχο πριν από το πρώτο άγγιγμα).
@@ -404,18 +411,36 @@ export function Orders() {
               <button className="btn-primary h-12 px-6 text-base" disabled={!!busy} onClick={() => act(o.id, () => doneOrder(o))}>
                 {o.mode === 'delivery' ? '🛵 Έφυγε' : '✅ Παραδόθηκε'}
               </button>
-              {o.mode === 'delivery' && drivers.filter((d) => d.is_active).map((d) => (
-                <button key={d.driver_id} className="btn-secondary h-12" disabled={!!busy} onClick={() => act(o.id, () => sendOrder(o, d))}
-                  title={`Έφυγε με ${d.name}`}>
-                  🛵 {d.name}
-                </button>
-              ))}
+              {o.mode === 'delivery' && drivers.some((d) => d.is_active) && (
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm text-stone-600">ή έφυγε με:</span>
+                  {drivers.filter((d) => d.is_active).map((d) => (
+                    <button key={d.driver_id} className="btn-secondary h-12" disabled={!!busy} onClick={() => act(o.id, () => sendOrder(o, d))}
+                      aria-label={`Έφυγε με ${d.name}`}>
+                      🛵 {d.name}
+                    </button>
+                  ))}
+                </span>
+              )}
               <button className="btn-ghost h-12 ml-auto" disabled={!!busy} onClick={() => setCancelFor(o)}>Ακύρωση…</button>
             </div>
             <div className="mt-2"><FiscalBox compact order={o.id} /></div>
           </OrderCard>
         ))}
       </div>
+
+      {/* Μόλις έφυγαν: το λάθος πάτημα στο «Έφυγε» διορθώνεται εδώ, μέσα σε μισή ώρα */}
+      {finished.some((o) => canGoBack(o, now)) && (
+        <div className="card p-3 mb-6 flex flex-wrap items-center gap-2">
+          <span className="text-sm text-stone-600">Μόλις έφυγαν:</span>
+          {finished.filter((o) => canGoBack(o, now)).map((o) => (
+            <button key={o.id} className="btn-secondary h-11" disabled={!!busy} onClick={() => act(o.id, () => backOrder(o))}
+              aria-label={`Η ${o.order_no} δεν έφυγε, γύρνα την πίσω`}>
+              #{o.order_no}{o.driver_id ? ` 🛵 ${drivers.find((d) => d.driver_id === o.driver_id)?.name ?? ''}` : ''} · ↩ Δεν έφυγε
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Ξενοδοχεία */}
       {b2b.length > 0 && (
@@ -429,7 +454,7 @@ export function Orders() {
                     <div className="font-semibold text-base">{b.partner?.name ?? 'Πελάτης'}</div>
                     <div className="text-stone-600">
                       {clock(b.created_at)}{b.wanted_date && <> · για <b>{fmtDate(b.wanted_date)}</b></>}
-                      {b.doc && <> · ΠΩ-{b.doc.doc_no} · {fmtMoney(b.doc.total_gross)}</>}
+                      {b.doc && <> · πώληση αρ. {b.doc.doc_no} · {fmtMoney(b.doc.total_gross)}</>}
                     </div>
                     {b.note && <div className="mt-1 text-amber-900">📝 {b.note}</div>}
                   </div>
@@ -515,6 +540,10 @@ export function Orders() {
                     {(o.pay_status === 'refund_failed' || o.pay_status === 'refund_pending') && (
                       <button className="btn-secondary px-2 py-1 text-xs mr-1" disabled={!!busy} onClick={() => act(o.id, () => refundOrder(o))}>Επιστροφή χρημάτων</button>
                     )}
+                    {canGoBack(o, now) && (
+                      <button className="btn-secondary px-2 py-1 text-sm mr-1" disabled={!!busy} onClick={() => act(o.id, () => backOrder(o))}
+                        title="Πατήθηκε κατά λάθος το «Έφυγε»: γυρνά στο «Σε ετοιμασία»">↩ Δεν έφυγε</button>
+                    )}
                     {o.status === 'done' && <button className="btn-ghost px-2 py-1 text-xs" disabled={!!busy} onClick={() => setCancelFor(o)}>Ακύρωση…</button>}
                   </td>
                 </tr>
@@ -540,7 +569,7 @@ function OrderCard({ o, now, tone, onPrint, children }: { o: OnlineOrder; now: n
       <div className="flex items-start gap-3 mb-2">
         <div className="text-3xl font-bold tabular-nums">#{o.order_no}</div>
         <div className="flex-1 min-w-0 text-sm">
-          <div className="font-semibold">{o.customer_name} · <a className="text-red-700 underline" href={`tel:${o.phone}`}>{fmtPhone(o.phone)}</a></div>
+          <div className="font-semibold">{o.customer_name} · <a className="text-red-700 underline whitespace-nowrap" href={`tel:${o.phone}`}>{fmtPhone(o.phone)}</a></div>
           <div className="text-stone-600">
             {clock(o.created_at)} ({ago === 0 ? 'τώρα' : `πριν ${ago}'`})
             {tone === 'cooking' && at && <> · έτοιμη <b className={at.getTime() < now ? 'text-red-700' : ''}>{clock(at)}</b></>}
@@ -554,11 +583,16 @@ function OrderCard({ o, now, tone, onPrint, children }: { o: OnlineOrder; now: n
           {Number(o.discount) > 0 && o.discount_kind && (
             <div className="text-xs text-emerald-800">−{Number(o.discount_pct)}% {DISCOUNT_LABEL[o.discount_kind]}</div>
           )}
-          <div className={o.payment === 'online' ? 'text-emerald-800 font-semibold' : 'text-stone-600'}>
-            {o.payment === 'online' ? (o.pay_status === 'paid' ? '💳 Πληρωμένη' : PAY_STATUS_LABEL[o.pay_status ?? 'none'] || 'Online') : PAYMENT_LABEL[o.payment]}
-          </div>
+          {!paidTest(o) && (
+            <div className={o.payment === 'online' ? 'text-emerald-800 font-semibold' : 'text-stone-600'}>
+              {o.payment === 'online' ? (o.pay_status === 'paid' ? '💳 Πληρωμένη' : PAY_STATUS_LABEL[o.pay_status ?? 'none'] || 'Online') : PAYMENT_LABEL[o.payment]}
+            </div>
+          )}
         </div>
       </div>
+      {paidTest(o) && (
+        <div className="rounded-md bg-red-50 border border-red-300 text-red-800 font-bold px-3 py-1.5 mb-2">⚠️ ΔΟΚΙΜΗ: δεν πληρώθηκε, πάρε μετρητά</div>
+      )}
       <ul className="text-lg leading-snug mb-2">
         {nestLines(o.online_order_line).map((l) => (
           <li key={l.id}>

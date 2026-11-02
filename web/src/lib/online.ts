@@ -169,7 +169,17 @@ export interface OnlineOrder {
   done_at: string | null
   closed_at: string | null
   online_order_line: OnlineOrderLine[]
+  /** οι πληρωμές της (για «δοκιμαστική = απλήρωτη») */
+  online_payment?: { provider: string; status: string }[]
 }
+
+/** Πληρώθηκε online στ' αλήθεια (όχι με τη δοκιμαστική πληρωμή) */
+export const paidForReal = (o: Pick<OnlineOrder, 'payment' | 'pay_status' | 'online_payment'>): boolean =>
+  o.payment === 'online' && o.pay_status === 'paid' && !(o.online_payment ?? []).some((p) => p.provider === 'test')
+
+/** Πληρώθηκε με τη δοκιμαστική πληρωμή: στην πράξη απλήρωτη */
+export const paidTest = (o: Pick<OnlineOrder, 'payment' | 'online_payment'>): boolean =>
+  o.payment === 'online' && (o.online_payment ?? []).some((p) => p.provider === 'test')
 
 export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
   awaiting_payment: 'Περιμένει πληρωμή',
@@ -243,6 +253,15 @@ export const clock = (iso: string | Date): string =>
 export const grossPrice = (net: number, vatRate: number): number =>
   Math.round(Number((Number(net) * (100 + Number(vatRate))).toFixed(4))) / 100
 
+/** Στρογγύλεμα όπως το round(x, 2) της βάσης (μισό προς τα πάνω, χωρίς λάθη του 1,365) */
+const dbRound2 = (x: number): number => Math.sign(x) * Math.round(Number((Math.abs(x) * 100).toFixed(6))) / 100
+
+/** Σύνολο γραμμής με ΦΠΑ όπως η βάση: καθαρό στρογγυλό, ΦΠΑ στρογγυλό, άθροισμα */
+export const lineGross = (qty: number, net: number, vatRate: number): number => {
+  const n = dbRound2(Number(qty) * Number(net))
+  return dbRound2(n + dbRound2(n * Number(vatRate) / 100))
+}
+
 /** Γεγονός για τον αριθμό νέων παραγγελιών στο μενού (η οθόνη «Παραγγελίες» το στέλνει αμέσως) */
 export const NEW_ORDERS_EVENT = 'pizza-erp:new-orders'
 
@@ -287,12 +306,12 @@ export function linesText(lines: TextLine[], sep = ', '): string {
 }
 
 /** Ό,τι διαβάζεται φωναχτά όταν έρχεται νέα παραγγελία */
-export function orderSpeech(o: Pick<OnlineOrder, 'order_no' | 'mode' | 'address' | 'payment' | 'notes' | 'total'> & { online_order_line: TextLine[] }): string {
+export function orderSpeech(o: Pick<OnlineOrder, 'order_no' | 'mode' | 'address' | 'payment' | 'notes' | 'total'> & { online_order_line: TextLine[]; online_payment?: OnlineOrder['online_payment'] }): string {
   const parts = [
     `Νέα παραγγελία ${o.order_no}.`,
     linesText(o.online_order_line) + '.',
     o.mode === 'delivery' ? `Διανομή${o.address ? ', ' + o.address : ''}.` : 'Παραλαβή από το μαγαζί.',
-    o.payment === 'online' ? 'Πληρωμένη online.' : o.payment === 'card' ? 'Πληρωμή με κάρτα.' : 'Μετρητά.',
+    o.payment === 'online' ? (paidTest(o) ? 'Δοκιμαστική πληρωμή, δεν πληρώθηκε: μετρητά.' : 'Πληρωμένη online.') : o.payment === 'card' ? 'Πληρωμή με κάρτα.' : 'Μετρητά.',
   ]
   if (o.notes) parts.push(`Σημείωση: ${o.notes}.`)
   return parts.join(' ')

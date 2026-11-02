@@ -17,6 +17,8 @@ export interface DriverOrder {
   total: number
   payment: OrderPayment
   pay_status: PayStatus
+  /** δοκιμαστική πληρωμή: στην πραγματικότητα απλήρωτη */
+  pay_test?: boolean
   created_at: string
   accepted_at: string | null
   ready_minutes: number | null

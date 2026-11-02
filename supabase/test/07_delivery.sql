@@ -109,7 +109,8 @@ begin
   perform pg_temp.as_anon();
   a := public.driver_app(tn);
   if jsonb_array_length(a->'ready') <> 3 then raise exception 'ΑΠΟΤΥΧΙΑ: έτοιμες % (η παραλαβή δεν είναι για διανομέα)', a->'ready'; end if;
-  if (a->'ready'->0->>'address') <> 'Έβανς 40, Ηράκλειο' or (a->'ready'->0->'lines'->0->>'name') <> 'Μαργαρίτα' then
+  if (a->'ready'->0->>'address') <> 'Έβανς 40, Ηράκλειο' or (a->'ready'->0->'lines'->0->>'name') <> 'Μαργαρίτα'
+     or (a->'ready'->0->>'pay_test')::boolean then
     raise exception 'ΑΠΟΤΥΧΙΑ: στοιχεία έτοιμης %', a->'ready'->0;
   end if;
   perform pg_temp.expect_fail(format('select public.driver_take(%L, %L)', tn, o3), '%Δεν βρέθηκε%', 'παίρνει παραλαβή');
@@ -159,12 +160,31 @@ begin
   select count(*) into n from public.online_order where id = o4 and status = 'accepted' and driver_id is null and done_at is null;
   if n <> 1 then raise exception 'ΑΠΟΤΥΧΙΑ: δεν γύρισε στις έτοιμες'; end if;
   perform public.order_send(o4, nikos);
+  -- η κουζίνα: «Δεν έφυγε» (λάθος πάτημα): πίσω στο «σε ετοιμασία», χωρίς διανομέα
+  r := public.order_back(o4);
+  select count(*) into n from public.online_order where id = o4 and status = 'accepted' and driver_id is null and done_at is null;
+  if n <> 1 or (r->>'order_no') is null then raise exception 'ΑΠΟΤΥΧΙΑ: «Δεν έφυγε» %', r; end if;
+  perform pg_temp.expect_fail(format('select public.order_back(%L)', o4), '%ετοιμασ%', '«Δεν έφυγε» σε παραγγελία που δεν έφυγε');
+  execute 'reset role';
+  update public.online_order set status = 'done', done_at = now() - interval '31 minutes' where id = o4;
+  perform pg_temp.as_user(staff);
+  perform pg_temp.expect_fail(format('select public.order_back(%L)', o4), '%μισή ώρα%', '«Δεν έφυγε» μετά από μισή ώρα');
+  execute 'reset role';
+  update public.online_order set status = 'accepted', done_at = null where id = o4;
+  perform pg_temp.as_user(staff);
+  perform public.order_send(o4, nikos);
+  perform pg_temp.as_anon();
+  perform pg_temp.expect_fail(format('select public.order_back(%L)', o4), '%permission denied%', '«Δεν έφυγε» από επισκέπτη');
+  perform pg_temp.as_user(staff);
 
   -- «Παραδόθηκε»: μετρητά στον διανομέα, η θέση σβήνει όταν τελειώσει
   perform pg_temp.as_anon();
   r := public.driver_delivered(tn, o1);
   if (r->>'cash')::numeric <> 10.04 then raise exception 'ΑΠΟΤΥΧΙΑ: μετρητά %', r; end if;
   perform pg_temp.expect_fail(format('select public.driver_delivered(%L, %L)', tg, o1), '%δεν είναι στον δρόμο%', 'παραδίδει άλλου');
+  perform pg_temp.as_user(staff);
+  perform pg_temp.expect_fail(format('select public.order_back(%L)', o1), '%ήδη παραδοθεί%', '«Δεν έφυγε» μετά την παράδοση');
+  perform pg_temp.as_anon();
   a := public.order_track(t1);
   if a->>'delivered_at' is null or a->'pos' <> 'null'::jsonb then raise exception 'ΑΠΟΤΥΧΙΑ: μετά την παράδοση %', a; end if;
   perform pg_temp.as_user(staff);

@@ -161,7 +161,7 @@ export function StocktakeDoc() {
         <div className="mb-3 text-sm text-stone-600">Ημερομηνία: {fmtDate(date)}</div>
         <div className="card overflow-x-auto">
           <table className="tbl">
-            <thead><tr><th>Είδος</th><th className="hidden sm:table-cell">Τύπος</th><th className="num">Αναμενόμενο</th><th className="num">Μετρημένο</th><th className="num">Διαφορά</th><th className="num">Αξία διαφοράς</th></tr></thead>
+            <thead><tr><th>Είδος</th><th className="wide">Τύπος</th><th className="num wide">Έπρεπε</th><th className="num">Μετρήθηκαν</th><th className="num">Διαφορά</th><th className="num">Αξία</th></tr></thead>
             <tbody>
               {lines.map((l) => {
                 const it = itemById.get(l.item_id)
@@ -169,8 +169,8 @@ export function StocktakeDoc() {
                 return (
                   <tr key={l.id}>
                     <td>{it?.name}</td>
-                    <td className="hidden sm:table-cell">{it && ITEM_TYPE_LABEL[it.item_type]}</td>
-                    <td className="num">{fmtQty(l.expected_qty)}</td>
+                    <td className="wide">{it && ITEM_TYPE_LABEL[it.item_type]}</td>
+                    <td className="num wide">{fmtQty(l.expected_qty)}</td>
                     <td className="num">{fmtQty(l.qty)}</td>
                     <td className={'num ' + (diff < 0 ? 'text-red-700' : diff > 0 ? 'text-emerald-700' : '')}>{fmtQty(diff)}</td>
                     <td className="num">{fmtMoney(l.diff_value)}</td>
@@ -180,7 +180,7 @@ export function StocktakeDoc() {
             </tbody>
           </table>
         </div>
-        <p className="text-xs text-stone-500 mt-2">Θετική αξία = έλλειμμα (επιβάρυνση κόστους). Δες αναλυτικά στην αναφορά «Αποτελέσματα απογραφών».</p>
+        <p className="text-xs text-stone-500 mt-2">Αξία θετική = λείπουν (τόσα χάθηκαν), αρνητική = περίσσεψαν. Αναλυτικά: «Αποτελέσματα απογραφών».</p>
       </DocShell>
     )
   }
@@ -193,33 +193,32 @@ export function StocktakeDoc() {
       <ErrorBox text={ed.error} />
       <div className="card p-4 mb-3 flex flex-wrap gap-3 items-end">
         <Field label="Ημερομηνία"><input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-        <Field label="Τύπος ειδών">
+        <Field label="Ποια είδη">
           <select className="input" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as ItemType | '')}>
             <option value="">Όλα</option><option value="raw">Πρώτες ύλες</option><option value="semi">Ημιέτοιμα</option><option value="finished">Έτοιμα</option>
           </select>
         </Field>
-        <button className="btn-secondary" onClick={fillAllExpected}>Συμπλήρωση με αναμενόμενα</button>
+        <button className="btn-secondary" onClick={fillAllExpected}>Γέμισε όλα με όσα πρέπει να έχει</button>
       </div>
 
       <CountNote date={date} />
 
-      <p className="text-sm text-stone-600 mb-2">Γράψε τη μετρημένη ποσότητα σε όσα είδη μέτρησες. Τα κενά αγνοούνται. Για σωστή κοστολόγηση, μία φορά τον μήνα μέτρα τα πάντα.</p>
+      <p className="text-sm text-stone-600 mb-2">Γράψε πόσα βρήκες σε όσα είδη μέτρησες. Όσα μείνουν κενά δεν αλλάζουν. Μία φορά τον μήνα μέτρα τα πάντα, για να βγαίνει σωστά το κόστος.</p>
 
       <div className="card overflow-x-auto">
         <table className="tbl">
-          <thead><tr><th>Κωδικός</th><th>Είδος</th><th>Τύπος</th><th>Μον.</th><th className="num">Αναμενόμενο</th><th className="num w-32">Μετρημένο</th></tr></thead>
+          <thead><tr><th className="wide">Κωδικός</th><th>Είδος</th><th className="wide">Τύπος</th><th className="num">Πρέπει να έχει</th><th className="num w-32">Βρήκα</th></tr></thead>
           <tbody>
             {activeItems.map((it) => {
               const r = rows.get(it.id)
               const exp = expected.get(it.id) ?? 0
               return (
                 <tr key={it.id}>
-                  <td className="whitespace-nowrap">{it.code}</td>
-                  <td>{it.name}</td>
-                  <td>{ITEM_TYPE_LABEL[it.item_type]}</td>
-                  <td>{it.unit}</td>
-                  <td className="num text-stone-500">{fmtQty(exp)}</td>
-                  <td><NumInput value={r?.counted ?? ''} onChange={(v) => setCounted(it.id, v)} min={0} placeholder="—" /></td>
+                  <td className="whitespace-nowrap wide">{it.code}</td>
+                  <td>{it.name} <span className="text-stone-500 text-sm">({it.unit})</span></td>
+                  <td className="wide">{ITEM_TYPE_LABEL[it.item_type]}</td>
+                  <td className="num text-stone-500 whitespace-nowrap">{fmtQty(exp)}</td>
+                  <td className="min-w-[6rem]"><NumInput value={r?.counted ?? ''} onChange={(v) => setCounted(it.id, v)} min={0} placeholder="—" label={`Βρήκα ${it.name}`} /></td>
                 </tr>
               )
             })}
@@ -244,10 +243,9 @@ function CountNote({ date, running }: { date?: string; running?: boolean }) {
     <div className="rounded-md border text-sm px-3 py-2 mb-3 bg-stone-50 border-stone-200 text-stone-600">
       {running ? COUNT_MOMENT : (
         <>
-          Η μέτρηση μετράει τη στιγμή της καταχώρησης: πρώτα καταχωρούνται οι ανοιχτές πωλήσεις ημέρας ως τότε που κινούν τα
-          μετρημένα είδη. Ό,τι πουληθεί ή φτιαχτεί μετά, μετράει για μετά.
-          {date && date < today() && <> Με παλιότερη ημερομηνία ({fmtDate(date)}) μετράει στο τέλος εκείνης της μέρας.</>}
-          {' '}Κινήσεις πριν από τη μέτρηση δεν αλλάζουν μετά (κλειδώνουν).
+          Η μέτρηση ισχύει τη στιγμή που πατάς «Πέρασέ το». Ό,τι πουληθεί ή φτιαχτεί μετά, μετράει για μετά.
+          {date && date < today() && <> Με παλιότερη ημερομηνία ({fmtDate(date)}) ισχύει στο τέλος εκείνης της μέρας.</>}
+          {' '}Ό,τι έγινε πριν από τη μέτρηση δεν αλλάζει μετά.
         </>
       )}
     </div>

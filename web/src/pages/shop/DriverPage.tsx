@@ -16,10 +16,14 @@ import { Centered, telHref, UUID_RE } from './shared'
  * ανοίξει και μόνο όσο έχει παραγγελίες στον δρόμο.
  */
 
+// δοκιμαστική πληρωμή = απλήρωτη: ο διανομέας εισπράττει μετρητά
+const paidOnline = (o: DriverOrder) => o.payment === 'online' && o.pay_status === 'paid' && !o.pay_test
 const payText = (o: DriverOrder) =>
-  o.payment === 'online' && o.pay_status === 'paid' ? 'Πληρωμένη' : o.payment === 'card' ? `Κάρτα ${fmtMoney(o.total)}` : `Μετρητά ${fmtMoney(o.total)}`
+  paidOnline(o) ? 'Πληρωμένη' : o.pay_test ? `ΔΟΚΙΜΗ, δεν πληρώθηκε: μετρητά ${fmtMoney(o.total)}`
+    : o.payment === 'card' ? `Κάρτα ${fmtMoney(o.total)}` : `Μετρητά ${fmtMoney(o.total)}`
 const paySpeech = (o: DriverOrder) =>
-  o.payment === 'online' && o.pay_status === 'paid' ? 'Πληρωμένη, δεν παίρνεις λεφτά.' : o.payment === 'card' ? `Κάρτα, ${fmtMoney(o.total)}.` : `Μετρητά, ${fmtMoney(o.total)}.`
+  paidOnline(o) ? 'Πληρωμένη, δεν παίρνεις λεφτά.' : o.pay_test ? `Δοκιμαστική πληρωμή, δεν πληρώθηκε. Πάρε μετρητά, ${fmtMoney(o.total)}.`
+    : o.payment === 'card' ? `Κάρτα, ${fmtMoney(o.total)}.` : `Μετρητά, ${fmtMoney(o.total)}.`
 
 export function DriverPage() {
   const { token = '' } = useParams()
@@ -209,7 +213,7 @@ function OrderHead({ o }: { o: DriverOrder }) {
           <div className="text-sm text-stone-600">{o.customer_name} · {fmtPhone(o.phone)}{at && o.status === 'accepted' ? ` · έτοιμη ${clock(at)}` : ''}</div>
         </div>
       </div>
-      <div className={'mt-2 inline-block rounded-md px-2 py-1 text-sm font-semibold ' + (o.payment === 'online' && o.pay_status === 'paid' ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900')}>
+      <div className={'mt-2 inline-block rounded-md px-2 py-1 text-sm font-semibold ' + (paidOnline(o) ? 'bg-emerald-100 text-emerald-900' : o.pay_test ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-900')}>
         {payText(o)}
       </div>
       {o.notes && <div className="mt-2 text-sm text-amber-900">📝 {o.notes}</div>}

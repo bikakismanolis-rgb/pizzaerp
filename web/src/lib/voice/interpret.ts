@@ -1022,6 +1022,17 @@ function lineHeardQty(a: Analysis, l: Line): string | undefined {
   return s
 }
 
+/** Η γραμμή ειπώθηκε σε συσκευασία που δεν έχει το είδος (π.χ. «σακιά» χωρίς βάρος σακιού); */
+function unknownPackOf(l: Line, item: Item | null): QtyLine['unknownPack'] {
+  if (!item) return undefined
+  for (const x of [l.qty, ...(l.more ?? [])]) {
+    if (x?.pack && !x.unit && !(isItemPack(x.pack, item) && Number(item.pack_qty) > 0)) {
+      return { name: genericPack(x.pack) ?? x.pack, count: x.value }
+    }
+  }
+  return undefined
+}
+
 /** Ποσότητα στη μονάδα του είδους */
 function qtyFor(a: Analysis, x: NumInfo | null, item: Item | null, label: string): number | null {
   if (!x) return null
@@ -1033,12 +1044,13 @@ function qtyFor(a: Analysis, x: NumInfo | null, item: Item | null, label: string
   } else if (x.pack && item) {
     const pq = Number(item.pack_qty)
     if (isItemPack(x.pack, item) && pq > 0) v = round(v * pq, 6)
-    else a.issues.push(`Δεν ξέρω πόσο έχει το «${x.pack}» για «${label}»· πέρασα ${v}.`)
+    else a.issues.push(`Δεν ξέρω πόσα ${UNIT_PLURAL[item.unit] ?? item.unit} έχει κάθε ${genericPack(x.pack) ?? x.pack} «${label}».`)
   }
   return round(v, 6)
 }
 
 const UNIT_LABEL: Record<string, string> = { kg: 'κιλό', g: 'γραμμάριο', L: 'λίτρο', ml: 'ml', τεμ: 'τεμάχιο' }
+export const UNIT_PLURAL: Record<string, string> = { kg: 'κιλά', g: 'γραμμάρια', L: 'λίτρα', ml: 'ml', τεμ: 'τεμάχια' }
 
 /**
  * Τιμή χωρίς "το κιλό" / "σύνολο": ανά μονάδα, ανά συσκευασία ή σύνολο γραμμής;
@@ -1344,6 +1356,10 @@ function decideKind(a: Analysis): Decision {
   // "πόσο κάνει η μαργαρίτα;", "πόσο πουλάμε τη μαργαρίτα": ερώτηση τιμής (δεν αλλάζει τιμή)
   if (has('question') && (has('priceVerb', 'price') || sellPresent) && !has('owe1', 'owe3', 'today')) return { kind: 'unknown', conf: 0 }
   const asked = has('question') || a.toks.some((t) => t.raw === '?' || t.raw === ';' || t.raw === ';')
+  // «πόσα λεφτά βγάλαμε», «τι κάναμε αυτό τον μήνα», «κέρδος μήνα»: τα λεφτά του μήνα (ή της ημέρας)
+  if (!ih.length && !ph.length && !qtyNum && (has('money') || (has('month') && (asked || has('produce', 'did', 'sell', 'turnover'))))) {
+    return { kind: has('today') ? 'query_today' : 'query_month', conf: 0.85 }
+  }
   if ((asked && has('sell')) || has('turnover') || /(^| )πωσ παμε( |$)/.test(txt)) {
     if (!qtyNum) return { kind: 'query_today', conf: 0.85 }
   }
@@ -1703,6 +1719,8 @@ function qtyLines(a: Analysis, lines: Line[], missing: Missing, noQtyIssue?: (k:
     const line: QtyLine = { item: ref, qty }
     const hq = lineHeardQty(a, l)
     if (hq) line.heardQty = hq
+    const up = unknownPackOf(l, item)
+    if (up) line.unknownPack = up
     out.push(line)
   }
   return { out, conf }
@@ -1821,6 +1839,8 @@ function pricedLines(a: Analysis, lines: Line[], missingPriceIssue: boolean, mis
     const line: PricedLine = { item: ref, qty, unitPrice }
     const hq = lineHeardQty(a, l)
     if (hq) line.heardQty = hq
+    const up = unknownPackOf(l, item)
+    if (up) line.unknownPack = up
     out.push(line)
   }
   return { out, conf }
@@ -2649,7 +2669,7 @@ function run(text: string, ctx: InterpretContext): Interpretation {
     case 'partner_price': b = buildPartnerPrice(a); break
     case 'query_stock': b = buildQueryStock(a); break
     case 'query_balance': b = buildQueryBalance(a); break
-    case 'close_day': case 'close_stocktake': case 'undo': case 'query_today': case 'help':
+    case 'close_day': case 'close_stocktake': case 'undo': case 'query_today': case 'query_month': case 'help':
       b = { command: { kind: d.kind }, conf: 1 }
       break
     default:

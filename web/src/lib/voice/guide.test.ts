@@ -66,3 +66,14 @@ describe('οδηγός: διανομείς', () => {
     expect(parseDriverVoice(say)).toEqual(cmd)
   })
 })
+
+// ο οδηγός ανοίγει και μέσα από την εφαρμογή (web/public/odigos.pdf): ίδιο αρχείο με το docs/
+import pdfDocs from '../../../../docs/pes-to-odigos.pdf?raw'
+import pdfApp from '../../../public/odigos.pdf?raw'
+
+describe('οδηγός PDF', () => {
+  it('η εφαρμογή δίνει το ίδιο PDF με το docs/ (μετά από κάθε αλλαγή: cp docs/pes-to-odigos.pdf web/public/odigos.pdf)', () => {
+    expect(pdfApp.length).toBeGreaterThan(1000)
+    expect(pdfApp === pdfDocs).toBe(true)
+  })
+})
