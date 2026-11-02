@@ -188,3 +188,11 @@ export const EXAMPLES: VoiceExampleSection[] = [
     ],
   },
 ]
+
+/** Κάτω από το μικρόφωνο: γεμίζουν το κουτί (τίποτα δεν περνά χωρίς «Ναι») */
+export const TRY_THESE: { say: string; kind: CommandKind }[] = [
+  { say: 'efood δύο μαργαρίτες', kind: 'sale_tally' },
+  { say: 'ήρθαν από τον μύλο δέκα σακιά αλεύρι', kind: 'purchase' },
+  { say: 'πόση μοτσαρέλα έχουμε', kind: 'query_stock' },
+  { say: 'πόσα λεφτά βγάλαμε αυτό τον μήνα', kind: 'query_month' },
+]

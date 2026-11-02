@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useCompanyId } from '../../context/CompanyContext'
+import { useMaster } from '../../context/MasterData'
 import { useLoad } from '../../lib/useLoad'
 import { supabase } from '../../lib/supabase'
 import type { ItemType, StockBalance } from '../../lib/types'
@@ -10,6 +11,7 @@ import { Badge, Empty, PageTitle, Spinner } from '../../components/ui'
 
 export function StockReport() {
   const companyId = useCompanyId()
+  const { itemById } = useMaster()
   const [type, setType] = useState<ItemType | ''>('')
   const [onlyBelow, setOnlyBelow] = useState(false)
   const rep = useLoad(async () => {
@@ -20,8 +22,10 @@ export function StockReport() {
 
   const list = useMemo(() => (rep.data ?? [])
     .filter((r) => r.is_active || r.on_hand !== 0)
+    // όχι υπηρεσίες (μεταφορικά): δεν έχουν απόθεμα
+    .filter((r) => !itemById.get(r.item_id)?.is_service)
     .filter((r) => !type || r.item_type === type)
-    .filter((r) => !onlyBelow || r.below_min), [rep.data, type, onlyBelow])
+    .filter((r) => !onlyBelow || r.below_min), [rep.data, type, onlyBelow, itemById])
 
   const totalValue = list.reduce((s, r) => s + Number(r.stock_value), 0)
 

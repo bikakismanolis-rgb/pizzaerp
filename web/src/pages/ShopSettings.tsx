@@ -38,7 +38,7 @@ const toForm = (s: OnlineShop): Form => ({
 function friendly(msg: string): string {
   if (/online_shop_slug/.test(msg) && /duplicate|unique/i.test(msg)) return 'Αυτή τη διεύθυνση την έχει ήδη άλλο μαγαζί. Διάλεξε άλλη.'
   if (/online_shop_slug_check/.test(msg)) return 'Η διεύθυνση θέλει μόνο λατινικά πεζά, αριθμούς και παύλες (3 έως 40).'
-  if (/row-level security/.test(msg)) return 'Μόνο ο ιδιοκτήτης αλλάζει τις ρυθμίσεις του site.'
+  if (/row-level security/.test(msg)) return 'Μόνο ο ιδιοκτήτης αλλάζει τις ρυθμίσεις της σελίδας.'
   return msg
 }
 
@@ -167,7 +167,7 @@ export function ShopSettings() {
   if (shop === 'missing') {
     return (
       <div>
-        <PageTitle title="Ρυθμίσεις site" />
+        <PageTitle title="Ρυθμίσεις σελίδας παραγγελιών" />
         <div className="card p-4 text-sm">Η βάση δεν έχει ακόμα τις online παραγγελίες. Χρειάζεται το <code>supabase/migrations/0005_online.sql</code> (βλ. README).</div>
       </div>
     )
@@ -178,7 +178,7 @@ export function ShopSettings() {
 
   return (
     <div>
-      <PageTitle title="Ρυθμίσεις site">
+      <PageTitle title="Ρυθμίσεις σελίδας παραγγελιών">
         <Link to="/orders" className="btn-secondary">Παραγγελίες</Link>
       </PageTitle>
       <ErrorBox text={error} />
@@ -267,7 +267,7 @@ export function ShopSettings() {
               ))}
             </ul>
             <p className="text-xs text-stone-500 mt-2">
-              Τιμές με ΦΠΑ, όπως τις βλέπει ο πελάτης. Περιγραφή για το site γράφεις στο κάθε είδος.
+              Τιμές με ΦΠΑ, όπως τις βλέπει ο πελάτης. Περιγραφή για τη σελίδα γράφεις στο κάθε είδος.
               Extra (π.χ. «Extra μοτσαρέλα»): είδος με «Είναι extra» τσεκαρισμένο· ο πελάτης το διαλέγει πάνω στις πίτσες που φτιάχνονται κατά παραγγελία.
             </p>
           </div>
@@ -330,11 +330,12 @@ function PayCard({ shop, companyId, onSaved }: { shop: OnlineShop; companyId: st
     <div className="card p-4 grid gap-3">
       <h2 className="font-semibold">Πληρωμές</h2>
       <ErrorBox text={error} />
+      <span className="label">Πώς πληρώνουν οι πελάτες</span>
       <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={cash} onChange={(e) => setCash(e.target.checked)} /> Μετρητά (στην πόρτα / στο ταμείο)</label>
       <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={door} onChange={(e) => setDoor(e.target.checked)} /> Κάρτα στην πόρτα (POS του διανομέα)</label>
 
       <div>
-        <span className="label">Online πληρωμή με κάρτα / IRIS</span>
+        <span className="label">Πληρωμή με κάρτα / IRIS μέσα στη σελίδα</span>
         <div className="grid gap-1">
           {PROVIDERS.map((p) => (
             <label key={p} className="text-sm flex items-center gap-2">
@@ -356,6 +357,12 @@ function PayCard({ shop, companyId, onSaved }: { shop: OnlineShop; companyId: st
             <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
             Πραγματικές πληρωμές {live ? '' : <span className="text-stone-500">(τώρα: δοκιμαστικός λογαριασμός {prov === 'viva' ? 'demo' : 'test mode'})</span>}
           </label>
+          {missing.length > 0 && (
+            <p className="text-sm text-amber-900">Θέλει μία φορά ρύθμιση από τεχνικό (κλειδιά από {prov === 'viva' ? 'τη Viva' : 'τη Stripe'}). Δείξ' του το κουτί από κάτω.</p>
+          )}
+          <details className="rounded-md border border-stone-200 bg-white p-3" open={missing.length > 0 && missing.length < (prov === 'viva' ? 4 : 2)}>
+            <summary className="cursor-pointer font-medium text-sm">🔧 Για τον τεχνικό: κλειδιά {prov === 'viva' ? 'Viva' : 'Stripe'}{missing.length === 0 && ' ✓'}</summary>
+            <div className="grid gap-3 mt-3">
           {prov === 'viva' && (
             <>
               <p className="text-xs text-stone-600">
@@ -382,23 +389,25 @@ function PayCard({ shop, companyId, onSaved }: { shop: OnlineShop; companyId: st
               <SecretField companyId={companyId} name="stripe_webhook_secret" label="Webhook signing secret (whsec_...)" saved={names.stripe_webhook_secret} onSaved={reload} />
             </>
           )}
-          {missing.length > 0 && <p className="text-xs text-red-800">Λείπουν κλειδιά: χωρίς αυτά η online πληρωμή δεν ξεκινά.</p>}
+          {missing.length > 0 && <p className="text-xs text-red-800">Λείπουν κλειδιά: χωρίς αυτά η πληρωμή με κάρτα δεν ξεκινά.</p>}
+              <p className="text-xs text-stone-500">Θέλει τις Edge Functions ανεβασμένες στο Supabase (README). Τα κλειδιά δεν ξαναφαίνονται στον browser.</p>
+            </div>
+          </details>
         </div>
       )}
 
-      <div className="grid gap-2 border-t border-stone-200 pt-3">
-        <span className="font-medium text-sm">«Δεν είμαι ρομπότ» (Cloudflare Turnstile, δωρεάν)</span>
-        <p className="text-xs text-stone-600">Προαιρετικό: σταματά ψεύτικες παραγγελίες από bots. Φτιάξε widget στο dash.cloudflare.com → Turnstile για τη διεύθυνση του site και βάλε τα δύο κλειδιά.</p>
+      <details className="rounded-md border border-stone-200 p-3" open={!!captcha && !names.turnstile_secret}>
+        <summary className="cursor-pointer font-medium text-sm">🔧 Για τον τεχνικό: «Δεν είμαι ρομπότ» (προαιρετικό){captcha && names.turnstile_secret ? ' ✓' : ''}</summary>
+        <div className="grid gap-2 mt-3">
+        <p className="text-xs text-stone-600">Σταματά ψεύτικες παραγγελίες από bots (Cloudflare Turnstile, δωρεάν). Φτιάξε widget στο dash.cloudflare.com → Turnstile για τη διεύθυνση της σελίδας και βάλε τα δύο κλειδιά. Θέλει τις Edge Functions στο Supabase.</p>
         <Field label="Site Key (δημόσιο)">
           <input className="input font-mono" value={captcha} onChange={(e) => setCaptcha(e.target.value.trim())} placeholder="0x4AAAAAAA..." />
         </Field>
         <SecretField companyId={companyId} name="turnstile_secret" label="Secret Key" saved={names.turnstile_secret} onSaved={reload} />
-      </div>
+        </div>
+      </details>
 
       <div className="flex justify-end"><button className="btn-primary" disabled={busy} onClick={save}>Αποθήκευση πληρωμών</button></div>
-      <p className="text-xs text-stone-500">
-        Οι online πληρωμές και το CAPTCHA θέλουν τις Edge Functions ανεβασμένες στο Supabase (βλ. README). Τα κλειδιά δεν φαίνονται ποτέ ξανά στον browser.
-      </p>
     </div>
   )
 }
@@ -438,7 +447,7 @@ function RewardsCard({ shop, companyId, onSaved }: { shop: OnlineShop; companyId
     <div className="card p-4 grid gap-3">
       <h2 className="font-semibold">Επιβράβευση πελατών</h2>
       <p className="text-xs text-stone-600">
-        Για να προτιμούν το site από τις πλατφόρμες. Μετράει ανά τηλέφωνο, χωρίς λογαριασμό. Η έκπτωση είναι μόνο στα προϊόντα (όχι στα
+        Για να προτιμούν τη σελίδα σας από τις πλατφόρμες. Μετράει ανά τηλέφωνο, χωρίς λογαριασμό. Η έκπτωση είναι μόνο στα προϊόντα (όχι στα
         μεταφορικά) και γράφεται ως έκπτωση στη γραμμή της πώλησης και της απόδειξης. Κενό = καθόλου.
       </p>
       <ErrorBox text={error} />

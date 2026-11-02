@@ -318,7 +318,7 @@ export function Orders() {
         </button>
         <Link to="/orders/drivers" className="btn-secondary">Διανομείς</Link>
         <Link to="/orders/customers" className="btn-secondary">Πελάτες</Link>
-        <Link to="/orders/settings" className="btn-secondary">Ρυθμίσεις site</Link>
+        <Link to="/orders/settings" className="btn-secondary">Ρυθμίσεις σελίδας</Link>
       </PageTitle>
       <ErrorBox text={error} />
 
@@ -489,7 +489,7 @@ export function Orders() {
       {month && shop && (
         <div className="card p-4 mb-4 text-sm">
           <div>
-            Αυτόν τον μήνα από το site: <b>{month.orders}</b> {month.orders === 1 ? 'παραγγελία' : 'παραγγελίες'}, <b>{fmtMoney(month.total)}</b>.
+            Αυτόν τον μήνα από τη σελίδα μας: <b>{month.orders}</b> {month.orders === 1 ? 'παραγγελία' : 'παραγγελίες'}, <b>{fmtMoney(month.total)}</b>.
           </div>
           {month.sources.some((x) => x.source) && (
             <div className="text-stone-600 mt-1">
@@ -501,7 +501,7 @@ export function Orders() {
               Σε πλατφόρμα με προμήθεια {Number(shop.compare_fee_pct)}% θα πλήρωνες περίπου <b>{fmtMoney(month.total * Number(shop.compare_fee_pct) / 100)}</b>.
             </div>
           ) : (
-            <div className="text-stone-500 mt-1">Βάλε την προμήθεια της πλατφόρμας στις <Link className="underline" to="/orders/settings">Ρυθμίσεις site</Link> για να βλέπεις τι γλιτώνεις.</div>
+            <div className="text-stone-500 mt-1">Βάλε την προμήθεια της πλατφόρμας στις <Link className="underline" to="/orders/settings">Ρυθμίσεις σελίδας</Link> για να βλέπεις τι γλιτώνεις.</div>
           )}
         </div>
       )}

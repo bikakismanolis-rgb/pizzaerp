@@ -270,13 +270,16 @@ export function FiscalSettingsPage() {
             </label>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2 border-t border-stone-200 pt-3">
+          <details className="border-t border-stone-200 pt-3">
+          <summary className="cursor-pointer font-medium text-sm">Για τον λογιστή: σειρές αρίθμησης ({form.series_receipt}, {form.series_invoice}, {form.series_credit}, {form.series_credit_retail})</summary>
+          <div className="grid gap-3 sm:grid-cols-2 mt-3">
             <Field label="Σειρά αποδείξεων"><input className="input" maxLength={10} value={form.series_receipt} onChange={(e) => set('series_receipt', e.target.value)} /></Field>
             <Field label="Σειρά τιμολογίων"><input className="input" maxLength={10} value={form.series_invoice} onChange={(e) => set('series_invoice', e.target.value)} /></Field>
             <Field label="Σειρά πιστωτικών τιμολογίων"><input className="input" maxLength={10} value={form.series_credit} onChange={(e) => set('series_credit', e.target.value)} /></Field>
             <Field label="Σειρά πιστωτικών λιανικής"><input className="input" maxLength={10} value={form.series_credit_retail} onChange={(e) => set('series_credit_retail', e.target.value)} /></Field>
           </div>
-          <p className="text-xs text-stone-500 -mt-1">Οι σειρές και η αρίθμηση πρέπει να είναι αυτές που έχει δηλώσει ο λογιστής. Ο αριθμός μπαίνει τη στιγμή της έκδοσης, χωρίς κενά.</p>
+          <p className="text-xs text-stone-500 mt-2">Οι σειρές και η αρίθμηση πρέπει να είναι αυτές που έχει δηλώσει ο λογιστής. Ο αριθμός μπαίνει τη στιγμή της έκδοσης, χωρίς κενά.</p>
+          </details>
 
           <div className="grid gap-3 sm:grid-cols-2 border-t border-stone-200 pt-3">
             <div className="sm:col-span-2 text-sm">
@@ -296,15 +299,18 @@ export function FiscalSettingsPage() {
             <h2 className="font-semibold">Τι ισχύει (σύντομα)</h2>
             <p>Νόμιμη απόδειξη ή τιμολόγιο βγάζει μόνο <b>πιστοποιημένος πάροχος ηλεκτρονικής τιμολόγησης</b>, η ταμειακή μηχανή (ΦΗΜ) ή το timologio της ΑΑΔΕ. Η εφαρμογή δεν τα αντικαθιστά: συνδέεται με αυτά.</p>
             <p>Μέχρι να ξέρεις ποιον πάροχο έχει ο λογιστής: διάλεξε «Από την ταμειακή, με αριθμό» και γράφε εδώ τον αριθμό κάθε απόδειξης, ή «Δοκιμαστικός» για να δεις όλη τη ροή.</p>
-            <p>Όταν μάθεις τον πάροχο (π.χ. αυτόν που χρησιμοποιεί ήδη ο λογιστής), γράφεται η σύνδεσή του (ένα αρχείο στο <code>supabase/functions/_shared/fiscal/</code>) και εμφανίζεται εδώ. Τα κλειδιά του μπαίνουν από κάτω.</p>
+            <p>Όταν μάθεις τον πάροχο (π.χ. αυτόν που χρησιμοποιεί ήδη ο λογιστής), ο τεχνικός τον συνδέει μία φορά και εμφανίζεται εδώ.</p>
             <p className="text-stone-600">Ρώτα τον λογιστή: ποιος πάροχος, ποιες σειρές, ΦΠΑ στα μεταφορικά, και από πότε ισχύει για την επιχείρηση η υποχρεωτική ηλεκτρονική τιμολόγηση.</p>
           </div>
           {real && (
-            <div className="card p-4 grid gap-3">
-              <h2 className="font-semibold">Κλειδιά του παρόχου</h2>
+            <details className="card p-4">
+              <summary className="cursor-pointer font-semibold">🔧 Για τον τεχνικό: κλειδιά του παρόχου</summary>
+              <div className="grid gap-3 mt-3">
               <SecretField companyId={company.id} name={`fiscal_${form.provider}_key`} label="API key" saved={names[`fiscal_${form.provider}_key`]} onSaved={reload} />
               <SecretField companyId={company.id} name={`fiscal_${form.provider}_user`} label="Χρήστης / subscription (αν ζητά)" saved={names[`fiscal_${form.provider}_user`]} onSaved={reload} />
-            </div>
+              <p className="text-xs text-stone-500">Η σύνδεση του παρόχου: ένα αρχείο στο <code>supabase/functions/_shared/fiscal/</code>.</p>
+              </div>
+            </details>
           )}
         </div>
       </div>

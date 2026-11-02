@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EXAMPLES } from './examples'
+import { EXAMPLES, TRY_THESE } from './examples'
 import { interpret } from './interpret'
 import { describe as describeCmd } from './describe'
 import type { Command, CommandKind, InterpretContext, Interpretation, VoicePhraseRule } from './types'
@@ -138,5 +138,11 @@ describe.each(EXAMPLES.map((s) => [s.section]))('%s', (section) => {
     expect(JSON.stringify(r.command)).not.toMatch(/"id":null/)
     expect(describeCmd(r, ctx)).not.toMatch(/^Δεν κατάλαβα/)
     KEY[x.say]?.(r.command)
+  })
+})
+
+describe('τα παραδείγματα κάτω από το μικρόφωνο', () => {
+  it.each(TRY_THESE.map((t) => [t.say, t.kind] as const))('%s → %s', (say, kind) => {
+    expect(interpret(say, CTX).command.kind).toBe(kind)
   })
 })

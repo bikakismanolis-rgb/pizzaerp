@@ -9,7 +9,7 @@ export interface ComboOption {
 /**
  * Απλό searchable dropdown: γράφεις και φιλτράρει, Enter/κλικ επιλέγει.
  */
-export function Combo({ options, value, onChange, placeholder = 'Αναζήτηση...', disabled, autoFocus, className = '' }: {
+export function Combo({ options, value, onChange, placeholder = 'Αναζήτηση...', disabled, autoFocus, className = '', create }: {
   options: ComboOption[]
   value: string | null
   onChange: (id: string | null) => void
@@ -17,6 +17,8 @@ export function Combo({ options, value, onChange, placeholder = 'Αναζήτη�
   disabled?: boolean
   autoFocus?: boolean
   className?: string
+  /** «+ Νέος προμηθευτής «Χ»»: φτιάχνει από ό,τι γράφτηκε και επιστρέφει το id */
+  create?: { label: (text: string) => string; run: (text: string) => Promise<string | null> }
 }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
@@ -44,6 +46,15 @@ export function Combo({ options, value, onChange, placeholder = 'Αναζήτη�
     return options.filter((o) => norm(o.label).includes(q) || (o.sub && norm(o.sub).includes(q))).slice(0, 50)
   }, [options, text])
 
+  const [creating, setCreating] = useState(false)
+  const typed = text.trim()
+  const canCreate = !!create && typed.length >= 2 && !options.some((o) => norm(o.label) === norm(typed))
+  const doCreate = async () => {
+    if (!create || creating) return
+    setCreating(true)
+    try { const id = await create.run(typed); if (id) { onChange(id); setOpen(false) } } finally { setCreating(false) }
+  }
+
   const pick = (o: ComboOption | null) => {
     onChange(o ? o.id : null)
     setOpen(false)
@@ -63,7 +74,7 @@ export function Combo({ options, value, onChange, placeholder = 'Αναζήτη�
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => Math.min(h + 1, filtered.length - 1)) }
           else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)) }
-          else if (e.key === 'Enter') { e.preventDefault(); if (filtered[hi]) pick(filtered[hi]) }
+          else if (e.key === 'Enter') { e.preventDefault(); if (filtered[hi]) pick(filtered[hi]); else if (canCreate) void doCreate() }
           else if (e.key === 'Escape') { setOpen(false) }
         }}
       />
@@ -74,7 +85,7 @@ export function Combo({ options, value, onChange, placeholder = 'Αναζήτη�
               (καθαρισμός επιλογής)
             </div>
           )}
-          {filtered.length === 0 && <div className="px-3 py-2 text-sm text-stone-500">Δεν βρέθηκε</div>}
+          {filtered.length === 0 && !canCreate && <div className="px-3 py-2 text-sm text-stone-500">Δεν βρέθηκε</div>}
           {filtered.map((o, i) => (
             <div
               key={o.id}
@@ -86,6 +97,12 @@ export function Combo({ options, value, onChange, placeholder = 'Αναζήτη�
               {o.sub && <div className="text-xs text-stone-500">{o.sub}</div>}
             </div>
           ))}
+          {canCreate && (
+            <div role="button" className="px-3 py-3 text-base font-medium text-red-700 cursor-pointer border-t border-stone-200 hover:bg-red-50"
+              onMouseDown={(e) => { e.preventDefault(); void doCreate() }}>
+              {creating ? 'Περίμενε…' : create!.label(typed)}
+            </div>
+          )}
         </div>
       )}
     </div>

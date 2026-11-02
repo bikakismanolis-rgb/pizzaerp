@@ -56,7 +56,7 @@ export function SiteCustomers() {
   if (rows === 'missing') {
     return (
       <div>
-        <PageTitle title="Πελάτες site" />
+        <PageTitle title="Πελάτες της σελίδας" />
         <div className="card p-4 text-sm">Η βάση δεν έχει ακόμα αυτή τη λίστα. Χρειάζεται το <code>supabase/migrations/0006_pay_fiscal.sql</code> (βλ. README).</div>
       </div>
     )
@@ -64,7 +64,7 @@ export function SiteCustomers() {
 
   return (
     <div>
-      <PageTitle title="Πελάτες site">
+      <PageTitle title="Πελάτες της σελίδας">
         <Link to="/orders" className="btn-secondary">Παραγγελίες</Link>
       </PageTitle>
       <ErrorBox text={error} />

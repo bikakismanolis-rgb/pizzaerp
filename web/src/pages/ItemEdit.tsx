@@ -1,15 +1,18 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useCompanyId } from '../context/CompanyContext'
 import { useMaster } from '../context/MasterData'
 import { errMsg, supabase } from '../lib/supabase'
 import type { Bom, BomLine, Item, ItemType } from '../lib/types'
 import { ITEM_TYPE_LABEL, UNITS, VAT_RATES } from '../lib/labels'
-import { fmtCost, parseAliases, round, toNum } from '../lib/format'
+import { fmtCost, fmtMoney, parseAliases, round, toNum } from '../lib/format'
+import { grossPrice } from '../lib/online'
 import { Confirm, ErrorBox, Field, NumInput, PageTitle, Spinner, useToast } from '../components/ui'
 import { ItemPicker } from '../components/Pickers'
 
 interface BomLineDraft { key: number; component_item_id: string | null; qty: string }
+
+const ITEM_PREFIX: Record<ItemType, string> = { raw: 'ΠΥ', semi: 'ΗΜ', finished: 'ΠΡ' }
 
 const emptyItem = (company_id: string): Omit<Item, 'id'> => ({
   company_id, code: '', name: '', item_type: 'raw', category: null, unit: 'kg', vat_rate: 13, sale_price: 0,
@@ -33,6 +36,18 @@ export function ItemEdit() {
   const [askDelete, setAskDelete] = useState(false)
   const [seq, setSeq] = useState(1)
   const [aliasText, setAliasText] = useState('')
+
+  // νέο είδος: ο κωδικός μπαίνει μόνος του (ΠΥ-004, ΠΡ-012…), αλλάζει αν θες
+  const autoCode = useRef('')
+  useEffect(() => {
+    if (!isNew) return
+    const prefix = ITEM_PREFIX[item.item_type]
+    const max = items.reduce((m, i) => { const r = new RegExp(`^${prefix}-(\\d+)$`).exec(i.code); return r ? Math.max(m, Number(r[1])) : m }, 0)
+    const code = `${prefix}-${String(max + 1).padStart(3, '0')}`
+    const prev = autoCode.current
+    autoCode.current = code
+    setItem((s) => (s.code === '' || s.code === prev ? { ...s, code } : s))
+  }, [isNew, item.item_type, items])
 
   const newLine = (): BomLineDraft => { setSeq((s) => s + 1); return { key: seq, component_item_id: null, qty: '' } }
 
@@ -174,7 +189,7 @@ export function ItemEdit() {
     <form onSubmit={submit}>
       <PageTitle title={isNew ? 'Νέο είδος' : item.name}>
         <Link to="/items" className="btn-secondary">Πίσω</Link>
-        {!isNew && <button type="button" className="btn-danger" onClick={() => setAskDelete(true)} disabled={busy}>Διαγραφή</button>}
+        {!isNew && <button type="button" className="btn-danger" onClick={() => setAskDelete(true)} disabled={busy}>Σβήσε</button>}
         <button className="btn-primary" disabled={busy || !item.code.trim() || !item.name.trim()}>Αποθήκευση</button>
       </PageTitle>
       <ErrorBox text={error} />
@@ -190,17 +205,8 @@ export function ItemEdit() {
               {(['raw', 'semi', 'finished'] as ItemType[]).map((t) => <option key={t} value={t}>{ITEM_TYPE_LABEL[t]}</option>)}
             </select>
           </Field>
-          <Field label="Κωδικός">
-            <input className="input" required value={item.code} onChange={(e) => set('code', e.target.value)} placeholder={item.item_type === 'raw' ? 'π.χ. ΠΥ-001' : item.item_type === 'semi' ? 'π.χ. ΗΜ-001' : 'π.χ. ΠΡ-001'} />
-          </Field>
           <Field label="Όνομα" className="sm:col-span-2">
             <input className="input" required value={item.name} onChange={(e) => set('name', e.target.value)} autoFocus={isNew} />
-          </Field>
-          <Field label="Άλλα ονόματα (πώς το λέτε)" className="sm:col-span-2">
-            <input className="input" value={aliasText} onChange={(e) => setAliasText(e.target.value)} placeholder="χωρισμένα με κόμμα, π.χ. σκέτη, απλή" />
-          </Field>
-          <Field label="Κατηγορία (προαιρετικό)">
-            <input className="input" value={item.category ?? ''} onChange={(e) => set('category', e.target.value)} placeholder="π.χ. Τυριά, Αλλαντικά, Πίτσες" />
           </Field>
           <Field label="Μονάδα μέτρησης">
             <select className="input" value={item.unit} onChange={(e) => set('unit', e.target.value)}>
@@ -213,9 +219,7 @@ export function ItemEdit() {
             </select>
           </Field>
           {item.item_type === 'finished' && (
-            <Field label="Τιμή πώλησης (γενική, χωρίς ΦΠΑ)">
-              <NumInput value={item.sale_price} onChange={(v) => set('sale_price', v as unknown as number)} min={0} />
-            </Field>
+            <PriceWithVat net={item.sale_price} vat={toNum(item.vat_rate)} onNet={(v) => set('sale_price', v)} />
           )}
           {item.item_type === 'finished' && (
             <label className="text-sm flex items-center gap-2 sm:col-span-2 mt-1">
@@ -224,31 +228,11 @@ export function ItemEdit() {
               <span>Φτιάχνεται κατά παραγγελία (λιανική): η πώληση καταναλώνει αυτόματα τη συνταγή</span>
             </label>
           )}
-          {item.item_type === 'finished' && hasKinds && (
-            <>
-              <label className="text-sm flex items-start gap-2 sm:col-span-2">
-                <input type="checkbox" className="mt-1" checked={!!item.is_extra} disabled={!!item.is_service}
-                  onChange={(e) => set('is_extra', e.target.checked)} />
-                <span>
-                  Είναι extra (μπαίνει πάνω σε πίτσα, π.χ. «Extra μοτσαρέλα»)
-                  <span className="block text-xs text-stone-500">Στο site το διαλέγει ο πελάτης πάνω στις πίτσες «κατά παραγγελία». Με συνταγή και «κατά παραγγελία» γράφεται και η κατανάλωση.</span>
-                </span>
-              </label>
-              <label className="text-sm flex items-start gap-2 sm:col-span-2">
-                <input type="checkbox" className="mt-1" checked={!!item.is_service}
-                  onChange={(e) => setItem((s) => ({ ...s, is_service: e.target.checked, ...(e.target.checked ? { make_to_order: false, is_extra: false } : {}) }))} />
-                <span>
-                  Υπηρεσία χωρίς απόθεμα (π.χ. μεταφορικά)
-                  <span className="block text-xs text-stone-500">Δεν κινεί αποθήκη· μπαίνει στην πώληση και στο παραστατικό με τον ΦΠΑ του.</span>
-                </span>
-              </label>
-            </>
-          )}
           {item.item_type === 'finished' && hasOnline && (
             <>
               <label className="text-sm flex items-center gap-2 sm:col-span-2">
                 <input type="checkbox" checked={!!item.online} onChange={(e) => set('online', e.target.checked)} />
-                <span>Στο site (φαίνεται στη σελίδα online παραγγελιών)</span>
+                <span>Φαίνεται στη σελίδα παραγγελιών</span>
               </label>
               {item.online && (
                 <Field label="Περιγραφή για τον πελάτη (προαιρετικό)" className="sm:col-span-2">
@@ -280,6 +264,38 @@ export function ItemEdit() {
           <Field label={`Ελάχιστο απόθεμα (${item.unit}, προαιρετικό)`}>
             <NumInput value={item.min_stock ?? ''} onChange={(v) => set('min_stock', v as unknown as number)} min={0} />
           </Field>
+          <details className="sm:col-span-2 border-t border-stone-200 pt-2" open={!isNew && (!!item.category || aliasText.trim() !== '' || !!item.is_extra || !!item.is_service || !item.is_active)}>
+            <summary className="cursor-pointer font-medium py-1">Περισσότερα (κωδικός, κατηγορία, άλλα ονόματα…)</summary>
+            <div className="grid gap-3 sm:grid-cols-2 mt-2">
+          <Field label="Κωδικός">
+            <input className="input" required value={item.code} onChange={(e) => set('code', e.target.value)} placeholder={item.item_type === 'raw' ? 'π.χ. ΠΥ-001' : item.item_type === 'semi' ? 'π.χ. ΗΜ-001' : 'π.χ. ΠΡ-001'} />
+          </Field>
+          <Field label="Κατηγορία (προαιρετικό)">
+            <input className="input" value={item.category ?? ''} onChange={(e) => set('category', e.target.value)} placeholder="π.χ. Τυριά, Αλλαντικά, Πίτσες" />
+          </Field>
+          <Field label="Άλλα ονόματα (πώς το λέτε)" className="sm:col-span-2">
+            <input className="input" value={aliasText} onChange={(e) => setAliasText(e.target.value)} placeholder="χωρισμένα με κόμμα, π.χ. σκέτη, απλή" />
+          </Field>
+          {item.item_type === 'finished' && hasKinds && (
+            <>
+              <label className="text-sm flex items-start gap-2 sm:col-span-2">
+                <input type="checkbox" className="mt-1" checked={!!item.is_extra} disabled={!!item.is_service}
+                  onChange={(e) => set('is_extra', e.target.checked)} />
+                <span>
+                  Είναι extra (μπαίνει πάνω σε πίτσα, π.χ. «Extra μοτσαρέλα»)
+                  <span className="block text-xs text-stone-500">Στη σελίδα παραγγελιών το διαλέγει ο πελάτης πάνω στις πίτσες «κατά παραγγελία». Με συνταγή και «κατά παραγγελία» γράφεται και η κατανάλωση.</span>
+                </span>
+              </label>
+              <label className="text-sm flex items-start gap-2 sm:col-span-2">
+                <input type="checkbox" className="mt-1" checked={!!item.is_service}
+                  onChange={(e) => setItem((s) => ({ ...s, is_service: e.target.checked, ...(e.target.checked ? { make_to_order: false, is_extra: false } : {}) }))} />
+                <span>
+                  Υπηρεσία χωρίς απόθεμα (π.χ. μεταφορικά)
+                  <span className="block text-xs text-stone-500">Δεν κινεί αποθήκη· μπαίνει στην πώληση και στο παραστατικό με τον ΦΠΑ του.</span>
+                </span>
+              </label>
+            </>
+          )}
           {!isNew && (
             <Field label="Μέσο κόστος (υπολογίζεται αυτόματα)">
               <input className="input" disabled value={fmtCost(item.avg_cost) + ' / ' + item.unit} />
@@ -289,8 +305,10 @@ export function ItemEdit() {
             <textarea className="input" rows={2} value={item.notes ?? ''} onChange={(e) => set('notes', e.target.value)} />
           </Field>
           <label className="text-sm flex items-center gap-2 sm:col-span-2">
-            <input type="checkbox" checked={item.is_active} onChange={(e) => set('is_active', e.target.checked)} /> Ενεργό
+            <input type="checkbox" checked={item.is_active} onChange={(e) => set('is_active', e.target.checked)} /> Το χρησιμοποιούμε (αλλιώς κρύβεται από τις λίστες)
           </label>
+            </div>
+          </details>
         </div>
 
         {hasBom && (
@@ -328,7 +346,13 @@ export function ItemEdit() {
                         />
                         {c && <div className="text-xs text-stone-500 mt-0.5">{c.unit} · μέσο κόστος {fmtCost(c.avg_cost)}</div>}
                       </td>
-                      <td><NumInput value={l.qty} onChange={(v) => setLines(lines.map((x, i) => (i === idx ? { ...x, qty: v } : x)))} min={0} /></td>
+                      <td>
+                        <NumInput value={l.qty} onChange={(v) => setLines(lines.map((x, i) => (i === idx ? { ...x, qty: v } : x)))} min={0} />
+                        {/* 0,12 kg = 120 γραμμάρια: πιο εύκολο να το ελέγξεις */}
+                        {c && (c.unit === 'kg' || c.unit === 'L') && toNum(l.qty) > 0 && toNum(l.qty) < 1 && (
+                          <div className="text-sm text-stone-600 text-right">= {round(toNum(l.qty) * 1000, 1)} {c.unit === 'kg' ? 'γραμμάρια' : 'ml'}</div>
+                        )}
+                      </td>
                       <td className="num text-xs">{c ? fmtCost(toNum(l.qty) * Number(c.avg_cost)) : ''}</td>
                       <td><button type="button" className="btn-ghost px-2 py-1" onClick={() => setLines(lines.filter((_, i) => i !== idx))}>✕</button></td>
                     </tr>
@@ -351,5 +375,38 @@ export function ItemEdit() {
 
       <Confirm open={askDelete} title="Διαγραφή είδους" text={`Να διαγραφεί το είδος "${item.name}";`} onYes={doDelete} onNo={() => setAskDelete(false)} danger />
     </form>
+  )
+}
+
+/**
+ * Τιμή όπως στον κατάλογο (με ΦΠΑ): αυτή ξέρει ο ιδιοκτήτης. Γράφεται χωρίς
+ * ΦΠΑ με 4 δεκαδικά, ώστε να ξαναβγαίνει ακριβώς η ίδια (8,00 → 7,0796).
+ * Αν αλλάξει ο ΦΠΑ, μένει ίδια η τιμή καταλόγου.
+ */
+function PriceWithVat({ net, vat, onNet }: { net: number | string; vat: number; onNet: (v: number) => void }) {
+  const fromNet = () => { const n = toNum(net); return n > 0 ? String(grossPrice(n, vat)).replace('.', ',') : '' }
+  const [text, setText] = useState(fromNet)
+  const [lastVat, setLastVat] = useState(vat)
+  // άλλαξε ο ΦΠΑ: ίδια τιμή καταλόγου, νέα τιμή χωρίς ΦΠΑ
+  useEffect(() => {
+    if (vat === lastVat) return
+    setLastVat(vat)
+    const g = toNum(text)
+    if (g > 0) onNet(round(g / (1 + vat / 100), 4))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vat])
+  // φόρτωσε άλλο είδος: από την αποθηκευμένη τιμή
+  useEffect(() => {
+    const g = toNum(text)
+    const n = toNum(net)
+    if (Math.abs(round(g / (1 + vat / 100), 4) - n) > 0.00005) setText(fromNet())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [net])
+  const g = toNum(text)
+  return (
+    <Field label="Τιμή στον κατάλογο (με ΦΠΑ)">
+      <NumInput value={text} min={0} label="Τιμή με ΦΠΑ" onChange={(v) => { setText(v); onNet(toNum(v) > 0 ? round(toNum(v) / (1 + vat / 100), 4) : 0) }} />
+      {g > 0 && <span className="block text-sm text-stone-600 mt-1">Χωρίς ΦΠΑ {vat}%: {fmtMoney(round(g / (1 + vat / 100), 4))}</span>}
+    </Field>
   )
 }

@@ -1101,14 +1101,16 @@ export async function todaySummary(env: Pick<ExecEnv, 'companyId' | 'today' | 'i
   for (const d of docs) {
     const ch = d.channel ?? 'wholesale'
     for (const l of d.doc_line) {
+      gross += Number(l.gross)
+      // τα μεταφορικά δεν είναι τεμάχια (μετράνε μόνο στα λεφτά)
+      if (env.items.find((i) => i.id === l.item_id)?.is_service) continue
       const q = Number(l.qty)
       byCh.set(ch, (byCh.get(ch) ?? 0) + q)
       byItem.set(l.item_id, (byItem.get(l.item_id) ?? 0) + q)
       qty += q
-      gross += Number(l.gross)
     }
   }
-  if (qty === 0) return 'Σήμερα δεν έχουν περαστεί πωλήσεις.'
+  if (qty === 0 && gross === 0) return 'Σήμερα δεν έχουν περαστεί πωλήσεις.'
   const label = (c: string) => CHANNEL_LABEL[c as keyof typeof CHANNEL_LABEL] ?? c
   const chs = [...byCh].map(([c, q]) => `${label(c)} ${fmtQty(q)}`).join(', ')
   const top = [...byItem].sort((a, b) => b[1] - a[1]).slice(0, 6)

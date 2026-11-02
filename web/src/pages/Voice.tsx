@@ -6,7 +6,7 @@ import type { Item, ItemType } from '../lib/types'
 import type { Command, EntityRef, InterpretContext, Interpretation, Interpreter, QtyLine, TallyChannel, VoicePhraseRule } from '../lib/voice/types'
 import { interpret, localInterpreter, qtyForItem, warmUp } from '../lib/voice/interpret'
 import { describe } from '../lib/voice/describe'
-import { EXAMPLES } from '../lib/voice/examples'
+import { EXAMPLES, TRY_THESE } from '../lib/voice/examples'
 import { phraseKey } from '../lib/voice/normalize'
 import { cancelSpeech, speak, useSpeechRecognition } from '../lib/voice/speech'
 import {
@@ -109,6 +109,22 @@ interface LogEntry {
   undo?: () => Promise<void>
   state: 'done' | 'undoing' | 'undone'
   error?: string
+  /** από πριν την ανανέωση της σελίδας: χωρίς κουμπί αναίρεσης */
+  restored?: boolean
+}
+
+/** «Τι πέρασε» της ημέρας: μένει και μετά από ανανέωση (χωρίς την αναίρεση) */
+const logKey = (companyId: string) => `pizza-erp.voice-log.${companyId}.${new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Athens' })}`
+function readLog(companyId: string): LogEntry[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(logKey(companyId)) ?? '[]') as { id: number; at: string; heard: string; message: string; state: LogEntry['state'] }[]
+    return raw.map((e) => ({ ...e, at: new Date(e.at), state: e.state === 'undoing' ? 'done' : e.state, restored: true }))
+  } catch { return [] }
+}
+function writeLog(companyId: string, log: LogEntry[]) {
+  try {
+    localStorage.setItem(logKey(companyId), JSON.stringify(log.slice(0, 30).map(({ id, at, heard, message, state }) => ({ id, at: at.toISOString(), heard, message, state }))))
+  } catch { /* ignore */ }
 }
 
 type Tone = 'ok' | 'info' | 'warn' | 'err'
@@ -148,7 +164,8 @@ export function Voice() {
   const [answer, setAnswer] = useState<Answer | null>(null)
   const [thinking, setThinking] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [log, setLog] = useState<LogEntry[]>([])
+  const [log, setLog] = useState<LogEntry[]>(() => readLog(companyId))
+  useEffect(() => { if (companyId) writeLog(companyId, log) }, [companyId, log])
   const [running, setRunningState] = useState<RunningState | null>(null)
   const runningRef = useRef<RunningState | null>(null)
   const setRunning = (r: RunningState) => { runningRef.current = r; setRunningState(r) }
@@ -167,7 +184,9 @@ export function Voice() {
   const queuedRef = useRef<string | null>(null)
   /** ξανά κατανόηση της ίδιας φράσης όταν φορτώσουν τα είδη (π.χ. μετά από «το σακί έχει 25 κιλά») */
   const reReadRef = useRef<string | null>(null)
+  // μετά από τα «Τι πέρασε» που ξαναφορτώθηκαν (μοναδικά id)
   const logSeq = useRef(0)
+  if (logSeq.current === 0 && log.length) logSeq.current = Math.max(...log.map((e) => e.id))
   // το είδος της τελευταίας μέτρησης (για «κι άλλα 2 κιλά» χωρίς είδος)
   const lastCountRef = useRef<{ itemId: string; at: number } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -815,6 +834,17 @@ export function Voice() {
               : sr.supported ? <span className="text-stone-500">Πάτα και πες π.χ. «efood δύο μαργαρίτες»</span>
               : <span className="text-stone-600 text-sm">Ο browser δεν έχει αναγνώριση φωνής. Πάτα το μικρόφωνο του πληκτρολογίου και μίλα στο κουτί κάτω.</span>}
           </div>
+          {!live && ready && (
+            <div className="mt-2 w-full max-w-xl">
+              <div className="text-sm text-stone-600 text-center mb-1">Ή πάτα ένα για να δεις πώς δουλεύει:</div>
+              <div className="flex flex-wrap justify-center gap-2">
+                {TRY_THESE.map(({ say: t }) => (
+                  <button key={t} type="button" className="rounded-full border border-stone-300 bg-white px-3 min-h-11 text-sm text-stone-800 hover:bg-stone-50"
+                    onClick={() => { setInput(t); inputRef.current?.focus() }}>«{t}»</button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -881,7 +911,7 @@ export function Voice() {
                     {e.state === 'undoing' ? '…' : 'Αναίρεση'}
                   </button>
                 )}
-                {!e.undo && <span className="text-[11px] text-stone-400 shrink-0 mt-1">χωρίς αναίρεση</span>}
+                {!e.undo && <span className="text-xs text-stone-500 shrink-0 mt-1 max-w-[9rem] text-right">{e.restored && e.state !== 'undone' ? 'αναίρεση: από τη λίστα του, «Διόρθωση»' : 'χωρίς αναίρεση'}</span>}
               </li>
             ))}
           </ul>

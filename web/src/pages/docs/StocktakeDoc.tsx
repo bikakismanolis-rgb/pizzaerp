@@ -53,7 +53,8 @@ export function StocktakeDoc() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.id, doc?.status, ed.ver])
 
-  const activeItems = useMemo(() => items.filter((i) => i.is_active && (!typeFilter || i.item_type === typeFilter)), [items, typeFilter])
+  // όχι υπηρεσίες (μεταφορικά): δεν έχουν απόθεμα να μετρηθεί
+  const activeItems = useMemo(() => items.filter((i) => i.is_active && !i.is_service && (!typeFilter || i.item_type === typeFilter)), [items, typeFilter])
 
   const setCounted = (itemId: string, v: string) => {
     setRows((m) => {

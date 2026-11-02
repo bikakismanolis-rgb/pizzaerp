@@ -4,7 +4,7 @@ import { useMaster } from '../../context/MasterData'
 import { supabase } from '../../lib/supabase'
 import type { Doc, DocType } from '../../lib/types'
 import { CHANNEL_LABEL } from '../../lib/labels'
-import { fmtCost, fmtDate, fmtMoney, round, toNum, today } from '../../lib/format'
+import { fmtCost, fmtDate, fmtMoney, fmtQty, round, toNum, today } from '../../lib/format'
 import { ErrorBox, Field, NumInput, Spinner, useNarrow } from '../../components/ui'
 import { ItemPicker, PartnerPicker } from '../../components/Pickers'
 import { FiscalBox } from '../../components/FiscalBox'
@@ -41,6 +41,25 @@ export function TradeDoc({ docType }: { docType: DocType }) {
   // ανοιχτές πωλήσεις ημέρας: μόνο προβολή (οι γραμμές αλλάζουν από άλλες οθόνες/συσκευές)
   const running = ed.runningOpen
   const locked = posted || running
+
+  // πώληση έτοιμων από την αποθήκη (κατεψυγμένες, αναψυκτικά): πόσα έχουμε
+  const [onHand, setOnHand] = useState<Map<string, number>>(new Map())
+  useEffect(() => {
+    if (!isSale || locked || !ed.companyId) return
+    let alive = true
+    supabase.from('v_stock_balance').select('item_id, on_hand').eq('company_id', ed.companyId)
+      .then(({ data }) => { if (alive) setOnHand(new Map(((data ?? []) as { item_id: string; on_hand: number }[]).map((r) => [r.item_id, Number(r.on_hand)]))) })
+    return () => { alive = false }
+  }, [isSale, locked, ed.companyId])
+  /** «Στην αποθήκη έχουμε μόνο 12»: για ό,τι δεν φτιάχνεται τη στιγμή */
+  const shortNote = (itemId: string | null, qty: string): string | null => {
+    if (!isSale || locked || !itemId) return null
+    const it = itemById.get(itemId)
+    if (!it || it.make_to_order || it.is_service || !onHand.has(itemId)) return null
+    const have = onHand.get(itemId) ?? 0
+    const want = toNum(qty)
+    return want > 0 && want > have ? `Στην αποθήκη ${have > 0 ? `έχουμε μόνο ${fmtQty(have)}` : 'δεν έχουμε'} ${it.unit}. Περνάει, αλλά το απόθεμα θα βγει μείον.` : null
+  }
 
   const nextKey = () => { const k = seq; setSeq(seq + 1); return k }
   const addRow = () => setRows((r) => [...r, { key: nextKey(), item_id: null, qty: '', unit_price: '', discount_pct: '0', vat_rate: '13' }])
@@ -159,7 +178,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
       <div className="card p-4 mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Field label="Ημερομηνία"><input type="date" className="input" value={date} disabled={locked} onChange={(e) => setDate(e.target.value)} /></Field>
         <Field label={isSale ? 'Πελάτης' : 'Προμηθευτής'} className={isSale ? '' : 'lg:col-span-2'}>
-          <PartnerPicker kind={isSale ? 'customer' : 'supplier'} value={partnerId} disabled={locked}
+          <PartnerPicker kind={isSale ? 'customer' : 'supplier'} value={partnerId} disabled={locked} allowCreate
             onChange={(v) => { setPartnerId(v); if (isSale) rows.forEach((r) => applyPrice(r.key, r.item_id)) }} />
         </Field>
         {isSale && (
@@ -220,6 +239,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
                       <NumInput value={r.vat_rate} disabled={locked} label="ΦΠΑ %" onChange={(v) => setRow(idx, { vat_rate: v })} /></label>
                   </div>
                 </details>
+                {shortNote(r.item_id, r.qty) && <div className="text-sm text-amber-800">⚠️ {shortNote(r.item_id, r.qty)}</div>}
               </li>
             )
           })}
@@ -249,6 +269,7 @@ export function TradeDoc({ docType }: { docType: DocType }) {
                     <ItemPicker value={r.item_id} types={pickerTypes as unknown as undefined} disabled={locked}
                       onChange={(v) => { setRows((rs) => rs.map((x, i) => i === idx ? { ...x, item_id: v } : x)); if (isSale) applyPrice(r.key, v); else setCost(r.key, v) }} />
                     {it && <div className="text-xs text-stone-500 mt-0.5">{it.unit}{!isSale && ` · μέσο κόστος ${fmtCost(it.avg_cost)}`}</div>}
+                    {shortNote(r.item_id, r.qty) && <div className="text-sm text-amber-800 mt-0.5">⚠️ {shortNote(r.item_id, r.qty)}</div>}
                   </td>
                   <td><NumInput value={r.qty} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, qty: v } : x))} /></td>
                   <td><NumInput value={r.unit_price} disabled={locked} onChange={(v) => setRows((rs) => rs.map((x, i) => i === idx ? { ...x, unit_price: v } : x))} /></td>
